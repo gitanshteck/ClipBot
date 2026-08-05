@@ -1,0 +1,266 @@
+{
+  "_comment": "ClipBot settings. Edit freely; every value can also be overridden by a CLIPBOT_* env var (see clipbot/config.py).",
+
+  "work_root": "work",
+
+  "tools": {
+    "_comment": "Paths to external binaries. A bare name is looked up on PATH; a relative path is resolved against the project root, so the vendored ffmpeg build below works whatever directory you start from. ffmpeg is not on this machine's PATH, which is why these point at the bundled copy rather than saying just \"ffmpeg\".",
+    "ffmpeg": "ffmpeg-2026-07-30-git-2ae2413488-essentials_build/ffmpeg-2026-07-30-git-2ae2413488-essentials_build/bin/ffmpeg.exe",
+    "ffprobe": "ffmpeg-2026-07-30-git-2ae2413488-essentials_build/ffmpeg-2026-07-30-git-2ae2413488-essentials_build/bin/ffprobe.exe",
+    "yt_dlp": "yt-dlp",
+    "kick_dl": "kick-dl"
+  },
+
+  "download": {
+    "_comment": "yt-dlp format selector. Kick tops out at 720p60. 'best' proved unreliable here - a real run selected 160p despite 720p60 being offered - so the height is pinned explicitly. Check state.video_height after a download to confirm what you actually got.",
+    "format": "bv*[height<=720]+ba/b[height<=720]/best",
+    "_comment_min_height": "Warn after download if the video came back shorter than this. 160p is unusable for reviewing clips.",
+    "min_height_warn": 480,
+    "_comment_impersonate": "Required: Kick is behind Cloudflare and 403s without a browser TLS fingerprint. Set to null to disable. Needs pip install 'yt-dlp[default,curl-cffi]'.",
+    "impersonate": "chrome",
+    "_comment_fallback": "Disabled deliberately. kick-dl 2.0.0 exposes only an interactive TUI ('kick-dl start', no arguments) - there is no scriptable download command, so as a fallback it can only fail, and from a dashboard job it would hang a worker on an interactive prompt. Re-enable only if a future release adds non-interactive flags.",
+    "fallback_to_kick_dl": false
+  },
+
+  "chat": {
+    "_comment": "Stream chat, harvested from Kick and burned into reels. Pagination is by cursor, NOT by start_time: start_time returns only messages at that exact second, which looks like an empty stream. The cursor is a microsecond unix epoch and is seekable, so the harvest jumps straight to the stream's end and walks back.",
+    "_comment_bots": "Matched against sender.slug (stable) rather than the display username (changeable). Lowercase.",
+    "bots": ["botrix", "kickbot", "streamelements", "nightbot"],
+    "drop_commands": true,
+    "keep_types": ["message", "reply"],
+
+    "_comment_window": "Seconds harvested either side of the VOD. The stream-start anchor is when Kick opened the livestream record, not necessarily when recording began, so harvesting wide keeps chat.offset_seconds adjustable later without a refetch.",
+    "margin_seconds": 300,
+
+    "_comment_pacing": "A 4.6h stream on this channel was 358 messages in 15 requests / 16s, so this is cheap. The cap and the stride only matter for a far busier stream.",
+    "request_delay_ms": 300,
+    "timeout_seconds": 25,
+    "max_pages": 4000,
+    "empty_stride_seconds": 120,
+
+    "_comment_sync": "chat_offset_seconds correction: message offsets are stored relative to when Kick opened the livestream record, which measurably precedes the VOD's own frame 0 (26.6s, on this channel). estimate_offset() cross-correlates chat rate against audio energy to suggest a value; on a chat this sparse (358 msgs / 4.6h) the correlation itself is under-confident (z<3), so a secondary boundary heuristic (last message vs. VOD end) is reported alongside it - prefer the boundary estimate when the correlation says it isn't confident.",
+    "sync_bin_seconds": 5.0,
+    "sync_search_range_seconds": [-60, 300],
+
+    "_comment_style": "Chat overlay rendering. font/font_regular/font_emoji default to Windows system fonts; override for other platforms.",
+    "font": "C:/Windows/Fonts/segoeuib.ttf",
+    "font_regular": "C:/Windows/Fonts/segoeui.ttf",
+    "font_emoji": "C:/Windows/Fonts/seguiemj.ttf",
+    "font_size": 30,
+    "line_spacing": 8,
+    "message_spacing": 14,
+    "padding": 22,
+    "panel_color": "#18181B",
+    "panel_opacity": 0.90,
+    "text_color": "#EFEFF1",
+    "shadow": true,
+    "max_messages": 12,
+    "max_message_chars": 200,
+    "max_messages_per_second": 4,
+    "emote_size": 34,
+    "badge_size": 22,
+    "show_badges": true
+  },
+
+  "audio": {
+    "_comment": "16 kHz mono PCM is what Whisper resamples to internally, so we do it once up front.",
+    "sample_rate": 16000,
+    "channels": 1,
+    "codec": "pcm_s16le",
+    "extension": "wav"
+  },
+
+  "transcribe": {
+    "_comment": "device 'auto' picks cuda if CTranslate2 sees a CUDA GPU, else cpu. There is no AMD/ROCm backend, so a Radeon card falls back to cpu. compute_type 'default' resolves to float16 on cuda, int8 on cpu.",
+    "model": "large-v3",
+    "device": "auto",
+    "compute_type": "default",
+    "cpu_threads": 0,
+
+    "_comment_language": "'hi' forces Hindi. Set to null to auto-detect per file - worth trying if English-heavy streams come out badly.",
+    "language": "hi",
+    "beam_size": 5,
+    "vad_filter": true,
+    "condition_on_previous_text": false,
+    "initial_prompt": null,
+
+    "_comment_confidence": "Segments are flagged low_confidence (kept, never dropped) if avg_logprob falls below the threshold OR the segment runs longer than max_segment_seconds. Calibrated on real stream audio: hallucinated windows scored -0.72..-0.90 and ran 40-64s, while good speech scored -0.23..-0.58 in 2-15s segments.",
+    "low_confidence_threshold": -0.7,
+    "max_segment_seconds": 30.0
+  },
+
+  "analyze": {
+    "_comment": "Requires ANTHROPIC_API_KEY in the environment. Note claude-sonnet-4-6 does not support schema-enforced structured outputs, so the reply is parsed from text; claude-sonnet-5 or claude-opus-5 would be drop-in upgrades.",
+    "model": "claude-sonnet-4-6",
+    "rubric_file": "config/rubric.md",
+    "prompt_template": "config/analysis_prompt.md",
+    "_comment_tokens": "Thinking tokens count against max_tokens and the stage streams, so this can be generous.",
+    "max_tokens": 32000,
+
+    "_comment_thinking": "Measured, not guessed: on a full 262-segment transcript, adaptive thinking at effort 'high' burned 32000 tokens reasoning and returned NO output text at all - two runs failed with stop_reason=max_tokens. The task is well-specified and the output schema is fixed, so thinking buys little here. Turn it back on only with effort 'low'/'medium' and watch for empty responses.",
+    "thinking": false,
+    "effort": "medium",
+
+    "_comment_warn": "Structural sanity checks only - clip length is a rubric question, so these warn rather than drop.",
+    "warn_shorter_than": 5.0,
+    "warn_longer_than": 120.0
+  },
+
+  "transliterate": {
+    "_comment": "Converts the Devanagari transcript to Hinglish (Latin script) for caption overlays - Pillow (used by captionrender.py) cannot shape Devanagari, see chatrender.py's unshaped_scripts(). Requires ANTHROPIC_API_KEY, same as analyze.",
+    "_comment_model": "A mechanical transliteration task, not a judgment call like analyze's rubric - Haiku is deliberately the default here rather than matching analyze.model.",
+    "model": "claude-haiku-4-5",
+    "max_tokens": 4096,
+    "thinking": false,
+    "_comment_batch": "Segments per API call. A multi-hour VOD can have 800+ segments; batching keeps one bad response from failing the whole transcript - a failed batch's segments just keep their original Devanagari text.",
+    "batch_size": 50
+  },
+
+  "diarize": {
+    "_comment": "Opt-in speaker diarization (clipbot/stages/diarize.py). NOT part of requirements.txt or `run` - needs `pip install -r requirements-diarize.txt` (pulls in PyTorch) and a Hugging Face access token. This machine has no CUDA, so it runs on CPU like transcribe.py's whisper model does.",
+    "model": "pyannote/speaker-diarization-3.1",
+    "device": "auto",
+    "_comment_token": "Name of the env var holding the HF access token, not the token itself.",
+    "hf_token_env": "HF_TOKEN",
+    "_comment_hints": "Leave null/0 for pyannote to infer the speaker count on its own; set num_speakers if you know it exactly, or min/max as a range hint.",
+    "num_speakers": null,
+    "min_speakers": null,
+    "max_speakers": null
+  },
+
+  "cut": {
+    "_comment": "Seconds of padding added before/after each clip range. re_encode=false is a fast stream copy but snaps the start to the nearest keyframe, so a cut can begin a second or two early; set true for frame-accurate cuts at the cost of speed and a re-encode.",
+    "pad_start": 1.0,
+    "pad_end": 1.5,
+    "re_encode": false,
+    "min_duration": 0.5,
+
+    "_comment_encode": "Only used when re_encode is true.",
+    "encoder": "libx264",
+    "preset": "veryfast",
+    "crf": 20
+  },
+
+  "reel": {
+    "_comment": "Vertical 9:16 export. Crop rects are fractions of the source frame, so a spec authored against this 720p VOD still resolves correctly if it is re-downloaded at 1080p.",
+    "canvas": "1080x1920",
+    "preset": "cam_top",
+
+    "_comment_defaults": "Measured off this channel's OBS layout: the webcam sits at x=32 y=216 320x180 in a 1280x720 frame - exactly 25% scale, 32px from the left edge. avoid_cam nudges the gameplay crop sideways just enough to clear it.",
+    "defaults": {
+      "cam": { "x": 0.025, "y": 0.30, "w": 0.25, "h": 0.25 },
+      "avoid_cam": true
+    },
+
+    "_comment_encode": "Measured on this machine: 30s of 1080x1920@60 takes 6s at veryfast, 19s at slow. Quality is worth the 19s, so this deliberately does not inherit cut.preset.",
+    "encoder": "libx264",
+    "preset_x264": "slow",
+    "crf": 19,
+    "scale_flags": "lanczos",
+    "audio_bitrate": "192k",
+    "loudnorm": false,
+
+    "blur_sigma": 9,
+    "cam_border": 4,
+    "cam_border_color": "0x19A2D2",
+
+    "_comment_upscale": "Warn when a region is scaled up more than this. A 720p source needs 2.67x for full-bleed 1080x1920, and 3.38x for a full-width webcam band.",
+    "warn_upscale_above": 1.5,
+
+    "fx": {
+      "_comment": "Clip effects. These are the values the dashboard writes when you ADD an effect - once placed, an effect carries its own numbers, so changing a default here does not retroactively alter existing clips.",
+      "_comment_time": "Effect times are stored as ABSOLUTE VOD seconds, not relative to the clip. That is what keeps a punch glued to the moment in the stream it was authored against when you later nudge the clip's in or out point - and it is why changing cut.pad_start above does not silently slide every effect in every workspace.",
+      "max_effects": 24,
+
+      "punch": { "amount": 1.18, "duration": 0.45, "ease": "step" },
+      "shake": { "amount_px": 8, "freq_hz": 12, "duration": 0.60, "decay": true },
+      "flash": { "style": "exposure", "amount": 0.55, "duration": 0.12 },
+
+      "_comment_freeze": "Freeze holds the LAST frame of the clip; the effect has no time of its own. A mid-clip freeze needs trim/concat, which re-times everything after it - a different feature, deliberately not in this one.",
+      "freeze": { "duration": 0.80 },
+
+      "_comment_speed": "Whole-clip only, and 0.5-2.0 because that is atempo's range in a single instance. A mid-clip speed ramp has the same re-timing problem as a mid-clip freeze.",
+      "speed": { "rate": 1.0 },
+
+      "sfx": { "gain_db": -3.0 },
+      "music": {
+        "gain_db": -18.0,
+        "duck": { "enabled": true, "threshold": 0.05, "ratio": 8, "attack": 20, "release": 300 }
+      },
+      "sticker": { "width": 0.30, "fade": 0.15 },
+
+      "_comment_text": "drawtext cannot render colour emoji - the chat overlay can only do it because chatrender.py draws with Pillow instead. Use a sticker for emoji. fallback_font is used when a text style names no library font; without a real font file ffmpeg asks fontconfig, which the Windows builds ship without, and the text silently does not appear.",
+      "text": {
+        "fallback_font": "C:/Windows/Fonts/segoeuib.ttf",
+        "size": 0.055,
+        "color": "#FFFFFF",
+        "border_w": 6,
+        "border_color": "black@0.9",
+        "uppercase": true
+      }
+    },
+
+    "captions": {
+      "_comment": "Hinglish caption overlay (clipbot/captionrender.py), sourced from captions.json (the transliterate stage). Off by default per clip - set clip.reel.captions.enabled to turn it on for that clip. These are the values captionrender.resolve_style() falls back to; position/size/max_lines/offset live on the per-clip spec instead (see reelspec.CAPTION_POSITIONS), same split as chat's style-here/placement-on-the-clip pattern.",
+      "font": "C:/Windows/Fonts/segoeuib.ttf",
+      "font_size": 46,
+      "line_spacing": 8,
+      "max_lines": 2,
+      "text_color": "#FFFFFF",
+      "border_w": 4,
+      "border_color": "#000000",
+      "shadow": true,
+      "uppercase": false,
+      "padding": 28
+    },
+
+    "speakers": {
+      "_comment": "Speaker avatar overlay (clipbot/speakerfx.py), sourced from speaker_map.json (manual assignment and/or the diarize stage) plus the library's speakers.json registry. Off by default per clip - set clip.reel.speakers.enabled to turn it on. mode 'appear': avatar shows only while that speaker talks. mode 'discord': every speaker who appears anywhere in the clip stays docked at their slot for the whole clip, with a coloured ring lighting up around whoever's talking.",
+      "mode": "appear",
+      "edge": "bottom",
+      "avatar_size": 0.16,
+      "gap": 0.02,
+      "ring_width_px": 6
+    },
+
+    "preview": {
+      "_comment": "Full-fidelity proxy preview: the SAME filter graph at a third of the canvas, so what you see cannot drift from what renders. Never runs automatically - the instant canvas preview remains the tool for crop work.",
+      "canvas": "360x640",
+      "preset_x264": "ultrafast",
+      "crf": 28,
+      "_comment_window": "Only the stretch the effects actually touch is rendered, padded either side and capped - confirming a 0.4s punch should not cost a 50-second encode.",
+      "max_seconds": 6.0,
+      "pad_seconds": 0.75,
+      "timeout_seconds": 60,
+      "include_chat": true,
+      "cache_max_mb": 512
+    }
+  },
+
+  "library": {
+    "_comment": "The cross-stream editing library: sound effects, stickers, fonts, saved effect chains. Lives at <work_root>/_library, a sibling of the shared _cache, so it survives cleanup deleting a workspace and is reachable from every stream. Drop files into its sfx/ music/ stickers/ fonts/ folders and hit Rescan.",
+    "dir": "",
+    "audio_extensions": [".wav", ".mp3", ".ogg", ".m4a", ".flac"],
+    "image_extensions": [".png", ".gif", ".webp", ".apng", ".jpg", ".jpeg"],
+    "font_extensions": [".ttf", ".otf"],
+    "max_asset_mb": 20,
+    "scan_max_files": 5000,
+    "_comment_missing": "A deleted asset is remembered this long, so the review page can say a sound is missing instead of an effect quietly vanishing.",
+    "missing_tombstone_days": 30,
+
+    "fetch": {
+      "_comment": "`python -m clipbot library fetch` downloads the CC0 starter pack. allow_hosts is a hard allowlist: the manifest is data, so a modified one must not be able to make ClipBot fetch from an arbitrary host. Every entry also declares a sha256, so a swapped CDN file fails cleanly instead of being substituted silently.",
+      "manifest": "config/library_starter.json",
+      "allow_hosts": ["cdn.pixabay.com", "pixabay.com", "cdn.freesound.org", "freesound.org", "raw.githubusercontent.com", "github.com"],
+      "timeout_seconds": 30
+    }
+  },
+
+  "server": {
+    "_comment": "Local dashboard. Binds loopback only - do not expose this; there is no authentication.",
+    "host": "127.0.0.1",
+    "port": 8765,
+    "open_browser": true,
+    "waveform_bins_per_second": 20
+  }
+}

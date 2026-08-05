@@ -1,0 +1,4 @@
+# Everything remote_transcribe.py needs. Deliberately just this one package -
+# no ffmpeg, no yt-dlp, no FastAPI, no Anthropic SDK. The pip wheel bundles
+# CUDA support already, so nothing else to install for GPU use.
+faster-whisper>=1.2.1

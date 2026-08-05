@@ -1,0 +1,21 @@
+# Stage 1: download
+# The curl-cffi extra is REQUIRED, not optional: Kick sits behind Cloudflare and
+# returns 403 to yt-dlp's normal HTTP client. --impersonate chrome fixes it.
+yt-dlp[default,curl-cffi]>=2025.10.14
+
+# The kick-dl fallback is a Node CLI, NOT a pip package:
+#     npm install -g kick-dl
+# Do not `pip install kick-dl` - the PyPI package of that name is an unrelated,
+# stale (0.1.0) yt-dlp wrapper that pins yt-dlp back to 2024.12.23.
+
+# Stage 3: transcription
+faster-whisper>=1.2.1
+
+# Stage 4: Claude analysis
+anthropic>=0.120.2
+
+# Chat overlay rasterisation (chatrender.py) and sticker dimension probing
+# (library.py). This was already a hard requirement of the chat overlay and
+# simply went undeclared - both modules import it lazily and print an install
+# hint, which is why a fresh install got as far as rendering before noticing.
+Pillow>=10

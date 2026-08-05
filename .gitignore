@@ -1,0 +1,19 @@
+work/
+output/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Vendored ffmpeg build (~300MB of binaries) - see README.md for how to get
+# one; config/settings.json's tools.ffmpeg/tools.ffprobe point at it locally.
+ffmpeg-*-essentials_build/
+
+# Stale, unused - see CLAUDE.md's repo map note in server/static.
+*.bak
+
+# Claude Code: settings.json (shared) is tracked; local-only overrides and
+# session/runtime state are not.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

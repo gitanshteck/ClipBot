@@ -1,0 +1,479 @@
+{
+  "version": 1,
+
+  "_comment": "Starter pack manifest for the cross-stream editing library. This file is METADATA ONLY - no audio or images are committed to this repository. `python -m clipbot library fetch` reads it and downloads into work/_library/, which is gitignored.",
+
+  "_comment_empty": "The assets list ships empty on purpose. Every entry must carry a REAL sha256, and a wrong one is worse than a missing entry: fetch would reject the file and you would be debugging a hash instead of editing a clip. Pixabay and Freesound both hand out their download URLs from client-side API calls rather than the page HTML, so the URLs cannot be harvested reliably or durably - and a manifest full of guessed hashes would fail on every single entry. Add entries yourself with the recipe below; it takes about fifteen seconds each.",
+
+  "_comment_howto": [
+    "1. Find a CC0 / public-domain sound. Good sources, all free for monetised streams:",
+    "     https://pixabay.com/sound-effects/   (Pixabay Content Licence - no attribution, commercial OK)",
+    "     https://freesound.org/  (filter the search by Creative Commons 0)",
+    "   Search terms that cover most stream-reel edits: vine boom, airhorn, bruh, bonk,",
+    "   record scratch, whoosh, riser, impact, sub drop, error, crowd cheer, sad trombone.",
+    "2. Download it and drop it straight into work/_library/sfx/ - that alone is enough to",
+    "   start using it. This manifest only exists so a library can be rebuilt from scratch",
+    "   on another machine.",
+    "3. To record it here, get the hash and size with:",
+    "     python -m clipbot library hash <path-to-file>",
+    "   then paste the printed block into the assets array below and fill in url + license.",
+    "4. `python -m clipbot library fetch` will then reproduce it anywhere, verifying the",
+    "   hash as it downloads. `python -m clipbot library licenses` prints provenance for",
+    "   everything in the library."
+  ],
+
+  "_comment_hosts": "url must be https and its host must appear in library.fetch.allow_hosts in config/settings.json. That allowlist exists because this file is data: without it, editing a manifest would be enough to make ClipBot fetch from anywhere.",
+
+  "_schema": {
+    "slug": "short unique id used by --only, e.g. \"airhorn\"",
+    "kind": "sfx | music | sticker | font",
+    "url": "https URL on an allowlisted host",
+    "filename": "name it lands under, e.g. \"airhorn.mp3\" - no path separators",
+    "bytes": "expected size; the download aborts past 2x this",
+    "sha256": "REQUIRED and must be real - a mismatch fails this asset cleanly",
+    "name": "display name in the effects drawer",
+    "tags": ["searchable", "labels"],
+    "license": {
+      "name": "CC0-1.0",
+      "author": "who made it",
+      "source": "page you got it from",
+      "url": "licence text"
+    }
+  },
+
+  "_example": {
+    "slug": "airhorn",
+    "kind": "sfx",
+    "url": "https://cdn.pixabay.com/download/audio/2022/03/15/audio_0000000000.mp3",
+    "filename": "airhorn.mp3",
+    "bytes": 41234,
+    "sha256": "replace-with-the-real-hash-from-library-hash",
+    "name": "Airhorn",
+    "tags": ["hype", "horn"],
+    "license": {
+      "name": "CC0-1.0",
+      "author": "",
+      "source": "https://pixabay.com/sound-effects/airhorn-0000/",
+      "url": "https://pixabay.com/service/license-summary/"
+    }
+  },
+
+  "assets": [
+    {
+      "slug": "impact_punch",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_impactsounds/Audio/impactPunch_heavy_002.ogg",
+      "filename": "impact_punch.ogg",
+      "bytes": 9025,
+      "sha256": "7993dd4c156b9979ad69f17be5ebe31850b16039a3857f8477141be54dfee1b3",
+      "name": "Punch Impact",
+      "tags": ["impact", "hit", "punch"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_impactsounds",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "impact_glass",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_impactsounds/Audio/impactGlass_heavy_001.ogg",
+      "filename": "impact_glass.ogg",
+      "bytes": 8946,
+      "sha256": "58686e0e562612cc566791844a10e269f8d1921f4766c14ba43976fd0a429f4e",
+      "name": "Glass Impact",
+      "tags": ["impact", "glass", "break"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_impactsounds",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "error",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_interfacesounds/Audio/error_004.ogg",
+      "filename": "error.ogg",
+      "bytes": 6393,
+      "sha256": "0b574cea597d96507e782ae9764f88482ce49f46e931e57054bf7150047f2d69",
+      "name": "Error",
+      "tags": ["error", "fail", "wrong"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_interfacesounds",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "confirm",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_interfacesounds/Audio/confirmation_002.ogg",
+      "filename": "confirm.ogg",
+      "bytes": 14169,
+      "sha256": "33b17a9a9a2397c62b285c52c33a907fdffb476909c99e42dde603f6a7a8b12c",
+      "name": "Confirm Ding",
+      "tags": ["confirm", "success", "ding"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_interfacesounds",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "glitch",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_interfacesounds/Audio/glitch_002.ogg",
+      "filename": "glitch.ogg",
+      "bytes": 5473,
+      "sha256": "1da06a2e63ce131f5e0316ca27c75fc0d672db7a8f9b986c70693f2bd992eabc",
+      "name": "Glitch",
+      "tags": ["glitch", "digital", "error"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_interfacesounds",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "whoosh_switch",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_uiaudio/Audio/switch19.ogg",
+      "filename": "whoosh_switch.ogg",
+      "bytes": 7177,
+      "sha256": "63753f884e4e0d44b0939bee9f048b32e658d996958930363c0579ffa0f810c1",
+      "name": "Whoosh Switch",
+      "tags": ["whoosh", "transition", "swipe"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_uiaudio",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "hype_jingle",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_musicjingles/Audio/Hit%20jingles/jingles_HIT09.ogg",
+      "filename": "hype_jingle.ogg",
+      "bytes": 15477,
+      "sha256": "3114537d0d82f83c98037b4867c67dae4faa09e904405e511a9336088d022554",
+      "name": "Hype Hit Jingle",
+      "tags": ["hype", "sting", "jingle", "hook"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_musicjingles",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "powerup",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_digitalaudio/Audio/powerUp1.ogg",
+      "filename": "powerup.ogg",
+      "bytes": 9011,
+      "sha256": "8c361b624b560c0bc30ea3063b71212bc30caebf425c9df2481c13b25561485c",
+      "name": "Power Up",
+      "tags": ["powerup", "arcade", "win"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_digitalaudio",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "riser_up",
+      "kind": "sfx",
+      "url": "https://raw.githubusercontent.com/lavenderdotpet/CC0-Public-Domain-Sounds/main/kenney_digitalaudio/Audio/highUp.ogg",
+      "filename": "riser_up.ogg",
+      "bytes": 6135,
+      "sha256": "cbc1c3c7ccf5d7903818144a4c3f5b2ed2385095792f29d8d7c76360ba4fa559",
+      "name": "Riser Up",
+      "tags": ["riser", "buildup", "tension"],
+      "license": {
+        "name": "CC0-1.0",
+        "author": "Kenney (www.kenney.nl)",
+        "source": "https://github.com/lavenderdotpet/CC0-Public-Domain-Sounds/tree/main/kenney_digitalaudio",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "action_strike",
+      "kind": "music",
+      "url": "https://raw.githubusercontent.com/SoundSafari/CC0-1.0-Music/main/freepd.com/Action%20Strike.mp3",
+      "filename": "action_strike.mp3",
+      "bytes": 5377644,
+      "sha256": "0a2305ad157fc35feceb4c61ff6686f9a8fca504d6f30d883f837449a53d758e",
+      "name": "Action Strike",
+      "tags": ["hype", "action", "bed"],
+      "license": {
+        "name": "CC0-1.0 / Public Domain",
+        "author": "freepd.com",
+        "source": "https://github.com/SoundSafari/CC0-1.0-Music/tree/main/freepd.com",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "adventure",
+      "kind": "music",
+      "url": "https://raw.githubusercontent.com/SoundSafari/CC0-1.0-Music/main/freepd.com/Adventure.mp3",
+      "filename": "adventure.mp3",
+      "bytes": 3716639,
+      "sha256": "18432184e1a3acf8095b8b45b688fe08f7afb2447fc6e3adc98cc944c541a733",
+      "name": "Adventure",
+      "tags": ["upbeat", "bed", "gameplay"],
+      "license": {
+        "name": "CC0-1.0 / Public Domain",
+        "author": "freepd.com",
+        "source": "https://github.com/SoundSafari/CC0-1.0-Music/tree/main/freepd.com",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "ambient_bongos",
+      "kind": "music",
+      "url": "https://raw.githubusercontent.com/SoundSafari/CC0-1.0-Music/main/freepd.com/Ambient%20Bongos.mp3",
+      "filename": "ambient_bongos.mp3",
+      "bytes": 3507759,
+      "sha256": "cbd322a98e79909eb2c3747a874310f299da891ee2f9440083fa54bc5bc86e89",
+      "name": "Ambient Bongos",
+      "tags": ["chill", "bed", "talk"],
+      "license": {
+        "name": "CC0-1.0 / Public Domain",
+        "author": "freepd.com",
+        "source": "https://github.com/SoundSafari/CC0-1.0-Music/tree/main/freepd.com",
+        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+      }
+    },
+    {
+      "slug": "sticker_fire",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f525.png",
+      "filename": "fire.png",
+      "bytes": 928,
+      "sha256": "b0f4c358afcce0ddcde029e72ea2d6054eece0ce5a34c9a7e0c5761ff4f33a25",
+      "name": "Fire",
+      "tags": ["fire", "hype", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_laughing",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f602.png",
+      "filename": "laughing.png",
+      "bytes": 1095,
+      "sha256": "c252a58367211c11d839155e50dc5e98551826c64b8d2e8d6267124c054ceae0",
+      "name": "Laughing",
+      "tags": ["laugh", "funny", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_mind_blown",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f92f.png",
+      "filename": "mind_blown.png",
+      "bytes": 1205,
+      "sha256": "5a0faea28d801cea8ed034ea8518b6e4fec78035a7158f3b012d47cae63286f8",
+      "name": "Mind Blown",
+      "tags": ["shock", "wow", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_clown",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f921.png",
+      "filename": "clown.png",
+      "bytes": 1033,
+      "sha256": "3dccb64c1d5291548d5ed9df446b613c663a1ce35442826d42535b5ba629b03b",
+      "name": "Clown",
+      "tags": ["clown", "joke", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_skull",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f480.png",
+      "filename": "skull.png",
+      "bytes": 646,
+      "sha256": "e733209c1fb64bfb3e2decd74e02bfee1f51580881fdeffa491f372e75649400",
+      "name": "Skull",
+      "tags": ["dead", "skull", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_eyes",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f440.png",
+      "filename": "eyes.png",
+      "bytes": 1024,
+      "sha256": "487739c941203283fc25b1bac02b4b8f3d59672e3dec2154f575060206bbb86a",
+      "name": "Eyes",
+      "tags": ["eyes", "suspicious", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_hundred",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f4af.png",
+      "filename": "hundred.png",
+      "bytes": 864,
+      "sha256": "83eb1caeac0dcb2b8c60d92fd7aebf29aa61da109afb49bd5be294128e762da4",
+      "name": "Hundred",
+      "tags": ["100", "hundred", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_thinking",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f914.png",
+      "filename": "thinking.png",
+      "bytes": 1028,
+      "sha256": "5116f7d07677f06785887c0af23c189b541a306d6b792d605ffaf3ed9f0e912d",
+      "name": "Thinking",
+      "tags": ["thinking", "hmm", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_heart",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/2764.png",
+      "filename": "heart.png",
+      "bytes": 498,
+      "sha256": "68da7c6dc7d9c0456174f2575abe8f8abd52cde7a4017700579519173a8a4a34",
+      "name": "Heart",
+      "tags": ["heart", "love", "reaction"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "sticker_boom",
+      "kind": "sticker",
+      "url": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f4a5.png",
+      "filename": "boom.png",
+      "bytes": 1030,
+      "sha256": "c64d226a7d1d5a7e4b5d9f4d485ee8261082044eb39b778b9d1e56b40c561632",
+      "name": "Boom",
+      "tags": ["boom", "explosion", "impact"],
+      "license": {
+        "name": "CC-BY-4.0",
+        "author": "Twitter, Inc and other contributors",
+        "source": "https://github.com/twitter/twemoji",
+        "url": "https://creativecommons.org/licenses/by/4.0/"
+      }
+    },
+    {
+      "slug": "font_anton",
+      "kind": "font",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf",
+      "filename": "Anton-Regular.ttf",
+      "bytes": 170812,
+      "sha256": "a4ba3a92350ebb031da0cb47630ac49eb265082ca1bc0450442f4a83ab947cab",
+      "name": "Anton",
+      "tags": ["bold", "hook", "impact"],
+      "license": {
+        "name": "OFL-1.1",
+        "author": "The Anton Project Authors",
+        "source": "https://github.com/google/fonts/tree/main/ofl/anton",
+        "url": "https://openfontlicense.org/"
+      }
+    },
+    {
+      "slug": "font_bangers",
+      "kind": "font",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/bangers/Bangers-Regular.ttf",
+      "filename": "Bangers-Regular.ttf",
+      "bytes": 93148,
+      "sha256": "4160a7311de9342674cce9160cde9fcbb30f48190397d86ff1b70b455af65824",
+      "name": "Bangers",
+      "tags": ["comic", "hook", "meme"],
+      "license": {
+        "name": "OFL-1.1",
+        "author": "The Bangers Project Authors",
+        "source": "https://github.com/google/fonts/tree/main/ofl/bangers",
+        "url": "https://openfontlicense.org/"
+      }
+    },
+    {
+      "slug": "font_archivo_black",
+      "kind": "font",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/archivoblack/ArchivoBlack-Regular.ttf",
+      "filename": "ArchivoBlack-Regular.ttf",
+      "bytes": 90988,
+      "sha256": "dd9a89a019b4849f66ab75455fe7bdf931311042cbb0f0f97acc061539703180",
+      "name": "Archivo Black",
+      "tags": ["clean", "bold", "caption"],
+      "license": {
+        "name": "OFL-1.1",
+        "author": "The Archivo Project Authors",
+        "source": "https://github.com/google/fonts/tree/main/ofl/archivoblack",
+        "url": "https://openfontlicense.org/"
+      }
+    },
+    {
+      "slug": "font_bebas_neue",
+      "kind": "font",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/bebasneue/BebasNeue-Regular.ttf",
+      "filename": "BebasNeue-Regular.ttf",
+      "bytes": 61400,
+      "sha256": "08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73",
+      "name": "Bebas Neue",
+      "tags": ["condensed", "hook", "title"],
+      "license": {
+        "name": "OFL-1.1",
+        "author": "Dharma Type / Ryoichi Tsunekawa",
+        "source": "https://github.com/google/fonts/tree/main/ofl/bebasneue",
+        "url": "https://openfontlicense.org/"
+      }
+    }
+  ]
+}

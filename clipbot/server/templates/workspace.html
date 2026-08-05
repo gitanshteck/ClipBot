@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <a class="back" href="/">&larr; Library</a>
+  <h1 id="ws-title">…</h1>
+  <div id="ws-meta" class="meta"></div>
+  <div id="external" class="banner" hidden></div>
+  <div id="lowres" class="banner warn" hidden></div>
+</section>
+
+<section class="panel">
+  <h2>Pipeline</h2>
+  <div id="stages" class="stages"></div>
+  <div class="row">
+    <button id="run-all">Run all remaining</button>
+    <a class="btn" id="review-link" href="/w/{{ slug }}/review">Review clips</a>
+    <a class="btn" id="csv-link" href="/media/{{ slug }}/manifest.csv">Download manifest.csv</a>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Cut clips</h2>
+  <div id="cutlist" class="cutlist"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SLUG = {{ slug|tojson }};
+
+async function load() {
+  const w = await api('/api/workspaces/' + SLUG);
+  document.getElementById('ws-title').textContent = w.title;
+  document.getElementById('ws-meta').innerHTML =
+    `${w.duration ? fmtDur(w.duration) : '—'} · ${w.disk_human}` +
+    (w.video_height ? ` · ${w.video_width}×${w.video_height}` : '') +
+    (w.url ? ` · <a href="${esc(w.url)}" target="_blank" rel="noreferrer">source</a>` : '');
+
+  // A job started from the CLI isn't in this server's job runner, so surface it
+  // from the filesystem instead of pretending the workspace is idle.
+  const ext = document.getElementById('external');
+  if (w.external) {
+    ext.hidden = false;
+    ext.className = 'banner ' + (w.external.stalled ? 'warn' : '');
+    ext.innerHTML = w.external.stalled
+      ? `A <b>${w.external.kind}</b> started outside the dashboard looks stalled — no file activity for ${Math.round(w.external.idle_seconds)}s.`
+      : `▶ <b>${w.external.kind}</b> running (started from the command line, so it won't appear in Jobs)`
+        + (w.external.human ? ` — ${w.external.human} so far` : '');
+  } else { ext.hidden = true; }
+
+  const lowres = document.getElementById('lowres');
+  if (w.low_res) {
+    lowres.hidden = false;
+    lowres.innerHTML = `This VOD downloaded at <b>${w.video_width}×${w.video_height}</b> — too low to review clips visually.
+      Kick serves up to 720p60. <button class="btn" onclick="submitJob('download',{force:true})">Re-download at 720p</button>`;
+  } else { lowres.hidden = true; }
+
+  document.getElementById('stages').innerHTML = w.stages.map(s => {
+    const state = s.done ? 'done' : (s.ready ? 'ready' : 'blocked');
+    const label = s.done ? 'Re-run' : 'Run';
+    // Don't offer a Run button for whatever is already running elsewhere -
+    // a second concurrent download would fight over the same output file.
+    const busy = w.external && (w.external.kind === s.key || w.external.kind === 'pipeline');
+    const disabled = ((!s.done && !s.ready) || busy) ? 'disabled' : '';
+    const detail = s.detail && Object.keys(s.detail).length
+      ? Object.entries(s.detail).filter(([k]) => k !== 'completed_at').map(([k,v]) => `${k}: ${v}`).join(' · ')
+      : (s.blocked || '');
+    return `<div class="stage ${state}">
+      <div class="stage-head"><span class="dot ${state}"></span><b>${s.label}</b></div>
+      <div class="stage-detail">${esc(detail)}</div>
+      <button ${disabled} onclick="submitJob('${s.key}',{force:${s.done ? 'true' : 'false'}})">${label}</button>
+    </div>`;
+  }).join('');
+
+  const cuts = await api('/api/workspaces/' + SLUG + '/clips').catch(() => ({clips: []}));
+  const cut = (cuts.clips || []).filter(c => c.output && c.output.file);
+  document.getElementById('cutlist').innerHTML = cut.length
+    ? cut.map(c => `<div class="cutrow">
+        <video src="/media/${SLUG}/clip/${c.output.file.split('/').pop()}" controls preload="none"></video>
+        <div><b>${esc(c.title || c.description.slice(0,60))}</b>
+        <div class="meta">${fmtDur(c.start)}–${fmtDur(c.end)} · ${(c.output.bytes/1048576).toFixed(1)} MB</div></div>
+      </div>`).join('')
+    : '<p class="empty">Nothing cut yet. Approve candidates in Review, then run Cut clips.</p>';
+}
+
+async function submitJob(kind, opts) {
+  try { await api(`/api/workspaces/${SLUG}/jobs`, 'POST', Object.assign({kind}, opts||{})); }
+  catch (e) { alert(e.message); }
+}
+window.submitJob = submitJob;
+
+document.getElementById('run-all').addEventListener('click', () => submitJob('pipeline', {}));
+onEvent('workspace', load);
+onEvent('job', load);
+load();
+// CLI-driven work emits no SSE events, so poll while something external is
+// running. Cheap, and only while there's actually something to watch.
+setInterval(load, 10000);
+</script>
+{% endblock %}

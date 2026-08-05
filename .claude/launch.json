@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "clipbot-dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "clipbot.server"],
+      "port": 8765
+    }
+  ]
+}

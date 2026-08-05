@@ -1,0 +1,29 @@
+# Optional: stage "diarize" (clipbot/stages/diarize.py), speaker diarization.
+# NOT part of requirements.txt on purpose - pulls in PyTorch (a multi-GB
+# install) for a stage that's opt-in and never runs as part of `clipbot run`.
+# Install with: pip install -r requirements-diarize.txt
+#
+# Also needs a Hugging Face account + access token (HF_TOKEN env var by
+# default, see diarize.hf_token_env in config/settings.json) with the
+# pyannote/speaker-diarization-3.1 model's user agreement accepted at
+# https://huggingface.co/pyannote/speaker-diarization-3.1
+
+pyannote.audio>=3.3.2
+
+# Pinned ceiling, same reasoning as requirements-server.txt's version caps:
+# greenlet (a transitive dep via sqlalchemy<-optuna<-pyannote.pipeline)
+# dropped prebuilt Python 3.9 wheels after 3.2.4 - anything newer needs the
+# MSVC C++ Build Tools to compile from source, which this machine doesn't
+# have. 3.2.4 is the newest version that still ships a cp39-win_amd64 wheel.
+greenlet<=3.2.4
+
+# Pinned ceiling: pyannote.audio declares only `huggingface_hub>=0.13.0`, no
+# upper bound, and 3.4.0's Pipeline.from_pretrained() still internally passes
+# the old `use_auth_token=` kwarg to huggingface_hub's download calls.
+# huggingface_hub 1.0 removed that parameter entirely (not just deprecated -
+# gone), so an unconstrained install fails every from_pretrained() call with
+# "TypeError: ... got an unexpected keyword argument 'use_auth_token'" before
+# it ever reaches the network. Confirmed 0.36.2 (the last 0.x release) still
+# works; re-test this ceiling if pyannote.audio ships a release that migrates
+# to huggingface_hub's `token=` kwarg.
+huggingface_hub<1.0

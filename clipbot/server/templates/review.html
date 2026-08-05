@@ -1,0 +1,481 @@
+{% extends "base.html" %}
+{% block title %}Review clips — ClipBot{% endblock %}
+{% block bodyclass %}review-page{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="/static/review.css?v={{ ASSET_V }}">
+
+<section class="panel" style="margin:14px 18px">
+  <div class="row" style="justify-content:space-between">
+    <div>
+      <a class="back" href="/w/{{ slug }}">&larr; Workspace</a>
+      <h1 style="margin:4px 0 2px">Review clips</h1>
+      <div id="tally" class="meta">Loading…</div>
+    </div>
+    <div class="row">
+      <button onclick="showKeys()" title="Keyboard shortcuts">⌨ Keys</button>
+      <button id="cut-btn" onclick="cutApproved()">Cut approved</button>
+    </div>
+  </div>
+</section>
+
+<div class="review2">
+  <!-- ---------- main editing surface ---------- -->
+  <div>
+    <div id="stage" class="stage-wrap">
+      <video id="player" preload="metadata" src="/media/{{ slug }}/video"></video>
+      <div id="crop-layer" class="crop-layer"></div>
+    </div>
+
+    <div class="transport">
+      <button onclick="togglePlay()" id="play-btn" title="Play / pause (space)">▶</button>
+      <button onclick="step(-1/30)" title="Previous frame (,)">⏴|</button>
+      <button onclick="step(1/30)" title="Next frame (.)">|⏵</button>
+      <button onclick="seekBy(-10)" title="Back 10s (shift+←)">−10s</button>
+      <button onclick="seekBy(10)" title="Forward 10s (shift+→)">+10s</button>
+
+      <span class="time">
+        <span id="t-now">0:00.0</span><span class="sep"> / </span><span id="t-dur">—</span>
+      </span>
+
+      <span class="spacer"></span>
+
+      <label class="meta" style="display:flex;gap:5px;align-items:center">
+        <input type="checkbox" id="loop" checked> loop clip
+      </label>
+      <select id="rate" onchange="player.playbackRate=parseFloat(this.value)" title="Playback speed">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+      </select>
+    </div>
+
+    <!-- whole-VOD overview -->
+    <div class="tl-block">
+      <div class="tl-label">
+        <span>Full stream</span>
+        <span class="note" id="tl-note">click to seek</span>
+      </div>
+      <div class="timeline" id="tl-full">
+        <div class="tl-density" id="tl-density"></div>
+        <div id="tl-clips"></div>
+        <div class="tl-ticks" id="tl-ticks"></div>
+        <div class="tl-playhead" id="tl-head" style="left:0"></div>
+      </div>
+      <div class="tl-legend">
+        <span><i style="background:rgba(230,163,60,.42);border:1px solid var(--warn)"></i> pending</span>
+        <span><i style="background:rgba(78,201,138,.45);border:1px solid var(--ok)"></i> approved</span>
+        <span><i style="background:rgba(25,162,210,.45);border:1px solid var(--accent)"></i> cut</span>
+        <span><i style="background:var(--accent);opacity:.38"></i> speech</span>
+        <span><i style="background:var(--warn);opacity:.30"></i> low-confidence (music / hallucination)</span>
+      </div>
+    </div>
+
+    <!-- zoomed view of the selected clip -->
+    <div class="tl-block" id="zoom-block" hidden>
+      <div class="tl-label">
+        <span>Selected clip</span>
+        <span class="note">drag the <b>I</b> / <b>O</b> handles, or use <kbd>[</kbd> <kbd>]</kbd></span>
+      </div>
+      <div class="timeline zoom" id="tl-zoom">
+        <div class="tl-density" id="tz-density"></div>
+        <div class="tl-pad" id="tz-pad-in"></div>
+        <div class="tl-pad" id="tz-pad-out"></div>
+        <div class="tl-window" id="tz-window"></div>
+        <div class="tl-handle" id="tz-in"><span class="cap">I</span></div>
+        <div class="tl-handle" id="tz-out"><span class="cap">O</span></div>
+        <div class="tl-ticks" id="tz-ticks"></div>
+        <div class="tl-playhead" id="tz-head" style="left:0"></div>
+      </div>
+    </div>
+
+    <!-- effects lane: shares the zoom strip's window, so it needs no time
+         conversion of its own - effect times are absolute VOD seconds -->
+    <div class="tl-block" id="fx-lane-block" hidden>
+      <div class="tl-label">
+        <span>Effects</span>
+        <span class="note">drag to move · drag the right edge to retime · click to edit</span>
+      </div>
+      <div class="fx-lane" id="fx-lane"></div>
+      <div class="row" style="margin-top:5px;align-items:center;gap:6px">
+        <span class="meta">whole clip:</span>
+        <span id="fx-whole"></span>
+      </div>
+      <div id="fx-warnings"></div>
+    </div>
+
+    <!-- in / out editor -->
+    <div class="editor2" id="editor" hidden>
+      <h3>
+        <span id="ed-title">Clip</span>
+        <span class="dirty-flag">unsaved</span>
+      </h3>
+      <div class="row" style="gap:14px">
+        <div class="field">
+          <label for="in-val">in</label>
+          <input type="text" id="in-val" inputmode="decimal" placeholder="m:ss">
+          <span class="secs" id="in-secs"></span>
+          <button class="nudge" onclick="nudge('start',-0.5)" title="[">−</button>
+          <button class="nudge" onclick="nudge('start',0.5)" title="shift+[">+</button>
+          <button class="nudge" onclick="markHere('start')" title="Set to playhead (i)">⎁ here</button>
+        </div>
+        <div class="field">
+          <label for="out-val">out</label>
+          <input type="text" id="out-val" inputmode="decimal" placeholder="m:ss">
+          <span class="secs" id="out-secs"></span>
+          <button class="nudge" onclick="nudge('end',-0.5)" title="]">−</button>
+          <button class="nudge" onclick="nudge('end',0.5)" title="shift+]">+</button>
+          <button class="nudge" onclick="markHere('end')" title="Set to playhead (o)">⎁ here</button>
+        </div>
+        <span class="dur-pill" id="dur-pill">—</span>
+        <span class="spacer" style="flex:1"></span>
+        <button onclick="previewClip()" title="Play just this range">↻ Preview</button>
+        <button onclick="saveEdits()" id="save-btn">Save</button>
+        <button onclick="resetToModel()" title="Restore the model's original range">Reset</button>
+      </div>
+      <div class="hint" style="margin-top:7px">
+        Times accept <b>41:00</b>, <b>1:23:45</b>, or a bare number of seconds.
+        Cutting adds {{ pad_start }}s before and {{ pad_end }}s after (the hatched area).
+      </div>
+    </div>
+
+    <!-- vertical reel authoring -->
+    <div class="editor2 reel-panel" id="reel-panel">
+      <h3>
+        Vertical reel (9:16)
+        <span class="dirty-flag">unsaved</span>
+        <span class="spacer" style="flex:1"></span>
+        <span class="badge" id="reel-badge">—</span>
+      </h3>
+
+      <div class="filters" id="reel-presets" style="margin-bottom:9px"></div>
+
+      <div class="reel-body">
+        <div class="reel-left">
+          <div class="row">
+            <button id="edit-game" onclick="editRect('game')">✎ Gameplay crop</button>
+            <button id="edit-cam" onclick="editRect('cam')">✎ Webcam crop</button>
+            <button onclick="resetReel()" title="Back to the measured defaults">↺ Reset</button>
+          </div>
+          <div class="hint" style="margin-top:6px">
+            Pick one, then drag the box on the video. The webcam default is measured
+            from this channel's OBS layout, so the first export usually needs no cropping.
+          </div>
+          <div class="row" style="margin-top:9px">
+            <label class="meta" style="display:flex;gap:5px;align-items:center">
+              <input type="checkbox" id="reel-safe" onchange="drawReelPreview()"> show Instagram safe areas
+            </label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button onclick="saveReel()">Save</button>
+            <button onclick="applyReelToAll()">Apply to all approved</button>
+            <button onclick="renderReel(false)">▶ Render this reel</button>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <button onclick="renderReel(true)">Render all approved</button>
+            <button onclick="copyFfmpeg()" title="Copy the filter_complex string">⧉ Copy filter</button>
+          </div>
+
+          <h4 style="margin:14px 0 6px">Chat overlay</h4>
+          <div class="row">
+            <label class="meta" style="display:flex;gap:5px;align-items:center">
+              <input type="checkbox" id="chat-enabled" onchange="setChatEnabled(this.checked)"> burn in chat
+            </label>
+            <span class="meta" id="chat-window-count"></span>
+          </div>
+          <div id="chat-controls" style="display:none;margin-top:7px">
+            <div class="row">
+              <select id="chat-mode" onchange="setChatField('mode', this.value)">
+                <option value="overlay">float over video</option>
+                <option value="panel">reserve a panel</option>
+              </select>
+              <select id="chat-side" onchange="setChatField('side', this.value)">
+                <option value="bottom">bottom</option>
+                <option value="right">right</option>
+              </select>
+            </div>
+            <div class="row" style="margin-top:6px;align-items:center">
+              <label class="meta">size</label>
+              <input type="range" id="chat-size" min="0.10" max="0.60" step="0.01"
+                     oninput="setChatField('size', +this.value)" style="flex:1">
+              <span class="meta" id="chat-size-label">34%</span>
+            </div>
+            <div class="hint" style="margin-top:6px">
+              Chat is sparse on this channel — about half of all 45s windows have
+              no messages, so <b>float over video</b> is usually the better default;
+              <b>reserve a panel</b> sets aside a fixed band even when it's empty.
+            </div>
+            <div class="row" style="margin-top:9px;align-items:center">
+              <label class="meta">clip offset override</label>
+              <input type="number" id="chat-clip-offset" step="0.1" placeholder="workspace default"
+                     onchange="setChatField('offset', this.value === '' ? null : +this.value)"
+                     style="width:100px">
+              <span class="meta">s</span>
+            </div>
+          </div>
+
+          <h4 style="margin:14px 0 6px">Hinglish captions</h4>
+          <div class="row">
+            <label class="meta" style="display:flex;gap:5px;align-items:center">
+              <input type="checkbox" id="captions-enabled" onchange="setCaptionsEnabled(this.checked)"> burn in captions
+            </label>
+          </div>
+          <div id="captions-controls" style="display:none;margin-top:7px">
+            <div class="row" style="align-items:center">
+              <select id="captions-position" onchange="setCaptionsField('position', this.value)">
+                <option value="bottom">bottom</option>
+                <option value="top">top</option>
+                <option value="center">center</option>
+              </select>
+              <label class="meta">max lines</label>
+              <input type="number" id="captions-max-lines" min="1" max="5" step="1" style="width:56px"
+                     onchange="setCaptionsField('max_lines', +this.value)">
+            </div>
+            <div class="row" style="margin-top:6px;align-items:center">
+              <label class="meta">size</label>
+              <input type="range" id="captions-size" min="0.05" max="0.45" step="0.01"
+                     oninput="setCaptionsField('size', +this.value)" style="flex:1">
+              <span class="meta" id="captions-size-label">18%</span>
+            </div>
+            <div class="hint" style="margin-top:6px">
+              Sourced from the Devanagari→Hinglish transcript — run
+              <b>Hinglish captions</b> from the workspace pipeline first. A clip
+              whose window has no speech renders with no caption layer, same as
+              chat on a silent window.
+            </div>
+            <div class="row" style="margin-top:9px;align-items:center">
+              <label class="meta">clip offset override</label>
+              <input type="number" id="captions-offset" step="0.1" placeholder="none"
+                     onchange="setCaptionsField('offset', this.value === '' ? null : +this.value)"
+                     style="width:100px">
+              <span class="meta">s</span>
+            </div>
+          </div>
+
+          <h4 style="margin:14px 0 6px">Speaker avatars</h4>
+          <div class="row">
+            <label class="meta" style="display:flex;gap:5px;align-items:center">
+              <input type="checkbox" id="speakers-enabled" onchange="setSpeakersEnabled(this.checked)"> burn in avatars
+            </label>
+          </div>
+          <div id="speakers-controls" style="display:none;margin-top:7px">
+            <div class="row" style="align-items:center">
+              <select id="speakers-mode" onchange="setSpeakersField('mode', this.value)">
+                <option value="appear">appear while talking</option>
+                <option value="discord">discord (always docked, ring lights up)</option>
+              </select>
+              <select id="speakers-edge" onchange="setSpeakersField('edge', this.value)">
+                <option value="bottom">bottom</option>
+                <option value="top">top</option>
+              </select>
+            </div>
+            <div class="row" style="margin-top:6px;align-items:center">
+              <label class="meta">avatar size</label>
+              <input type="range" id="speakers-size" min="0.05" max="0.40" step="0.01"
+                     oninput="setSpeakersField('avatar_size', +this.value)" style="flex:1">
+              <span class="meta" id="speakers-size-label">16%</span>
+            </div>
+            <div class="row" style="margin-top:6px;align-items:center">
+              <label class="meta">ring width</label>
+              <input type="number" id="speakers-ring-width" min="0" max="20" step="1" style="width:60px"
+                     onchange="setSpeakersField('ring_width_px', +this.value)">
+              <span class="meta">px (discord mode only)</span>
+            </div>
+            <div class="hint" style="margin-top:6px">
+              Who's speaking comes from the transcript's speaker assignment
+              (below) and each speaker's avatar image comes from the library
+              (drop a picture into <code>_library/avatars/</code> and hit
+              Rescan, then set it on a speaker in the transcript panel).
+              Layout is automatic - whichever speakers actually talk in this
+              clip are spaced evenly along the edge you pick.
+            </div>
+          </div>
+
+          <h4 style="margin:14px 0 6px">Chat sync</h4>
+          <div class="row" style="align-items:center">
+            <span class="meta">workspace offset:</span>
+            <input type="number" id="chat-ws-offset" step="0.1" style="width:90px"
+                   onchange="setWorkspaceChatOffset(this.value)">
+            <span class="meta">s</span>
+            <button onclick="estimateChatOffset()" title="Cross-correlate chat activity against audio energy">
+              Estimate
+            </button>
+          </div>
+          <div class="hint" id="chat-sync-result" style="margin-top:6px"></div>
+
+          <h4 style="margin:14px 0 6px">
+            Effects
+            <span class="badge" id="fx-missing"></span>
+          </h4>
+          <div class="fx-add">
+            <button onclick="addFx('punch')" title="Snap zoom on the moment">⤢ Punch</button>
+            <button onclick="addFx('shake')" title="Camera shake hit">≋ Shake</button>
+            <button onclick="addFx('flash')" title="Impact flash">✦ Flash</button>
+            <button onclick="addFx('freeze')" title="Hold the last frame">❚❚ Freeze</button>
+            <button onclick="addFx('speed')" title="Speed up or slow the whole clip">⏩ Speed</button>
+            <button onclick="addFx('sfx')" title="Drop a sound on the playhead">🔊 Sound</button>
+            <button onclick="addFx('music')" title="Looping bed, ducked under speech">♫ Music</button>
+            <button onclick="addFx('sticker')" title="Image overlay">🖼 Sticker</button>
+            <button onclick="addFx('text')" title="Hook title">T Text</button>
+          </div>
+          <div class="hint" style="margin-top:5px">
+            Effects are added at the playhead and stored at absolute stream times,
+            so nudging the clip's in/out points never moves them.
+          </div>
+
+          <div id="fx-inspector" class="fx-inspector"></div>
+
+          <div class="row" style="margin-top:9px">
+            <button onclick="openFxLibrary('sfx')">📚 Library</button>
+            <button onclick="loadFxLibrary(true)" title="Re-read the drop-in folders">↻ Rescan</button>
+            <button onclick="saveFxPreset()" title="Reusable on any clip in any stream">★ Save as chain</button>
+          </div>
+          <div class="row" style="margin-top:6px;flex-wrap:wrap;gap:4px" id="fx-presets"></div>
+
+          <div class="row" id="reel-output" style="margin-top:10px;align-items:flex-start"></div>
+        </div>
+        <div class="reel-right">
+          <div class="seg" id="fx-preview-modes">
+            <button data-mode="geometry" class="on" onclick="setFxPreviewMode('geometry')">Geometry</button>
+            <button data-mode="effects" onclick="setFxPreviewMode('effects')">Effects</button>
+          </div>
+          <canvas id="reel-canvas" width="216" height="384"></canvas>
+          <video id="fx-preview" hidden controls loop muted playsinline></video>
+          <div class="hint" style="text-align:center;margin-top:4px" id="fx-preview-hint">
+            live preview
+          </div>
+          <div class="row" style="justify-content:center;gap:4px;margin-top:4px">
+            <button onclick="renderFxPreview()" title="Render a proxy through the real filter graph">▶ Render preview</button>
+            <button onclick="cancelFxPreview()">✕</button>
+          </div>
+          <div class="hint" style="text-align:center" id="fx-preview-status"></div>
+
+          <h4 style="margin:14px 0 6px">Log</h4>
+          <pre id="logtail-review" class="logtail"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- transcript -->
+    <div class="tx-wrap">
+      <div class="tx-bar">
+        <input type="search" id="tx-search" placeholder="Search transcript (Devanagari — देवनागरी)…"
+               autocomplete="off" title="The transcript is Hindi in Devanagari script, so English words rarely match here. Use the clip search on the right for English.">
+        <label class="meta" style="display:flex;gap:4px;align-items:center">
+          <input type="checkbox" id="tx-hide-low"> hide low-confidence
+        </label>
+        <label class="meta" style="display:flex;gap:4px;align-items:center">
+          <input type="checkbox" id="tx-follow" checked> follow
+        </label>
+        <span class="count" id="tx-count"></span>
+      </div>
+      <div class="tx-bar">
+        <button id="speaker-mode-btn" onclick="toggleSpeakerMode()" title="Click two lines to assign a speaker to that range">🗣 Assign speakers</button>
+        <span id="speaker-assign-controls" style="display:none;align-items:center;gap:6px">
+          <select id="speaker-assign-select"></select>
+          <button onclick="editSelectedSpeaker()" title="Set this speaker's avatar image and ring color">✎ edit</button>
+          <span class="meta" id="speaker-assign-range"></span>
+          <button id="speaker-assign-btn" onclick="applySpeakerAssign()" disabled>Assign</button>
+          <button id="speaker-clear-btn" onclick="clearSpeakerAssign()" disabled>Clear</button>
+          <button onclick="cancelSpeakerRange()">Cancel</button>
+        </span>
+      </div>
+      <div class="tx-scroll" id="tx-scroll">
+        <div class="tx-inner" id="tx-inner"></div>
+      </div>
+      <div class="hint" style="padding:6px 10px">
+        Click a line to seek. <kbd>Shift</kbd>+click sets the selected clip's <b>out</b> point there.
+        With <b>Assign speakers</b> on, click two lines instead to pick a range and assign it to a speaker
+        (colored bar on the left of each line shows its current assignment).
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------- clip list ---------- -->
+  <aside>
+    <div class="side-sticky">
+      <div class="panel" style="padding:11px">
+        <h3 style="margin:0 0 8px">Record a clip</h3>
+        <div class="row">
+          <input type="text" id="new-start" inputmode="decimal" placeholder="in" style="width:78px">
+          <input type="text" id="new-end" inputmode="decimal" placeholder="out" style="width:78px">
+          <button onclick="addManualClip()">+ Add</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <button onclick="useSelection()" title="Fill from the current playhead">from playhead</button>
+        </div>
+        <div class="hint">Added as approved but <b>not</b> cut.</div>
+      </div>
+
+      <input type="search" id="clip-search" placeholder="Search clips (English)…"
+             autocomplete="off" style="width:100%;margin-top:12px;padding:6px 9px">
+      <div class="filters" id="filters" style="margin-top:8px"></div>
+      <div class="cliplist" id="clips"></div>
+    </div>
+  </aside>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<dialog id="fx-library">
+  <div class="row" style="align-items:center">
+    <h2 style="margin:0">Editing library</h2>
+    <span class="meta" style="margin-left:8px">shared across every stream</span>
+    <span class="spacer" style="flex:1"></span>
+    <button onclick="loadFxLibrary(true)">↻ Rescan</button>
+    <button onclick="closeFxLibrary()">Close</button>
+  </div>
+  <div class="filters" id="fx-kinds" style="margin:10px 0 8px"></div>
+  <input type="search" id="fx-search" placeholder="Search by name or tag…"
+         autocomplete="off" style="width:100%;padding:6px 9px"
+         oninput="setFxDrawerQuery(this.value)">
+  <div class="fx-assets" id="fx-assets"></div>
+  <div class="fx-sources" id="fx-sources"></div>
+  <div class="hint" style="margin-top:8px">
+    Drop files into <span class="mono">work/_library/</span> — <span class="mono">sfx/</span>,
+    <span class="mono">music/</span>, <span class="mono">stickers/</span>,
+    <span class="mono">fonts/</span> — then Rescan. Assets are identified by their
+    contents, so renaming or moving a file will not break clips that already use it.
+    <br><span class="mono">python -m clipbot library fetch</span> downloads the CC0
+    starter pack; <span class="mono">library licenses</span> prints where everything came from.
+  </div>
+</dialog>
+
+<dialog id="keys-dialog">
+  <h2 style="margin-top:0">Keyboard</h2>
+  <div class="keyhelp">
+    <div class="grp">Playback</div>
+    <kbd>space</kbd><span>play / pause</span>
+    <kbd>← →</kbd><span>seek 1 second</span>
+    <kbd>shift + ← →</kbd><span>seek 10 seconds</span>
+    <kbd>, .</kbd><span>step one frame</span>
+    <kbd>L</kbd><span>toggle loop</span>
+    <div class="grp">Editing</div>
+    <kbd>I</kbd><span>set <b>in</b> to playhead</span>
+    <kbd>O</kbd><span>set <b>out</b> to playhead</span>
+    <kbd>[ ]</kbd><span>nudge in / out by 0.1s (shift: 1s)</span>
+    <kbd>enter</kbd><span>save changes</span>
+    <kbd>R</kbd><span>preview the clip range</span>
+    <div class="grp">Review</div>
+    <kbd>A</kbd><span>approve</span>
+    <kbd>X</kbd><span>reject</span>
+    <kbd>N P</kbd><span>next / previous clip</span>
+    <kbd>/</kbd><span>focus transcript search</span>
+    <kbd>?</kbd><span>this help</span>
+  </div>
+  <form method="dialog" style="margin-top:14px"><button>Close</button></form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/review.js?v={{ ASSET_V }}"></script>
+<script src="/static/reel.js?v={{ ASSET_V }}"></script>
+<script src="/static/fx.js?v={{ ASSET_V }}"></script>
+<script>
+  document.body.classList.add('review-page');
+  initReview({{ slug|tojson }}, {{ pad_start }}, {{ pad_end }});
+  initReel();
+  initFx();
+</script>
+{% endblock %}

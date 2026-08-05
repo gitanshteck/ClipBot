@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ClipBot{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ ASSET_V }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>✂️</text></svg>">
+</head>
+<body class="{% block bodyclass %}{% endblock %}">
+  <header class="topbar">
+    <a class="brand" href="/">✂️ ClipBot</a>
+    <nav>
+      <a href="/">Library</a>
+      <button id="doctor-btn" class="link">Doctor</button>
+    </nav>
+    <span id="conn" class="conn" title="event stream">●</span>
+  </header>
+
+  <main>{% block content %}{% endblock %}</main>
+
+  <aside id="jobpanel" class="jobpanel">
+    <h3>Jobs</h3>
+    <div id="joblist"></div>
+    <h3>Log</h3>
+    <pre id="logtail" class="logtail"></pre>
+  </aside>
+
+  <dialog id="doctor-dialog">
+    <h2>Environment</h2>
+    <div id="doctor-body">Checking…</div>
+    <form method="dialog"><button>Close</button></form>
+  </dialog>
+
+  <script src="/static/app.js?v={{ ASSET_V }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

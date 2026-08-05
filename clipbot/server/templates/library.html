@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>Library</h1>
+  <form id="new-vod" class="row">
+    <input type="url" id="vod-url" placeholder="https://kick.com/&lt;channel&gt;/videos/&lt;uuid&gt;" required>
+    <button type="submit">Add &amp; run pipeline</button>
+  </form>
+  <p class="hint">Downloads, extracts audio, transcribes (~0.8&times; realtime on CPU) and finds clips. You review before anything is cut.</p>
+</section>
+
+<section id="workspaces" class="grid"></section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const grid = document.getElementById('workspaces');
+
+function stageDots(stages) {
+  return stages.map(s => `<span class="dot ${s.done ? 'done' : (s.ready ? 'ready' : 'blocked')}" title="${s.label}${s.blocked ? ' — ' + s.blocked : ''}"></span>`).join('');
+}
+
+async function loadWorkspaces() {
+  const { workspaces } = await api('/api/workspaces');
+  if (!workspaces.length) {
+    grid.innerHTML = '<p class="empty">No VODs yet. Paste a Kick URL above to start.</p>';
+    return;
+  }
+  grid.innerHTML = workspaces.map(w => `
+    <article class="card">
+      <h2><a href="/w/${w.slug}">${esc(w.title)}</a></h2>
+      <div class="meta">
+        ${w.duration ? fmtDur(w.duration) : '—'} ·
+        ${w.disk_human}
+        ${w.video_height ? ` · ${w.video_width}×${w.video_height}` : ''}
+        ${w.low_res ? '<span class="badge warn" title="Too low to review clips visually">low-res</span>' : ''}
+        ${w.video_deleted ? '<span class="badge">VOD deleted</span>' : ''}
+      </div>
+      <div class="dots">${stageDots(w.stages)}</div>
+      ${w.counts ? `<div class="meta">${w.counts.total} candidates · ${w.counts.approved} approved · ${w.counts.cut} cut</div>` : ''}
+      ${w.active_job ? `<div class="meta running">▶ ${w.active_job.kind} ${w.active_job.status}</div>` : ''}
+      <div class="row">
+        <a class="btn" href="/w/${w.slug}">Open</a>
+        ${w.counts && w.counts.total ? `<a class="btn" href="/w/${w.slug}/review">Review clips</a>` : ''}
+      </div>
+    </article>`).join('');
+}
+
+document.getElementById('new-vod').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = document.getElementById('vod-url').value.trim();
+  try {
+    const res = await api('/api/workspaces', 'POST', { url });
+    location.href = '/w/' + res.slug;
+  } catch (err) { alert(err.message); }
+});
+
+onEvent('workspace', loadWorkspaces);
+onEvent('job', loadWorkspaces);
+loadWorkspaces();
+</script>
+{% endblock %}
