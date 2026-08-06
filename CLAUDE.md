@@ -297,6 +297,23 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
     the missing model nor what to do about it. `HF_TOKEN_HINT` lists both
     gated models' URLs up front so a new setup hits this zero times, not
     once.
+  - **A third gotcha, one layer deeper still: PyTorch 2.6 changed
+    `torch.load`'s default to `weights_only=True`, and pyannote's own
+    checkpoints fail under it.** Measured: they store plain Python objects
+    alongside tensors (`torch.torch_version.TorchVersion`, recording which
+    torch version wrote the file), which the safe-unpickler used by
+    `weights_only=True` doesn't recognize, so loading raises
+    `UnpicklingError`. `_trust_pyannote_checkpoints()` is a context manager
+    that wraps `torch.load` to force `weights_only=False` regardless of
+    what the caller passes - a `functools.partial` preset default alone
+    doesn't work here, because pyannote's own `pl_load` helper always
+    explicitly re-passes `weights_only=weights_only` (defaulting to `None`
+    at its call site), which would just override a partial's preset value
+    right back. Scoped tightly around the `Pipeline.from_pretrained` call
+    only, not a global setting - this is torch's own documented option (1)
+    for a trusted source, and the only checkpoints loaded here are the
+    official ones this stage just downloaded from Hugging Face's pyannote
+    org.
 - **A single blocking call** (`pipeline(audio_path, **kwargs)`), unlike
   `transcribe.py`'s lazy generator - pyannote exposes no per-segment yield
   point, so there's no mid-run progress or cancellation, only a

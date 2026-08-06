@@ -315,6 +315,42 @@ class TestLoadPipelineNoneReturn(unittest.TestCase):
         self.assertIn("sub-model", str(ctx.exception))
         self.assertIn("segmentation-3.0", str(ctx.exception))
 
+    def test_trust_pyannote_checkpoints_forces_weights_only_false(self):
+        """Regression test: caught live against a real workspace. PyTorch
+        2.6 defaults torch.load's weights_only to True, and pyannote's own
+        checkpoints store plain objects (torch.torch_version.TorchVersion)
+        alongside tensors, so loading one raises UnpicklingError under the
+        new default. _trust_pyannote_checkpoints must make torch.load
+        succeed on such a file regardless of what weights_only value the
+        caller itself passes (pyannote's pl_load always explicitly passes
+        one, so a functools.partial default alone would not survive being
+        overridden back by that explicit keyword)."""
+        import torch
+
+        from clipbot.stages import diarize as diarize_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fake_checkpoint.pt"
+            checkpoint = {
+                "state_dict": {"w": torch.zeros(2)},
+                "pytorch-lightning_version": torch.torch_version.TorchVersion("2.8.0"),
+            }
+            torch.save(checkpoint, path)
+
+            # Establish the failure this is a regression test for.
+            with self.assertRaises(Exception):
+                torch.load(path, map_location="cpu", weights_only=None)
+
+            with diarize_stage._trust_pyannote_checkpoints():
+                # weights_only=None mirrors pyannote's pl_load always
+                # re-passing its own (defaulted) value explicitly.
+                loaded = torch.load(path, map_location="cpu", weights_only=None)
+            self.assertIn("pytorch-lightning_version", loaded)
+
+            # The patch must not leak past the context manager.
+            with self.assertRaises(Exception):
+                torch.load(path, map_location="cpu", weights_only=None)
+
 
 if __name__ == "__main__":
     unittest.main()
