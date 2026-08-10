@@ -88,6 +88,58 @@ def _ensure_ring(cache_dir: Path, size: int, width_px: int, color: str) -> Path:
     return out
 
 
+def _rebase_spans(
+    spans: List[Dict[str, Any]], origin: float, span_duration: float
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Rebase workspace-wide speaking spans onto one clip's own 0..span_duration
+    timeline (the same convention `fxspec.resolve_fx` uses), dropping anything
+    that falls outside it. Returns `(local_spans, active_ids)`, `active_ids` in
+    first-appearance order - the shared prefix of both `resolve_speaker_slots`
+    and `resolve_speakers` below, kept in one place so it can't drift between
+    the preview path and the render path.
+    """
+    local_spans = []
+    for sp in spans:
+        start = round(float(sp["start"]) - origin, 3)
+        end = round(float(sp["end"]) - origin, 3)
+        if end <= 0 or start >= span_duration:
+            continue
+        local_spans.append({
+            "speaker_id": sp["speaker_id"],
+            "start": max(0.0, start),
+            "end": min(span_duration, end),
+        })
+    active_ids: List[str] = []
+    for sp in local_spans:
+        if sp["speaker_id"] not in active_ids:
+            active_ids.append(sp["speaker_id"])
+    return local_spans, active_ids
+
+
+def resolve_speaker_slots(
+    speakers_plan: Optional[Dict[str, Any]],
+    spans: List[Dict[str, Any]],
+    canvas: Tuple[int, int],
+    origin: float,
+    span_duration: float,
+) -> List[Dict[str, Any]]:
+    """Pure geometry: which speakers are active in this clip's window, and
+    where their slots land on canvas - no IO, no Pillow. This is the part of
+    `resolve_speakers` below that's safe for a frequently-polled preview
+    endpoint (the dashboard's `/reel/plan`) to call on every spec edit; the
+    rest of `resolve_speakers` generates and caches actual avatar/ring images,
+    which a live preview has no business paying for just to draw a labelled
+    placeholder rectangle - the same treatment chat/captions already get
+    there.
+    """
+    if not speakers_plan:
+        return []
+    local_spans, active_ids = _rebase_spans(spans, origin, span_duration)
+    if not local_spans:
+        return []
+    return layout_speaker_slots(speakers_plan, canvas, active_ids)
+
+
 def resolve_speakers(
     speakers_plan: Optional[Dict[str, Any]],
     spans: List[Dict[str, Any]],
@@ -119,27 +171,11 @@ def resolve_speakers(
         return None
     assets = assets or {}
     registry = registry or {}
-    cw, ch = int(canvas[0]), int(canvas[1])
     mode = speakers_plan["mode"]
 
-    local_spans = []
-    for sp in spans:
-        start = round(float(sp["start"]) - origin, 3)
-        end = round(float(sp["end"]) - origin, 3)
-        if end <= 0 or start >= span_duration:
-            continue
-        local_spans.append({
-            "speaker_id": sp["speaker_id"],
-            "start": max(0.0, start),
-            "end": min(span_duration, end),
-        })
+    local_spans, active_ids = _rebase_spans(spans, origin, span_duration)
     if not local_spans:
         return None
-
-    active_ids: List[str] = []
-    for sp in local_spans:
-        if sp["speaker_id"] not in active_ids:
-            active_ids.append(sp["speaker_id"])
 
     slots = {s["speaker_id"]: s for s in layout_speaker_slots(speakers_plan, canvas, active_ids)}
     if not slots:

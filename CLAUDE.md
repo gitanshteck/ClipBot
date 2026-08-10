@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-08-06.
+> 2026-08-07.
 
 ## What this actually is, right now
 
@@ -22,8 +22,10 @@ after the rest of the system was built. The real state:
 
 - All 6 pipeline stages (download, audio, transcribe, analyze, cut, cleanup)
   are fully implemented, plus a chat-harvest stage (1b), an opt-in speaker
-  diarization stage (2b), a Hinglish-caption transliteration stage (3c), and
-  a reel-render stage (5b) the README's table doesn't even list.
+  diarization stage (2b), a Hinglish-caption transliteration stage (3c), a
+  reel-render stage (5b), and a compile stage (5c) — assembling a named list
+  of non-contiguous VOD ranges into one landscape supercut — none of which
+  the README's table even lists.
 - There is a full local web dashboard/editor (`clipbot/server/`, FastAPI) —
   not just a CLI. It's the primary way clips actually get reviewed, cropped,
   effect-decorated, and re-rendered as 9:16 reels.
@@ -82,7 +84,7 @@ clipbot/
   cli.py            argparse CLI — every subcommand, the single source of truth
                      for what commands exist (run, download, chat, chat-sync,
                      audio, transcribe, analyze, transliterate, cut, reel,
-                     manifest, cleanup, info, list,
+                     compile, manifest, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path})
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
@@ -95,6 +97,10 @@ clipbot/
   manifest.py        write_manifest() -> manifest.json + manifest.csv (utf-8-sig)
   review.py          clips.json state machine: reconcile(), update_clip(),
                      add_manual_clip(), clips_for_cutting(), counts()
+  compilations.py    compilations.json sidecar for named multi-range
+                     supercuts: load()/save()/upsert()/set_output()/
+                     add_segment()/delete() - kept separate from review.py
+                     on purpose (see stages/compile.py)
   reelspec.py        vertical-reel geometry: normalize()/resolve()/build_filter()/
                      build_argv() — pure math, no IO
   fxspec.py          per-clip effects schema + ffmpeg filter builders — pure
@@ -107,7 +113,11 @@ clipbot/
   speakerfx.py       speaker avatar/ring overlay: resolve_speakers() + the
                      filter-chain builder - NOT pure like reelspec/fxspec,
                      since it synthesizes circle-cropped avatar and ring PNGs
-                     via Pillow (cached in _cache/avatars/)
+                     via Pillow (cached in _cache/avatars/). Its
+                     resolve_speaker_slots() is the one exception - the pure,
+                     no-IO geometry prefix of resolve_speakers(), split out
+                     so api_reel_plan can call it for the dashboard's canvas
+                     preview without paying for image generation
   chatrender.py      chat messages -> PNG overlay frames (Pillow, not libass)
   captionrender.py   Hinglish caption segments -> PNG overlay frames (Pillow;
                      smaller mirror of chatrender.py, no emote/badge images)
@@ -127,13 +137,15 @@ clipbot/
     analyze.py         stage 4  (Claude API, prompt caching, JSON extraction)
     cut.py             stage 5  (ffmpeg cut, copy or re-encode)
     reel.py            stage 5b (vertical 9:16 re-encode through fx filter graph)
+    compile.py         stage 5c (landscape supercut: cut + concat named ranges)
   server/
     app.py            FastAPI app, all HTTP routes, security guard()
     jobs.py           JobRunner (2 worker lanes) + EventBus (SSE)
     media.py          hand-rolled HTTP Range file serving
     __main__.py       `python -m clipbot.server` entry point (uvicorn)
-    templates/        Jinja2: base.html, library.html, workspace.html, review.html
-    static/           vanilla JS/CSS: app.js, fx.js, reel.js, review.js, *.css
+    templates/        Jinja2: base.html, library.html, workspace.html, review.html,
+                       compile.html
+    static/           vanilla JS/CSS: app.js, fx.js, reel.js, review.js, compile.js, *.css
                        (ignore the *.bak files sitting alongside — stale, unused)
 
 config/
@@ -151,6 +163,10 @@ tests/
   test_speakers.py             speaker merge/assignment logic, speakers spec
                                 validation + slot layout, and the same
                                 legacy-path-unaffected invariant for speakers
+  test_compile.py               compilations.json CRUD, segment/compilation
+                                fingerprinting, ffconcat list shape, and
+                                skip-unchanged/force behavior (ffmpeg calls
+                                stubbed - see the stage-by-stage section)
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
@@ -185,7 +201,8 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 | 4 | analyze | `stages/analyze.py` | `candidates.json` | Claude API against the rubric; structural validation only |
 | 5 | cut | `stages/cut.py` | `clips/*.mp4` | ffmpeg copy (default) or re-encode; writes into `clips.json[*].output` |
 | 5b | reel | `stages/reel.py` | `clips/reels/*.mp4` | vertical 9:16 re-encode through the fx/chat/captions/speakers filter graph |
-| 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel isn't rendered yet, unless `--force` |
+| 5c | compile | `stages/compile.py` | `clips/compilations/<name>.mp4` | cuts + concatenates a named list of non-contiguous VOD ranges into one landscape supercut; opt-in, never part of `run` |
+| 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel/compilation isn't rendered yet, unless `--force` |
 
 ### download.py
 
@@ -549,21 +566,99 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   what backs the dashboard's live "Effects" preview.
   **Known loose end**: it never passes `chat_list`/`caption_list`/
   `speaker_plan` — chat, captions and speaker avatars are geometry-only in
-  `/reel/plan` and don't actually render in the `/reel/preview` proxy
-  despite `reel.preview.include_chat` existing in `settings.json`; that
-  setting is unused, same unregistered-feature shape as the `waveform` job
-  kind below. The dashboard's live canvas (`reel.js`'s `drawReelPreview`)
-  compensates by drawing chat/captions as a labelled reserved-space
-  rectangle instead of a facsimile of the real content — **speakers gets no
-  such treatment at all**: unlike chat/captions, a speaker slot's position
-  depends on which speakers actually talk in a given clip
-  (`speaking_spans()`, workspace IO), which `/reel/plan`'s pure-math
-  `reelspec.resolve()` has no way to compute, so `plan["speakers"]` on that
-  route is just the validated spec block, not resolved slot rects. The
-  canvas preview currently shows nothing for the speakers layer at all.
+  `/reel/plan` and don't actually render in the `/reel/preview` proxy. (An
+  unused `reel.preview.include_chat` setting used to imply otherwise; it's
+  been removed rather than left as dead config, same call made on the
+  `benchmark` job kind below.) The dashboard's live canvas (`reel.js`'s
+  `drawReelPreview`) compensates by drawing chat/captions/speakers as a
+  labelled reserved-space rectangle instead of a facsimile of the real
+  content. Speakers needed one more piece to get this treatment at all:
+  unlike chat/captions, a speaker slot's position depends on which speakers
+  actually talk in a given clip (`speaking_spans()`, workspace IO), which
+  `reelspec.resolve()`'s pure math alone has no way to compute. Resolved by
+  splitting `speakerfx.resolve_speakers()`'s render-plan pipeline: the pure
+  "rebase spans onto this clip, find who's active, lay out slots" prefix is
+  now its own function, `speakerfx.resolve_speaker_slots()` — no avatar/ring
+  image generation, so it's safe for `api_reel_plan` to call on every
+  debounced spec edit, unlike the full `resolve_speakers()` the real render
+  uses. `api_reel_plan` calls it and attaches the result as
+  `plan["speaker_slots"]` (each slot's rect plus the speaker's name/color,
+  looked up from `library.list_speakers`), which `drawReelPreview` now draws
+  the same reserved-rectangle way as chat/captions.
 - `unrendered_reels(ws)` mirrors `uncut_approved` — blocks VOD deletion
   while reel-configured clips lack a rendered file (reels re-encode from
-  source, so losing the VOD strands them).
+  source, so losing the VOD strands them). `stages/compile.py`'s
+  `unrendered_compilations(ws)` is the third sibling in this family, checked
+  by both the CLI's `cmd_cleanup` and the dashboard's `_h_cleanup` alongside
+  `uncut_approved`/`unrendered_reels` — previously only the dashboard
+  checked all three; the CLI checked none but `uncut_approved`.
+
+### compile.py (stage 5c)
+
+- A third sibling of cut/reel, for the same "different output, different
+  idempotence key" reason reel is separate from cut: cut produces N
+  archival per-clip files, reel produces one vertical re-encode per clip,
+  compile produces **one landscape video assembled from several
+  non-contiguous source ranges** — a supercut, e.g. a curated YouTube
+  highlights reel. `clip["output"]`/`clip["reel_output"]` live on
+  `clips.json`; a compilation's state lives entirely in its own sidecar,
+  `compilations.json` (owned by `clipbot/compilations.py`), **not**
+  `clips.json` — a compilation's segments must never be picked up by a
+  normal `clipbot cut` run as individual clip outputs, so they're kept out
+  of the approve/reject/cut review queue entirely rather than added via
+  `review.add_manual_clip`.
+- `render_compilation(ws, settings, name, force=False, progress=NULL_PROGRESS)
+  -> Path`. Looks up the named compilation's `segments` (`{start, end,
+  label}`, always stored start-sorted by `compilations.upsert`) from
+  `compilations.json`.
+- Padding reuses `cut_stage._padded_range` as-is — same `cut.pad_start`/
+  `cut.pad_end` settings reel.py already reuses rather than inventing its
+  own padding knob.
+- **Every segment is always re-encoded, never stream-copied** (`compile.encoder`/
+  `compile.preset`/`compile.crf`, deliberately not inheriting `cut.encoder`/
+  `cut.preset`/`cut.crf`, same "doesn't inherit" precedent as
+  `reel.preset_x264` not inheriting `cut.preset`): the final join uses the
+  concat demuxer's `-c copy` mode, which requires every input to share
+  identical codec parameters, and a stream-copy cut snaps to the nearest
+  keyframe (fine for an archival clip, not for a boundary that has to land
+  exactly where a highlight was picked).
+- Each re-encoded segment is cached in a per-compilation scratch directory
+  (`ws.compile_scratch_dir(name)` = `root/_compile/<name>/`, filename keyed
+  by a hash of its resolved range + encode settings) and **not** deleted
+  after a successful render — a re-render skips any segment whose resolved
+  range and settings are unchanged, the same skip-if-unchanged discipline
+  cut.py applies per clip.
+- The join step writes an ffconcat list of bare segment filenames (all in
+  the same scratch directory, so no path-escaping is needed) and runs
+  `ffmpeg -f concat -safe 0 -i list.ffconcat -c copy -movflags +faststart`
+  — a fast, lossless join of the already-uniformly-encoded segments.
+- Whole-compilation idempotence key is a hash of the compilation name +
+  every resolved segment range + the encode/padding settings
+  (`_compilation_fingerprint`) — self-maintaining the same way reel.py's
+  argv hash is, rather than a hand-listed field tuple like cut.py's.
+- Output recorded via `compilations.set_output`: `{file, bytes, duration
+  (sum of padded segment spans — exact, since the join is a lossless
+  stream copy), rendered_at, fingerprint}`, at
+  `clips/compilations/<name>.mp4` (a subdirectory of `clips_dir`, same
+  treatment `reels_dir` gets, so compilations don't inflate the flat
+  per-clip listing).
+- `unrendered_compilations(ws)` mirrors `cut.uncut_approved`/
+  `reel.unrendered_reels` — blocks VOD deletion while a compilation has
+  segments but no rendered file (every segment re-encodes from the source
+  video, so losing it strands them the same way an un-rendered reel does).
+  Checked by both the CLI's `cmd_cleanup` and the dashboard's `_h_cleanup`.
+- CLI: `clipbot compile --workspace <slug> --name <name> --range
+  start,end[,label] [--range ...] [--force]`. `--range` upserts (replaces,
+  not merges) the named compilation's segment list before rendering;
+  omitting it entirely just re-renders the existing definition.
+- Also reachable from the dashboard — `/w/{slug}/compile`
+  (`templates/compile.html` + `static/compile.js`), see the dashboard
+  section below. The CLI and the dashboard write the exact same
+  `compilations.json` sidecar, so a compilation created by one is fully
+  visible and editable in the other (verified: `clipbot compile` output
+  shows up in the dashboard's list with its rendered file playable, and
+  `external_activity()` surfaces a CLI-driven compile run as busy instead
+  of idle).
 
 ## Spec modules (pure math, no IO)
 
@@ -822,11 +917,25 @@ error message instead of a silent no-op or a 500.
   rejects slugs starting with `_` (reserved for `_cache`/`_library`), and
   confirms the resolved path doesn't escape `work_root` (path traversal guard).
 - Route groups (see `app.py` for the full list): pages (`/`, `/w/{slug}`,
-  `/w/{slug}/review`); workspaces (`GET/POST /api/workspaces`); clips
-  (`GET/POST /api/workspaces/{slug}/clips`, **`PATCH .../clips/{clip_id}`**
+  `/w/{slug}/review`, `/w/{slug}/compile`); workspaces (`GET/POST
+  /api/workspaces`); clips (`GET/POST /api/workspaces/{slug}/clips`,
+  **`PATCH .../clips/{clip_id}`**
   — this is the route `specerror.py` references: it catches `KeyError` →
   404 and `ValueError` → 400, so a bad reel/effects spec surfaces as a
-  clean 400 with the validator's message); transcript; chat (`sync`,
+  clean 400 with the validator's message); compilations (`GET/POST
+  /api/workspaces/{slug}/compilations` — the `POST` is a whole-list
+  replace via `compilations.upsert`, the compile page's own editor Save;
+  `POST .../compilations/{name}/segments` — additive, `compilations.
+  add_segment`, what the review page's "+ Compilation" clip action calls;
+  `DELETE .../compilations/{name}` — also purges the rendered `.mp4` and
+  scratch dir, `KeyError` → 404); transcript (`GET .../transcript`,
+  Devanagari — and `GET .../captions`, the Hinglish transliteration if
+  `clipbot transliterate` has been run; both return `{present, segments}`,
+  and `captions.json`'s segments share `transcript.json`'s segment `id`s
+  exactly, so a frontend can index one by the other to swap a transcript
+  row's displayed script without re-deriving offsets — this is what backs
+  review.html's and compile.html's Dev/Hin transcript toggle, hidden
+  whenever `captions.json` doesn't exist for that workspace); chat (`sync`,
   `offset`, `messages`); speakers (`GET .../speakers` — transcript segments
   merged with their assigned speaker, for the transcript view;
   `POST .../speakers/assign` — manual range override, `speaker_id: null`
@@ -839,28 +948,35 @@ error message instead of a silent no-op or a 500.
   (assets, presets, text styles,
   speaker profiles — `GET/POST /api/library/speakers`,
   `DELETE .../speakers/{id}` — an audition media route); jobs
-  (`POST .../jobs`, `GET /api/jobs`, cancel); `GET /api/doctor`
+  (`POST .../jobs`, `GET /api/jobs`, cancel — `kind: "compile"` takes a
+  `name`, same shape as `kind: "reel"` taking `clip_ids`); `GET /api/doctor`
   (diagnostics: tool resolvability, API key presence, CUDA device count,
-  free disk, Python version); media (video/clip/reel serving with
-  `?download=1`, manifest CSV download); and `GET /api/events`
-  (Server-Sent Events, with `Last-Event-ID` replay).
+  free disk, Python version); media (video/clip/reel/**compilation**
+  serving with `?download=1`, manifest CSV download — a compilation's file
+  is always `<name>.mp4`, so the name doubles as the lookup key, no
+  `compilations.json` read needed on the media route); and `GET
+  /api/events` (Server-Sent Events, with `Last-Event-ID` replay — event
+  kinds include `job`, `progress`, `log`, `workspace`, `clips`,
+  `compilations`, `preview`, `library`).
 - `external_activity(ws)` detects a **CLI-driven** job the dashboard didn't
   start itself: partial download files (`.part`/`.ytdl`), or (Windows-only)
   a `wmic process ... get commandline` scan matching `clipbot` + the
-  workspace's video id/slug — needed for stages like transcribe that write
-  no partial file to detect otherwise.
+  workspace's video id/slug for one of `transcribe`/`analyze`/`cut`/
+  `audio`/`download`/`compile`/`run` — needed for stages like transcribe
+  (and compile) that write no partial file to detect otherwise.
 
 ### jobs.py — JobRunner / EventBus
 
 - **Two worker lanes**: `HEAVY_KINDS = (download, audio, transcribe,
-  analyze, diarize, pipeline, reel)`, `LIGHT_KINDS = (cut, chat,
-  transliterate, manifest, cleanup, waveform, benchmark)`, each on its own
+  analyze, diarize, pipeline, reel, compile)`, `LIGHT_KINDS = (cut, chat,
+  transliterate, manifest, cleanup, waveform)`, each on its own
   thread — a 3-second clip cut never queues behind a 90-minute transcribe,
   and chat harvest (must run before Kick's retention expires it) never
   queues behind an x264 render. `transliterate` is light for the same
   reason as `chat`: a handful of batched Claude calls, not CPU/GPU-bound.
   `diarize` is heavy for the same reason as `transcribe`: CPU-bound (no CUDA
-  on this machine) and can run long on a multi-hour VOD.
+  on this machine) and can run long on a multi-hour VOD. `compile` is heavy
+  for the same reason as `reel`: every segment is a full x264 re-encode.
 - Threads, not subprocesses, because none of the actual work is
   Python-CPU-bound (CTranslate2 releases the GIL; ffmpeg/yt-dlp are
   subprocesses; Claude calls are network I/O) and the ~3GB Whisper model can
@@ -878,7 +994,11 @@ error message instead of a silent no-op or a 500.
 `waveform` handler — submitting one raises `StageError("Unknown job kind
 'waveform'")`. `chatsync.py` reads `audio.wav` directly instead of a
 pre-computed `waveform.json`. This looks like a partially-built/abandoned
-feature — don't assume a waveform file exists anywhere.
+feature — don't assume a waveform file exists anywhere. (`LIGHT_KINDS` used
+to also list `"benchmark"`, with the same unregistered-handler problem but
+none of `waveform`'s supporting scaffolding — no `Workspace` path, no
+settings, no dashboard purpose; `transcribe --max-seconds` benchmark mode is
+CLI-only. Removed outright rather than left as a second dead kind.)
 
 ## Effects/reel preview pipeline (clipbot/preview.py)
 
@@ -925,6 +1045,11 @@ Sections and the values worth knowing without opening the file:
   `num_speakers`/`min_speakers`/`max_speakers` all `null` by default (let
   pyannote infer).
 - **`cut`** — `pad_start: 1.0`, `pad_end: 1.5`, `re_encode: false`.
+- **`compile`** — `min_duration: 0.5`; `encoder: "libx264"`, `preset: "slow"`,
+  `crf: 18` **deliberately does not inherit `cut.encoder`/`cut.preset`/
+  `cut.crf`** (same reasoning as `reel.preset_x264` below — it's a final
+  deliverable); padding reuses `cut.pad_start`/`cut.pad_end` rather than its
+  own setting, same choice `reel` already made.
 - **`reel`** — `canvas: "1080x1920"`, `preset: "cam_top"`; `preset_x264:
   "slow"` **deliberately does not inherit `cut.preset`** (measured: 30s of
   1080×1920@60 is 6s at `veryfast` vs 19s at `slow` — "quality is worth the
@@ -1050,6 +1175,18 @@ Sections and the values worth knowing without opening the file:
 - ...understand the review/approval state machine → `clipbot/review.py`
   (`reconcile()` is the interesting one: it re-matches a fresh rubric run's
   candidates against existing human-edited clips by time-overlap).
+- ...assemble a landscape supercut from several non-contiguous VOD ranges
+  (e.g. a curated YouTube highlights video) → `clipbot compile` /
+  `clipbot/stages/compile.py` + `clipbot/compilations.py` (also reachable
+  from the dashboard at `/w/{slug}/compile`) — not `clipbot cut`, which
+  only ever produces separate per-clip files.
+- ...add a new full dashboard page (not just a route) → a new template
+  extending `base.html` (gets the shared topbar/job-panel/SSE for free) +
+  a dedicated `static/<page>.js` if it's non-trivial (see `compile.html`/
+  `compile.js` for a from-scratch example built by adapting review.js's
+  timeline/transcript techniques rather than including review.js wholesale)
+  + a page route in `app.py` + a nav link from wherever makes sense
+  (`workspace.html` for a per-workspace page).
 
 ## Keeping this file honest
 

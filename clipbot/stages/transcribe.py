@@ -234,7 +234,6 @@ def transcribe_audio(
             if elapsed_so_far > 0
             else None,
         )
-        progress.event("segment", segments[-1])
         progress.check_cancelled()
 
         if total and seg.end - last_log >= 300:  # progress every ~5 audio-minutes

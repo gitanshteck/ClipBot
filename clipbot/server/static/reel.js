@@ -107,6 +107,7 @@ async function replan(immediate) {
       reelPlan = await api(`/api/workspaces/${SLUG}/reel/plan`, 'POST',
                            { spec: currentSpec(),
                              clip_id: selected ? selected.id : null });
+      setPreviewStale(false);
       drawReelPreview();
       drawCropRects();
       updateUpscaleBadge();
@@ -116,10 +117,22 @@ async function replan(immediate) {
     } catch (e) {
       const b = document.getElementById('reel-badge');
       if (b) { b.textContent = e.message; b.className = 'badge bad'; }
+      // The canvas, crop rects and FX lane above all still show the last
+      // *successful* plan - without this, a rejected spec (e.g. the
+      // apostrophe-in-text rule) looks identical to one that applied fine,
+      // since none of drawReelPreview/drawCropRects/fxOnPlan run on failure.
+      setPreviewStale(true);
     }
   };
   if (immediate) return run();
   planTimer = setTimeout(run, 130);
+}
+
+function setPreviewStale(stale) {
+  const right = document.querySelector('.reel-right');
+  if (right) right.classList.toggle('stale', stale);
+  const lane = document.getElementById('fx-lane');
+  if (lane) lane.classList.toggle('stale', stale);
 }
 
 function updateUpscaleBadge() {
@@ -205,6 +218,30 @@ function drawReelPreview() {
     ctx.textBaseline = 'top';
     ctx.fillText('CAPTIONS', rx * k + 6, ry * k + 6);
     ctx.restore();
+  }
+
+  // Speaker avatar slots: unlike chat/captions, this rect's position depends
+  // on who's actually talking in this clip (api_reel_plan resolves it via
+  // speakerfx.resolve_speaker_slots - workspace speaking-span data, not pure
+  // math), so it's absent entirely (not drawn as an empty reserved band) for
+  // a clip where no assigned speaker's window overlaps at all. Same
+  // reserved-space-not-a-facsimile treatment as chat/captions: the real
+  // avatar image and ring only exist at render time.
+  if (reelPlan.speaker_slots && reelPlan.speaker_slots.length) {
+    for (const slot of reelPlan.speaker_slots) {
+      const { x, y, w, h, name, color } = slot;
+      ctx.save();
+      ctx.fillStyle = 'rgba(120,90,224,.20)';
+      ctx.fillRect(x * k, y * k, w * k, h * k);
+      ctx.strokeStyle = color || 'rgba(120,90,224,.9)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x * k + 1, y * k + 1, w * k - 2, h * k - 2);
+      ctx.fillStyle = '#fff';
+      ctx.font = '600 11px system-ui, sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(name || slot.speaker_id, x * k + 4, y * k + 4);
+      ctx.restore();
+    }
   }
 
   // Instagram's chrome: caption block along the bottom, action column right.
@@ -359,7 +396,11 @@ function setChatField(field, value) {
     document.getElementById('chat-size-label').textContent = Math.round(value * 100) + '%';
   }
   markReelDirty();
-  replan(true);
+  // 'size' is a <input type=range oninput=...> - fires once per pixel of
+  // drag, so it must go through replan()'s debounce like the crop/fx drag
+  // paths do. Every other field here is a discrete onchange (select/number),
+  // where the old immediate replan is still the right call.
+  replan(field === 'size' ? false : true);
   if (field === 'offset') updateChatWindowCount();
 }
 window.setChatField = setChatField;
@@ -474,7 +515,13 @@ async function estimateChatOffset() {
       ? r.boundary_offset_seconds : r.offset_seconds;
     const el = document.getElementById('chat-ws-offset');
     if (el) el.value = suggested;
-    toast(`Suggested offset: ${suggested}s — click the field and save if it looks right`);
+    // Setting .value programmatically doesn't fire the field's own `change`
+    // handler (its only save path), so the estimate would otherwise sit in
+    // the field unsaved until the user retyped it themselves - apply it
+    // directly instead. The confidence/warning text above already gives the
+    // user what they need to manually override it afterward if they don't
+    // trust it.
+    await setWorkspaceChatOffset(suggested);
   } catch (e) {
     if (out) out.textContent = '';
     toast(e.message, true);
@@ -505,7 +552,9 @@ function setCaptionsField(field, value) {
     document.getElementById('captions-size-label').textContent = Math.round(value * 100) + '%';
   }
   markReelDirty();
-  replan(true);
+  // Same debounce split as setChatField: 'size' is a range slider (fires
+  // per pixel of drag), everything else here is a discrete onchange.
+  replan(field === 'size' ? false : true);
 }
 window.setCaptionsField = setCaptionsField;
 
@@ -539,6 +588,12 @@ function setSpeakersEnabled(on) {
     delete s.speakers;
   }
   document.getElementById('speakers-controls').style.display = on ? '' : 'none';
+  // Unlike chat/captions' plain <select>/<input> controls (which keep
+  // whatever value they last had even while hidden), the roster picker is
+  // built fresh via innerHTML and only renderSpeakersControls() populates
+  // it - without this, turning avatars on for the first time on a clip left
+  // it blank until something else happened to trigger a re-render.
+  if (on) renderSpeakersControls();
   markReelDirty();
   replan(true);
 }
@@ -553,10 +608,55 @@ function setSpeakersField(field, value) {
   if (field === 'avatar_size') {
     document.getElementById('speakers-size-label').textContent = Math.round(value * 100) + '%';
   }
+  if (field === 'gap') {
+    document.getElementById('speakers-gap-label').textContent = Math.round(value * 100) + '%';
+  }
+  markReelDirty();
+  // Same debounce split as setChatField: 'avatar_size'/'gap' are range
+  // sliders (fire per pixel of drag), everything else here is a discrete
+  // onchange.
+  replan(field === 'avatar_size' || field === 'gap' ? false : true);
+}
+window.setSpeakersField = setSpeakersField;
+
+// roster is a list of speaker ids, not a single field - a fixed lineup
+// (evaluated in the order given) that overrides the default "whoever's
+// actually talking, spaced evenly" layout. Checking a speaker on/off here
+// adds/removes it from that list rather than replacing it wholesale.
+function toggleSpeakerRoster(id, checked) {
+  const s = currentSpec();
+  s.speakers = s.speakers || {
+    mode: 'appear', edge: 'bottom', avatar_size: 0.16, gap: 0.02, ring_width_px: 6,
+  };
+  const roster = new Set(s.speakers.roster || []);
+  if (checked) roster.add(id); else roster.delete(id);
+  s.speakers.roster = roster.size ? Array.from(roster) : null;
   markReelDirty();
   replan(true);
 }
-window.setSpeakersField = setSpeakersField;
+window.toggleSpeakerRoster = toggleSpeakerRoster;
+
+// speakerRegistry is review.js's top-level `let` (loaded before this file,
+// same page, same script scope) - not a window property, but directly
+// readable by name from here just like fx.js already reads review.js's
+// other top-level state.
+function renderSpeakerRosterPicker(roster) {
+  const host = document.getElementById('speakers-roster-list');
+  if (!host) return;
+  const ids = Object.keys(typeof speakerRegistry !== 'undefined' ? speakerRegistry : {});
+  if (!ids.length) {
+    host.innerHTML = '<span class="meta">No named speakers yet - name one in the transcript panel below first.</span>';
+    return;
+  }
+  host.innerHTML = ids.map(id => {
+    const checked = (roster || []).includes(id);
+    const name = speakerRegistry[id].name;
+    return `<label class="meta" style="display:flex;gap:4px;align-items:center">
+      <input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleSpeakerRoster('${id}', this.checked)">
+      ${esc(name)}
+    </label>`;
+  }).join('');
+}
 
 function renderSpeakersControls() {
   const s = currentSpec();
@@ -574,6 +674,10 @@ function renderSpeakersControls() {
     document.getElementById('speakers-size-label').textContent = Math.round(size * 100) + '%';
     document.getElementById('speakers-ring-width').value =
       speakers.ring_width_px != null ? speakers.ring_width_px : 6;
+    const gap = speakers.gap != null ? speakers.gap : 0.02;
+    document.getElementById('speakers-gap').value = gap;
+    document.getElementById('speakers-gap-label').textContent = Math.round(gap * 100) + '%';
+    renderSpeakerRosterPicker(speakers.roster);
   }
 }
 
@@ -632,6 +736,8 @@ function renderReelControls() {
 
 async function saveReel() {
   if (!selected) { toast('Select a clip first', true); return; }
+  const btn = document.getElementById('reel-save-btn');
+  if (btn) btn.disabled = true;
   try {
     await api(`/api/workspaces/${SLUG}/clips/${selected.id}`, 'PATCH',
               { reel: currentSpec() });
@@ -639,12 +745,18 @@ async function saveReel() {
     document.getElementById('reel-panel').classList.remove('dirty');
     await loadClips();
     toast('Reel settings saved');
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 window.saveReel = saveReel;
 
 async function applyReelToAll() {
   if (!confirm('Apply these crop settings to every approved clip?')) return;
+  const btn = document.getElementById('reel-apply-all-btn');
+  if (btn) btn.disabled = true;
   try {
     const r = await api(`/api/workspaces/${SLUG}/reel/apply`, 'POST',
                         { spec: currentSpec(), scope: 'approved' });
@@ -652,21 +764,29 @@ async function applyReelToAll() {
     document.getElementById('reel-panel').classList.remove('dirty');
     await loadClips();
     toast(`Applied to ${r.updated} clip(s)`);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 window.applyReelToAll = applyReelToAll;
 
 async function renderReel(all) {
+  if (!all && !selected) { toast('Select a clip first', true); return; }
+  const btn = document.getElementById(all ? 'reel-render-all-btn' : 'reel-render-btn');
+  if (btn) btn.disabled = true;
   const body = { kind: 'reel' };
-  if (!all) {
-    if (!selected) { toast('Select a clip first', true); return; }
-    body.clip_ids = [selected.id];
-  }
+  if (!all) body.clip_ids = [selected.id];
   try {
     if (reelDirty && selected && !all) await saveReel();
     await api(`/api/workspaces/${SLUG}/jobs`, 'POST', body);
     toast(all ? 'Rendering all approved reels' : 'Rendering reel — takes ~1 min');
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 window.renderReel = renderReel;
 
@@ -722,10 +842,16 @@ function initReel() {
   const v = document.getElementById('player');
   if (v) {
     v.addEventListener('loadedmetadata', () => { replan(true); });
-    // Keep the preview live while scrubbing/playing, but cheaply.
+    // Keep the preview live while scrubbing/playing, but cheaply. This used
+    // to check `#reel-panel.hidden`, an element property nothing in this
+    // codebase ever sets (the panel is always inline in the page, never
+    // toggled) - so the redraw ran unconditionally forever. `document.hidden`
+    // (the Page Visibility API - a global, not an element property) is what
+    // was almost certainly intended: skip redrawing while the browser tab
+    // itself is backgrounded.
     setInterval(() => {
+      if (document.hidden) return;
       if (!document.getElementById('reel-panel')) return;
-      if (document.getElementById('reel-panel').hidden) return;
       drawReelPreview();
     }, 250);
   }

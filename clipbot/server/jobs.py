@@ -28,12 +28,23 @@ log = get_logger(__name__)
 # whole point is that a three-second clip cut never queues behind long work.
 # "diarize" is heavy for the same reason as transcribe - CPU-bound (no CUDA
 # on this machine) and can run for a long time on a multi-hour VOD.
-HEAVY_KINDS = ("download", "audio", "transcribe", "analyze", "diarize", "pipeline", "reel")
+# "compile" is the same cost class as "reel" - it also re-encodes every
+# segment through x264 - so it gets the same lane for the same reason.
+HEAVY_KINDS = (
+    "download", "audio", "transcribe", "analyze", "diarize", "pipeline", "reel", "compile",
+)
 # "chat" is light: it's network-bound (a 4.6h stream was 15 requests in 16s) and
 # must not queue behind an x264 render, because chat expires with the VOD.
 # "transliterate" is the same shape as chat: a handful of batched Claude API
 # calls, not CPU/GPU-bound, and shouldn't queue behind a long transcribe/reel.
-LIGHT_KINDS = ("cut", "chat", "transliterate", "manifest", "cleanup", "waveform", "benchmark")
+# "waveform" has no registered handler yet (see CLAUDE.md's "Known loose end")
+# - it's listed here because a per-second RMS envelope job would be
+# network/CPU-light like the rest of this lane, not because it's reachable
+# today. There used to be a "benchmark" entry alongside it, but that one had
+# no supporting Workspace path, no settings, and no dashboard purpose at all
+# (transcribe's --max-seconds benchmark mode is CLI-only) - removed rather
+# than left as a second unregistered kind.
+LIGHT_KINDS = ("cut", "chat", "transliterate", "manifest", "cleanup", "waveform")
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"

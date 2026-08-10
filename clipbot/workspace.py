@@ -157,6 +157,33 @@ class Workspace:
         return self.root / "clips.json"
 
     @property
+    def compilations_path(self) -> Path:
+        """Named multi-range compilations (see clipbot/compilations.py).
+
+        A sibling of clips.json, not a part of it - a compilation's segments
+        must never be picked up by a normal `clipbot cut` run as individual
+        clip outputs, so they live in their own sidecar rather than the
+        approve/reject/cut review queue.
+        """
+        return self.root / "compilations.json"
+
+    @property
+    def compilations_dir(self) -> Path:
+        """Rendered compilation videos. A subdirectory of clips_dir so they
+        don't inflate the cut count, same treatment reels_dir already gets."""
+        return self.clips_dir / "compilations"
+
+    def compile_scratch_dir(self, name: str) -> Path:
+        """Scratch directory for one compilation's per-segment cut files.
+
+        Not a deliverable itself - consumed by the concat join and kept
+        around (not cleaned up) so a re-render can skip segments whose
+        source range hasn't changed, same disposable-but-reusable treatment
+        cut.py's own clips/*.mp4 outputs get.
+        """
+        return self.root / "_compile" / name
+
+    @property
     def chat_path(self) -> Path:
         """Stream chat, harvested from Kick and keyed to VOD offsets.
 

@@ -294,6 +294,14 @@ kbd {
   background: var(--panel2); border: 1px solid var(--line);
   border-radius: 6px; overflow: hidden;
 }
+
+/* Applied to .reel-right (canvas + crop rects) and .fx-lane while replan()'s
+   most recent request is rejected - both otherwise keep showing the last
+   *successful* plan with no indication it no longer matches the spec. */
+.reel-right.stale, .fx-lane.stale {
+  opacity: .45; filter: grayscale(.6);
+  transition: opacity .15s, filter .15s;
+}
 .fx-pill {
   position: absolute; top: 3px; bottom: 3px; min-width: 14px;
   background: rgba(25, 162, 210, .30); border: 1px solid var(--accent);

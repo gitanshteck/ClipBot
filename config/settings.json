@@ -141,6 +141,15 @@
     "crf": 20
   },
 
+  "compile": {
+    "_comment": "Landscape supercuts: `clipbot compile` cuts a named list of non-contiguous VOD ranges and concatenates them into one video. Reuses cut.pad_start/pad_end (same as reel.py does) rather than its own padding knob. Every segment is always re-encoded - never stream-copied like cut.re_encode=false - because the concat demuxer's final join needs every input to share identical codec parameters, and a keyframe-snapped stream copy can't land exactly on a chosen highlight boundary.",
+    "min_duration": 0.5,
+    "_comment_encode": "A final deliverable, so biased toward quality over speed the same way reel.preset_x264 is - deliberately doesn't inherit cut.encoder/preset/crf.",
+    "encoder": "libx264",
+    "preset": "slow",
+    "crf": 18
+  },
+
   "reel": {
     "_comment": "Vertical 9:16 export. Crop rects are fractions of the source frame, so a spec authored against this 720p VOD still resolves correctly if it is re-downloaded at 1080p.",
     "canvas": "1080x1920",
@@ -232,7 +241,6 @@
       "max_seconds": 6.0,
       "pad_seconds": 0.75,
       "timeout_seconds": 60,
-      "include_chat": true,
       "cache_max_mb": 512
     }
   },

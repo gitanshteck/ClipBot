@@ -16,12 +16,14 @@ from pathlib import Path
 from typing import Optional
 
 from . import chatsync
+from . import compilations
 from . import manifest as manifest_module
 from . import review
 from .config import Settings, load_settings
 from .stages import analyze as analyze_stage
 from .stages import audio as audio_stage
 from .stages import chat as chat_stage
+from .stages import compile as compile_stage
 from .stages import cut as cut_stage
 from .stages import download as download_stage
 from .stages import diarize as diarize_stage
@@ -185,6 +187,38 @@ def cmd_reel(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_compile(args: argparse.Namespace, settings: Settings) -> int:
+    ws = resolve_workspace(args, settings)
+
+    if args.range:
+        segments = []
+        for raw in args.range:
+            parts = raw.split(",", 2)
+            if len(parts) < 2:
+                raise StageError(
+                    "--range must be 'start,end[,label]', got {0!r}".format(raw)
+                )
+            try:
+                start = float(parts[0])
+                end = float(parts[1])
+            except ValueError:
+                raise StageError(
+                    "--range start/end must be numbers, got {0!r}".format(raw)
+                )
+            label = parts[2] if len(parts) > 2 else ""
+            segments.append({"start": start, "end": end, "label": label})
+        try:
+            compilations.upsert(ws, args.name, segments, settings)
+        except ValueError as exc:
+            raise StageError(str(exc))
+
+    out_path = compile_stage.render_compilation(
+        ws, settings, args.name, force=args.force
+    )
+    print(out_path)
+    return 0
+
+
 def cmd_manifest(args: argparse.Namespace, settings: Settings) -> int:
     ws = resolve_workspace(args, settings)
     json_path, csv_path = manifest_module.write_manifest(ws, settings)
@@ -205,6 +239,29 @@ def cmd_cleanup(args: argparse.Namespace, settings: Settings) -> int:
             "would mean re-downloading it to produce them.\n"
             "Run `clipbot cut` first, or pass --force to delete anyway.".format(
                 len(pending)
+            )
+        )
+
+    # Reels and compilations both re-encode from the VOD rather than copying
+    # an already-cut clip, so losing the source strands them too - the
+    # dashboard's cleanup job already checks both; the CLI previously only
+    # checked uncut clips.
+    unrendered_reels = reel_stage.unrendered_reels(ws)
+    if unrendered_reels and not args.force:
+        raise StageError(
+            "{0} clip(s) have reel settings but no rendered reel - deleting the "
+            "VOD now would strand them.\n"
+            "Render them first, or pass --force to delete anyway.".format(
+                len(unrendered_reels)
+            )
+        )
+    unrendered_comps = compile_stage.unrendered_compilations(ws)
+    if unrendered_comps and not args.force:
+        raise StageError(
+            "{0} compilation(s) have segments but no rendered output - deleting "
+            "the VOD now would strand them.\n"
+            "Render them first, or pass --force to delete anyway.".format(
+                len(unrendered_comps)
             )
         )
 
@@ -586,6 +643,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the ffmpeg command for each clip and render nothing",
     )
     p_reel.set_defaults(func=cmd_reel)
+
+    p_compile = sub.add_parser(
+        "compile",
+        help="assemble a named list of VOD ranges into one landscape video",
+    )
+    add_workspace_args(p_compile)
+    p_compile.add_argument(
+        "--name", required=True, help="compilation name (also the output filename)"
+    )
+    p_compile.add_argument(
+        "--range",
+        action="append",
+        metavar="START,END[,LABEL]",
+        help="add/replace a segment (repeatable); omit entirely to re-render "
+        "an existing compilation",
+    )
+    p_compile.add_argument(
+        "--force", action="store_true", help="re-render even if the file is current"
+    )
+    p_compile.set_defaults(func=cmd_compile)
 
     p_man = sub.add_parser("manifest", help="write manifest.json + manifest.csv")
     add_workspace_args(p_man)

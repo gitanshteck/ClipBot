@@ -132,7 +132,7 @@
         <span class="spacer" style="flex:1"></span>
         <button onclick="previewClip()" title="Play just this range">↻ Preview</button>
         <button onclick="saveEdits()" id="save-btn">Save</button>
-        <button onclick="resetToModel()" title="Restore the model's original range">Reset</button>
+        <button onclick="resetToModel()" id="reset-btn" title="Restore the model's original range">Reset</button>
       </div>
       <div class="hint" style="margin-top:7px">
         Times accept <b>41:00</b>, <b>1:23:45</b>, or a bare number of seconds.
@@ -168,12 +168,12 @@
             </label>
           </div>
           <div class="row" style="margin-top:10px">
-            <button onclick="saveReel()">Save</button>
-            <button onclick="applyReelToAll()">Apply to all approved</button>
-            <button onclick="renderReel(false)">▶ Render this reel</button>
+            <button onclick="saveReel()" id="reel-save-btn">Save</button>
+            <button onclick="applyReelToAll()" id="reel-apply-all-btn">Apply to all approved</button>
+            <button onclick="renderReel(false)" id="reel-render-btn">▶ Render this reel</button>
           </div>
           <div class="row" style="margin-top:6px">
-            <button onclick="renderReel(true)">Render all approved</button>
+            <button onclick="renderReel(true)" id="reel-render-all-btn">Render all approved</button>
             <button onclick="copyFfmpeg()" title="Copy the filter_complex string">⧉ Copy filter</button>
           </div>
 
@@ -282,13 +282,26 @@
                      onchange="setSpeakersField('ring_width_px', +this.value)">
               <span class="meta">px (discord mode only)</span>
             </div>
+            <div class="row" style="margin-top:6px;align-items:center">
+              <label class="meta">gap</label>
+              <input type="range" id="speakers-gap" min="0" max="0.10" step="0.005"
+                     oninput="setSpeakersField('gap', +this.value)" style="flex:1">
+              <span class="meta" id="speakers-gap-label">2%</span>
+            </div>
+            <div class="row" style="margin-top:6px;align-items:flex-start">
+              <label class="meta" style="padding-top:2px">roster</label>
+              <div id="speakers-roster-list" style="flex:1;display:flex;flex-wrap:wrap;gap:8px"></div>
+            </div>
             <div class="hint" style="margin-top:6px">
               Who's speaking comes from the transcript's speaker assignment
               (below) and each speaker's avatar image comes from the library
               (drop a picture into <code>_library/avatars/</code> and hit
               Rescan, then set it on a speaker in the transcript panel).
-              Layout is automatic - whichever speakers actually talk in this
-              clip are spaced evenly along the edge you pick.
+              Layout is automatic by default - whichever speakers actually
+              talk in this clip are spaced evenly along the edge you pick.
+              Checking speakers in <b>roster</b> instead pins a fixed,
+              always-the-same-order lineup regardless of who talks in a
+              given clip.
             </div>
           </div>
 
@@ -360,6 +373,10 @@
     <!-- transcript -->
     <div class="tx-wrap">
       <div class="tx-bar">
+        <div class="seg" id="tx-script-toggle" hidden style="margin:0">
+          <button data-script="dev" class="on" onclick="setTxScript('dev')" title="देवनागरी">Dev</button>
+          <button data-script="hin" onclick="setTxScript('hin')" title="Hinglish (Latin script)">Hin</button>
+        </div>
         <input type="search" id="tx-search" placeholder="Search transcript (Devanagari — देवनागरी)…"
                autocomplete="off" title="The transcript is Hindi in Devanagari script, so English words rarely match here. Use the clip search on the right for English.">
         <label class="meta" style="display:flex;gap:4px;align-items:center">
@@ -372,6 +389,9 @@
       </div>
       <div class="tx-bar">
         <button id="speaker-mode-btn" onclick="toggleSpeakerMode()" title="Click two lines to assign a speaker to that range">🗣 Assign speakers</button>
+        <span class="meta" id="diarize-hint" style="display:none">
+          No diarization run yet — assignments below are manual only. Run <code>clipbot diarize</code> first to auto-assign most segments.
+        </span>
         <span id="speaker-assign-controls" style="display:none;align-items:center;gap:6px">
           <select id="speaker-assign-select"></select>
           <button onclick="editSelectedSpeaker()" title="Set this speaker's avatar image and ring color">✎ edit</button>
@@ -400,7 +420,7 @@
         <div class="row">
           <input type="text" id="new-start" inputmode="decimal" placeholder="in" style="width:78px">
           <input type="text" id="new-end" inputmode="decimal" placeholder="out" style="width:78px">
-          <button onclick="addManualClip()">+ Add</button>
+          <button onclick="addManualClip()" id="add-clip-btn">+ Add</button>
         </div>
         <div class="row" style="margin-top:6px">
           <button onclick="useSelection()" title="Fill from the current playhead">from playhead</button>
@@ -439,6 +459,46 @@
     contents, so renaming or moving a file will not break clips that already use it.
     <br><span class="mono">python -m clipbot library fetch</span> downloads the CC0
     starter pack; <span class="mono">library licenses</span> prints where everything came from.
+  </div>
+</dialog>
+
+<dialog id="comp-picker">
+  <h2 style="margin-top:0">Add to compilation</h2>
+  <input type="text" id="comp-picker-name" list="comp-names-list" placeholder="compilation name"
+         autocomplete="off" style="width:100%">
+  <datalist id="comp-names-list"></datalist>
+  <div class="hint" style="margin-top:6px">
+    Pick an existing name or type a new one — appends this clip's current in/out
+    as a segment. Go to <a href="/w/{{ slug }}/compile">Compilations</a> to
+    edit ordering or render.
+  </div>
+  <div class="row" style="margin-top:12px;justify-content:flex-end">
+    <button onclick="document.getElementById('comp-picker').close()">Cancel</button>
+    <button onclick="confirmAddToCompilation()" id="comp-picker-add-btn">Add</button>
+  </div>
+</dialog>
+
+<dialog id="speaker-dialog">
+  <h2 style="margin-top:0" id="speaker-dialog-title">Speaker</h2>
+  <div class="hint" id="speaker-dialog-source-hint" style="margin-bottom:8px"></div>
+  <div class="row" style="align-items:center">
+    <label class="meta" style="width:60px">Name</label>
+    <input type="text" id="speaker-dialog-name" style="flex:1" maxlength="80" autocomplete="off">
+  </div>
+  <div class="row" style="margin-top:8px;align-items:center">
+    <label class="meta" style="width:60px">Avatar</label>
+    <select id="speaker-dialog-avatar" style="flex:1">
+      <option value="">(none)</option>
+    </select>
+  </div>
+  <div class="row" style="margin-top:8px;align-items:center">
+    <label class="meta" style="width:60px">Color</label>
+    <input type="color" id="speaker-dialog-color" value="#19a2d2">
+  </div>
+  <div class="hint" id="speaker-dialog-error" style="margin-top:8px;color:var(--warn)"></div>
+  <div class="row" style="margin-top:12px;justify-content:flex-end">
+    <button onclick="document.getElementById('speaker-dialog').close()">Cancel</button>
+    <button onclick="saveSpeakerDialog()" id="speaker-dialog-save-btn">Save</button>
   </div>
 </dialog>
 

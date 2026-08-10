@@ -274,6 +274,73 @@ class TestResolveSpeakers(unittest.TestCase):
         self.assertIsNone(plan)  # nothing survived, but no exception
 
 
+class TestResolveSpeakerSlots(unittest.TestCase):
+    """Pure geometry, no IO - the slice of resolve_speakers split out for the
+    dashboard's /reel/plan preview to call without paying for avatar/ring
+    image generation."""
+
+    def setUp(self):
+        self.speakers_plan = {
+            "enabled": True, "mode": "appear", "edge": "bottom",
+            "avatar_size": 0.16, "gap": 0.02, "ring_width_px": 6, "roster": None,
+        }
+
+    def test_no_speakers_plan_is_empty(self):
+        from clipbot import speakerfx
+
+        spans = [{"speaker_id": "host", "start": 100.0, "end": 105.0}]
+        self.assertEqual(
+            speakerfx.resolve_speaker_slots(None, spans, (1080, 1920), 95.0, 20.0), []
+        )
+
+    def test_span_outside_window_is_empty(self):
+        from clipbot import speakerfx
+
+        spans = [{"speaker_id": "host", "start": 500.0, "end": 505.0}]
+        self.assertEqual(
+            speakerfx.resolve_speaker_slots(self.speakers_plan, spans, (1080, 1920), 0.0, 20.0),
+            [],
+        )
+
+    def test_active_speaker_gets_a_slot(self):
+        from clipbot import speakerfx
+
+        spans = [{"speaker_id": "host", "start": 100.0, "end": 105.0}]
+        slots = speakerfx.resolve_speaker_slots(
+            self.speakers_plan, spans, (1080, 1920), origin=95.0, span_duration=20.0
+        )
+        self.assertEqual([s["speaker_id"] for s in slots], ["host"])
+        self.assertIn("x", slots[0]); self.assertIn("w", slots[0])
+
+    def test_matches_resolve_speakers_active_id_selection(self):
+        # Both functions must agree on which speakers are "active" for the
+        # same inputs - this is the whole reason _rebase_spans is shared
+        # rather than duplicated between them.
+        from clipbot import speakerfx
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            avatar_src = tmp_path / "host.png"
+            Image.new("RGBA", (64, 64), (10, 20, 30, 255)).save(avatar_src)
+            assets = {"avt_deadbeefdeadbeef": {"path": str(avatar_src)}}
+            registry = {"host": {"id": "host", "name": "Host",
+                                  "avatar_asset": "avt_deadbeefdeadbeef", "color": "#19A2D2"}}
+            spans = [
+                {"speaker_id": "host", "start": 100.0, "end": 105.0},
+                {"speaker_id": "guest", "start": 200.0, "end": 205.0},  # outside window
+            ]
+            slots = speakerfx.resolve_speaker_slots(
+                self.speakers_plan, spans, (1080, 1920), origin=95.0, span_duration=20.0
+            )
+            full_plan = speakerfx.resolve_speakers(
+                self.speakers_plan, spans, canvas=(1080, 1920), origin=95.0, span_duration=20.0,
+                assets=assets, registry=registry, cache_dir=tmp_path / "cache", strict=True,
+            )
+            self.assertEqual([s["speaker_id"] for s in slots], ["host"])
+            self.assertEqual([e["speaker_id"] for e in full_plan["video"]], ["host"])
+
+
 class TestLoadPipelineNoneReturn(unittest.TestCase):
     """Regression test: pyannote.audio's Pipeline.from_pretrained does not
     raise on a bad/gated token - it logs a hint and returns None. Caught live
