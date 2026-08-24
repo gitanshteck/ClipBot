@@ -70,6 +70,10 @@ class Job(object):
         self.phase = None
         self.label = None
         self.eta_seconds = None
+        self.current = None
+        self.total = None
+        self.unit = None
+        self.rate = None
         self.error = None
         self.result = None
         self.cancel_event = threading.Event()
@@ -89,6 +93,10 @@ class Job(object):
             "phase": self.phase,
             "label": self.label,
             "eta_seconds": self.eta_seconds,
+            "current": self.current,
+            "total": self.total,
+            "unit": self.unit,
+            "rate": self.rate,
             "error": self.error,
             "result": self.result,
         }
@@ -276,6 +284,10 @@ class JobRunner(object):
             job.phase = payload.get("phase")
             job.label = payload.get("label")
             job.eta_seconds = payload.get("eta_seconds")
+            job.current = payload.get("current")
+            job.total = payload.get("total")
+            job.unit = payload.get("unit")
+            job.rate = payload.get("rate")
             self.bus.publish(
                 "progress",
                 {
@@ -285,6 +297,10 @@ class JobRunner(object):
                     "phase": job.phase,
                     "label": job.label,
                     "eta_seconds": job.eta_seconds,
+                    "current": job.current,
+                    "total": job.total,
+                    "unit": job.unit,
+                    "rate": job.rate,
                 },
             )
         elif kind == "phase":

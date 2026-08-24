@@ -69,8 +69,16 @@ class Progress(object):
             {"phase": name, "total": self._total, "unit": unit},
         )
 
-    def update(self, current, total=None, label=None):
-        """Report position within the current phase."""
+    def update(self, current, total=None, label=None, rate=None):
+        """Report position within the current phase.
+
+        `rate` is optional, unit-per-second progress speed (e.g. bytes/sec
+        for a download) - a caller-supplied instantaneous figure, not
+        derived from `current`/elapsed the way `eta_seconds` below is,
+        since a source like yt-dlp already reports a more representative
+        recent-average rate than a cumulative-since-phase-start figure would
+        give.
+        """
         if total:
             self._total = float(total)
         current = float(current)
@@ -91,6 +99,7 @@ class Progress(object):
                 "eta_seconds": eta,
                 "label": label,
                 "unit": self._unit,
+                "rate": rate,
             },
             throttle=True,
         )

@@ -4,9 +4,20 @@
   <h1>Library</h1>
   <form id="new-vod" class="row">
     <input type="url" id="vod-url" placeholder="https://kick.com/&lt;channel&gt;/videos/&lt;uuid&gt;" required>
+    <span id="quality-picker-slot"></span>
     <button type="submit">Add &amp; run pipeline</button>
   </form>
   <p class="hint">Downloads, extracts audio, transcribes (~0.8&times; realtime on CPU) and finds clips. You review before anything is cut.</p>
+</section>
+
+<section class="panel">
+  <h1>Browse a channel</h1>
+  <form id="browse-channel" class="row">
+    <input type="text" id="channel-name" placeholder="kick channel name, e.g. gitanshteck" required>
+    <button type="submit">Fetch VODs</button>
+  </form>
+  <p class="hint" id="browse-hint"></p>
+  <div id="channel-vods" class="grid"></div>
 </section>
 
 <section id="workspaces" class="grid"></section>
@@ -15,6 +26,15 @@
 {% block scripts %}
 <script>
 const grid = document.getElementById('workspaces');
+
+// One quality picker, shared by the "paste a URL" form and every "Download"
+// button in the channel browser below - same localStorage key workspace.html
+// uses, so a choice made here carries over there too.
+document.getElementById('quality-picker-slot').innerHTML = qualityPickerHtml('quality-picker');
+const qualityPicker = document.getElementById('quality-picker');
+qualityPicker.value = localStorage.getItem('clipbot.downloadQuality') || '';
+qualityPicker.addEventListener('change', () =>
+  localStorage.setItem('clipbot.downloadQuality', qualityPicker.value));
 
 function stageDots(stages) {
   return stages.map(s => `<span class="dot ${s.done ? 'done' : (s.ready ? 'ready' : 'blocked')}" title="${s.label}${s.blocked ? ' — ' + s.blocked : ''}"></span>`).join('');
@@ -50,9 +70,71 @@ document.getElementById('new-vod').addEventListener('submit', async (e) => {
   e.preventDefault();
   const url = document.getElementById('vod-url').value.trim();
   try {
-    const res = await api('/api/workspaces', 'POST', { url });
+    const res = await api('/api/workspaces', 'POST', { url, quality: qualityPicker.value || null });
     location.href = '/w/' + res.slug;
   } catch (err) { alert(err.message); }
+});
+
+const channelInput = document.getElementById('channel-name');
+const vodGrid = document.getElementById('channel-vods');
+const browseHint = document.getElementById('browse-hint');
+const lastChannel = localStorage.getItem('clipbot.lastChannel');
+if (lastChannel) {
+  channelInput.value = lastChannel;
+  loadChannelVods(lastChannel);
+}
+
+async function loadChannelVods(channel) {
+  vodGrid.innerHTML = '';
+  browseHint.textContent = 'Fetching…';
+  try {
+    const res = await api('/api/kick/' + encodeURIComponent(channel) + '/vods');
+    if (!res.vods.length) {
+      browseHint.textContent = 'No VODs found for /' + channel + '.';
+      return;
+    }
+    browseHint.textContent = res.vods.length + ' most recent VODs on /' + channel + ':';
+    vodGrid.innerHTML = res.vods.map(v => `
+      <article class="card" data-uuid="${esc(v.uuid)}">
+        ${v.thumbnail ? `<img src="${esc(v.thumbnail)}" alt="" class="thumb">` : ''}
+        <h2>${esc(v.title || '(untitled)')}</h2>
+        <div class="meta">
+          ${v.duration_seconds ? fmtDur(v.duration_seconds) : '—'}
+          ${v.created_at ? ' · ' + esc(v.created_at) : ''}
+        </div>
+        <div class="row">
+          ${v.workspace_exists
+            ? `<a class="btn" href="/w/${esc(v.slug)}">Open</a>`
+            : `<button class="btn download-vod" data-url="${esc(v.url)}">Download</button>`}
+        </div>
+      </article>`).join('');
+  } catch (err) {
+    browseHint.textContent = '';
+    alert(err.message);
+  }
+}
+
+document.getElementById('browse-channel').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const channel = channelInput.value.trim().toLowerCase();
+  if (!channel) return;
+  localStorage.setItem('clipbot.lastChannel', channel);
+  loadChannelVods(channel);
+});
+
+vodGrid.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.download-vod');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const res = await api('/api/workspaces', 'POST', { url: btn.dataset.url, quality: qualityPicker.value || null });
+    location.href = '/w/' + res.slug;
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false;
+    btn.textContent = 'Download';
+  }
 });
 
 onEvent('workspace', loadWorkspaces);

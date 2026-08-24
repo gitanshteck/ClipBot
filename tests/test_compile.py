@@ -185,37 +185,124 @@ class TestCompilationsSidecar(unittest.TestCase):
         self.assertIsNone(comp.get(doc, "x"))
 
 
+class TestCrossStreamSegments(unittest.TestCase):
+    """Segments carrying a `slug` different from the home workspace's own -
+    the ordering/overlap-check branch in `_normalize_segments`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace(Path(self._tmp.name) / "home").ensure()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_segment_without_slug_defaults_to_home_workspace(self):
+        created = comp.upsert(
+            self.ws, "x", [{"start": 0.0, "end": 5.0}], _settings()
+        )
+        self.assertEqual(created["segments"][0]["slug"], "home")
+
+    def test_single_source_still_sorts_by_start(self):
+        # All segments share one (explicit) foreign slug - still a single
+        # source, so today's chronological-sort behavior applies unchanged.
+        created = comp.upsert(
+            self.ws,
+            "x",
+            [
+                {"start": 200.0, "end": 210.0, "label": "b", "slug": "other"},
+                {"start": 100.0, "end": 110.0, "label": "a", "slug": "other"},
+            ],
+            _settings(),
+        )
+        self.assertEqual([s["label"] for s in created["segments"]], ["a", "b"])
+
+    def test_multi_source_preserves_given_order(self):
+        # A cross-stream montage is editorially sequenced, not chronological -
+        # the numerically-later segment is deliberately listed first.
+        created = comp.upsert(
+            self.ws,
+            "x",
+            [
+                {"start": 200.0, "end": 210.0, "label": "first", "slug": "other"},
+                {"start": 10.0, "end": 20.0, "label": "second"},
+            ],
+            _settings(),
+        )
+        self.assertEqual(
+            [s["label"] for s in created["segments"]], ["first", "second"]
+        )
+
+    def test_multi_source_allows_identical_ranges_from_different_sources(self):
+        # Same numeric range, different workspaces - not a real overlap.
+        created = comp.upsert(
+            self.ws,
+            "x",
+            [
+                {"start": 100.0, "end": 110.0, "label": "a", "slug": "stream-a"},
+                {"start": 100.0, "end": 110.0, "label": "b", "slug": "stream-b"},
+            ],
+            _settings(),
+        )
+        self.assertEqual(len(created["segments"]), 2)
+
+    def test_multi_source_still_rejects_overlap_within_one_source(self):
+        with self.assertRaises(ValueError):
+            comp.upsert(
+                self.ws,
+                "x",
+                [
+                    {"start": 0.0, "end": 10.0, "slug": "other"},
+                    {"start": 5.0, "end": 15.0, "slug": "other"},
+                    {"start": 50.0, "end": 60.0},  # unrelated home-workspace segment
+                ],
+                _settings(),
+            )
+
+
 class TestFingerprints(unittest.TestCase):
     def test_segment_fingerprint_stable_and_sensitive(self):
         s = _settings()
-        fp1 = compile_stage._segment_fingerprint(10.0, 20.0, s)
-        fp2 = compile_stage._segment_fingerprint(10.0, 20.0, s)
-        fp3 = compile_stage._segment_fingerprint(10.0, 21.0, s)
+        fp1 = compile_stage._segment_fingerprint(10.0, 20.0, "ws", s)
+        fp2 = compile_stage._segment_fingerprint(10.0, 20.0, "ws", s)
+        fp3 = compile_stage._segment_fingerprint(10.0, 21.0, "ws", s)
         self.assertEqual(fp1, fp2)
         self.assertNotEqual(fp1, fp3)
 
     def test_segment_fingerprint_changes_with_encode_settings(self):
-        fp_a = compile_stage._segment_fingerprint(10.0, 20.0, _settings())
+        fp_a = compile_stage._segment_fingerprint(10.0, 20.0, "ws", _settings())
         fp_b = compile_stage._segment_fingerprint(
-            10.0, 20.0, _settings({"compile.crf": 22})
+            10.0, 20.0, "ws", _settings({"compile.crf": 22})
         )
+        self.assertNotEqual(fp_a, fp_b)
+
+    def test_segment_fingerprint_changes_with_source_slug(self):
+        # Same numeric range, different source workspace - must not collide
+        # in the scratch cache.
+        fp_a = compile_stage._segment_fingerprint(10.0, 20.0, "stream-a", _settings())
+        fp_b = compile_stage._segment_fingerprint(10.0, 20.0, "stream-b", _settings())
         self.assertNotEqual(fp_a, fp_b)
 
     def test_compilation_fingerprint_changes_with_ranges(self):
         s = _settings()
-        fp_a = compile_stage._compilation_fingerprint("name", [(0.0, 5.0)], s)
-        fp_b = compile_stage._compilation_fingerprint("name", [(0.0, 6.0)], s)
-        fp_c = compile_stage._compilation_fingerprint("other", [(0.0, 5.0)], s)
+        fp_a = compile_stage._compilation_fingerprint("name", [("ws", 0.0, 5.0)], s)
+        fp_b = compile_stage._compilation_fingerprint("name", [("ws", 0.0, 6.0)], s)
+        fp_c = compile_stage._compilation_fingerprint("other", [("ws", 0.0, 5.0)], s)
         self.assertNotEqual(fp_a, fp_b)
         self.assertNotEqual(fp_a, fp_c)
 
     def test_compilation_fingerprint_changes_with_padding(self):
         fp_a = compile_stage._compilation_fingerprint(
-            "name", [(0.0, 5.0)], _settings()
+            "name", [("ws", 0.0, 5.0)], _settings()
         )
         fp_b = compile_stage._compilation_fingerprint(
-            "name", [(0.0, 5.0)], _settings({"cut.pad_start": 2.0})
+            "name", [("ws", 0.0, 5.0)], _settings({"cut.pad_start": 2.0})
         )
+        self.assertNotEqual(fp_a, fp_b)
+
+    def test_compilation_fingerprint_changes_with_source_slug(self):
+        s = _settings()
+        fp_a = compile_stage._compilation_fingerprint("name", [("stream-a", 0.0, 5.0)], s)
+        fp_b = compile_stage._compilation_fingerprint("name", [("stream-b", 0.0, 5.0)], s)
         self.assertNotEqual(fp_a, fp_b)
 
 
@@ -366,6 +453,110 @@ class TestRenderCompilation(unittest.TestCase):
         # force=True re-runs the final concat join at least (segment cut is
         # itself skipped via the on-disk scratch file, same as cut.py).
         self.assertGreater(len(calls), before)
+
+
+class TestCrossStreamRender(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.home = Workspace(root / "home").ensure()
+        (self.home.root / "video.mp4").write_bytes(b"fake-home-source")
+        self.home.write_state({"video_file": "video.mp4", "duration": 1000.0})
+
+        self.other = Workspace(root / "other").ensure()
+        (self.other.root / "video.mp4").write_bytes(b"fake-other-source")
+        self.other.write_state({"video_file": "video.mp4", "duration": 2000.0})
+
+        # work_root must be absolute here - Settings.work_root resolves a
+        # relative one against the real project root, not this temp dir.
+        self.settings = _settings({"work_root": str(root)})
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_renders_segments_from_multiple_workspaces(self):
+        comp.upsert(
+            self.home,
+            "cross",
+            [
+                {"start": 100.0, "end": 110.0, "label": "local"},
+                {"start": 300.0, "end": 310.0, "label": "foreign", "slug": "other"},
+            ],
+            self.settings,
+        )
+        seen_sources = []
+
+        def recording_run_ffmpeg(argv, *args, **kwargs):
+            if "-i" in argv:
+                seen_sources.append(argv[argv.index("-i") + 1])
+            _fake_run_ffmpeg(argv, *args, **kwargs)
+
+        with mock.patch.object(compile_stage, "resolve_tool", return_value="ffmpeg-stub"), \
+             mock.patch.object(compile_stage, "_run_ffmpeg", side_effect=recording_run_ffmpeg):
+            out_path = compile_stage.render_compilation(self.home, self.settings, "cross")
+
+        self.assertTrue(out_path.exists())
+        self.assertIn(str(self.home.root / "video.mp4"), seen_sources)
+        self.assertIn(str(self.other.root / "video.mp4"), seen_sources)
+
+    def test_missing_foreign_workspace_raises_clear_error(self):
+        comp.upsert(
+            self.home,
+            "cross",
+            [{"start": 100.0, "end": 110.0, "slug": "does-not-exist"}],
+            self.settings,
+        )
+        with mock.patch.object(compile_stage, "resolve_tool", return_value="ffmpeg-stub"), \
+             mock.patch.object(compile_stage, "_run_ffmpeg", side_effect=_fake_run_ffmpeg):
+            with self.assertRaises(StageError) as ctx:
+                compile_stage.render_compilation(self.home, self.settings, "cross")
+        self.assertIn("does-not-exist", str(ctx.exception))
+
+
+class TestUnrenderedCompilationsElsewhere(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.a = Workspace(root / "a").ensure()
+        self.b = Workspace(root / "b").ensure()
+        self.settings = _settings({"work_root": str(root)})
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_unrendered_foreign_compilation_blocks_source_cleanup(self):
+        # Compilation lives in b's compilations.json but pulls footage from a.
+        comp.upsert(
+            self.b, "x", [{"start": 0.0, "end": 5.0, "slug": "a"}], self.settings
+        )
+        pending = compile_stage.unrendered_compilations_elsewhere(self.a, self.settings)
+        self.assertEqual([(p["workspace"], p["compilation"]) for p in pending], [("b", "x")])
+
+    def test_rendered_foreign_compilation_does_not_block(self):
+        comp.upsert(
+            self.b, "x", [{"start": 0.0, "end": 5.0, "slug": "a"}], self.settings
+        )
+        comp.set_output(self.b, "x", {"file": "clips/compilations/x.mp4"})
+        self.b.compilations_dir.mkdir(parents=True, exist_ok=True)
+        (self.b.compilations_dir / "x.mp4").write_bytes(b"fake")
+        self.assertEqual(
+            compile_stage.unrendered_compilations_elsewhere(self.a, self.settings), []
+        )
+
+    def test_own_workspace_excluded_from_scan(self):
+        # a's own unrendered compilations are covered by unrendered_compilations(a)
+        # already - unrendered_compilations_elsewhere must not double-report them.
+        comp.upsert(self.a, "x", [{"start": 0.0, "end": 5.0}], self.settings)
+        self.assertEqual(
+            compile_stage.unrendered_compilations_elsewhere(self.a, self.settings), []
+        )
+
+    def test_unrelated_foreign_compilation_does_not_block(self):
+        # b's compilation only uses b's own footage - irrelevant to a's cleanup.
+        comp.upsert(self.b, "x", [{"start": 0.0, "end": 5.0}], self.settings)
+        self.assertEqual(
+            compile_stage.unrendered_compilations_elsewhere(self.a, self.settings), []
+        )
 
 
 class TestUnrenderedCompilations(unittest.TestCase):

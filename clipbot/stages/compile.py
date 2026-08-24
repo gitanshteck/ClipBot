@@ -16,6 +16,14 @@ archival clip, not for a boundary that has to land exactly where a highlight
 was picked). Each re-encoded segment is cached in a per-compilation scratch
 directory and skipped on a re-render if its resolved range is unchanged, the
 same skip-if-unchanged discipline cut.py already applies per clip.
+
+**Cross-stream**: each segment carries a `slug` (`clipbot/compilations.py`),
+defaulting to the home workspace (the one this compilation's
+`compilations.json`/scratch dir/output live in) but able to name any other
+workspace instead. `_resolve_source` opens each referenced workspace once
+(cached per render) to pull its own video file and its own probed
+`state.duration` - padding must clamp against the *source's* duration, not
+the home workspace's.
 """
 
 import hashlib
@@ -61,24 +69,27 @@ def _encode_settings(settings: Settings) -> Tuple[str, str, int]:
     )
 
 
-def _segment_fingerprint(start: float, end: float, settings: Settings) -> str:
+def _segment_fingerprint(start: float, end: float, slug: str, settings: Settings) -> str:
+    # `slug` is included so two segments from different source workspaces
+    # that happen to resolve to an identical numeric range can't collide in
+    # the scratch cache.
     encoder, preset, crf = _encode_settings(settings)
-    blob = "{0:.3f}|{1:.3f}|{2}|{3}|{4}".format(start, end, encoder, preset, crf)
+    blob = "{0}|{1:.3f}|{2:.3f}|{3}|{4}|{5}".format(slug, start, end, encoder, preset, crf)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def _compilation_fingerprint(
-    name: str, resolved_ranges: List[Tuple[float, float]], settings: Settings
+    name: str, resolved: List[Tuple[str, float, float]], settings: Settings
 ) -> str:
     """Hash of everything that determines the joined output.
 
     Self-maintaining the same way reel.py's argv hash is: any change to a
-    segment's resolved range or the encode settings invalidates automatically,
-    without a hand-listed field tuple to keep in sync.
+    segment's resolved (slug, range) or the encode settings invalidates
+    automatically, without a hand-listed field tuple to keep in sync.
     """
     encoder, preset, crf = _encode_settings(settings)
     parts = [name] + [
-        "{0:.3f}-{1:.3f}".format(start, end) for start, end in resolved_ranges
+        "{0}:{1:.3f}-{2:.3f}".format(slug, start, end) for slug, start, end in resolved
     ]
     parts += [
         encoder,
@@ -89,6 +100,25 @@ def _compilation_fingerprint(
     ]
     blob = "\x1f".join(parts)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_source(
+    ws: Workspace, settings: Settings, slug: str, cache: Dict[str, Workspace]
+) -> Workspace:
+    """Open (and cache) the workspace a segment's `slug` names.
+
+    The home workspace (`slug == ws.slug`) is always `ws` itself, never
+    re-derived from `settings.work_root / slug` - the CLI's `--workspace`
+    accepts an arbitrary path, not just a slug under `work_root`, so `ws`
+    may not even live there. Foreign slugs are cached per render so a
+    compilation with several segments from the same stream doesn't reopen
+    it repeatedly.
+    """
+    if slug == ws.slug:
+        return ws
+    if slug not in cache:
+        cache[slug] = Workspace(Path(settings.work_root) / slug)
+    return cache[slug]
 
 
 def _segment_argv(
@@ -146,13 +176,6 @@ def render_compilation(
 ) -> Path:
     """Cut and concatenate one named compilation's segments. Returns the
     rendered file's path."""
-    source = ws.video_path()
-    if not source or not source.exists():
-        raise StageError(
-            "No video in {0}. The VOD may have been deleted by the cleanup stage - "
-            "re-run the download stage to render compilations.".format(ws.root)
-        )
-
     doc = compilations.load(ws)
     comp = compilations.get(doc, name)
     if comp is None:
@@ -165,17 +188,35 @@ def render_compilation(
         raise StageError("Compilation {0!r} has no segments.".format(name))
 
     binary = resolve_tool(settings.tool("ffmpeg"), FFMPEG_HINT)
-    duration = ws.read_state().get("duration")
     min_duration = float(settings.get("compile.min_duration", 0.5))
+    source_cache: Dict[str, Workspace] = {}
 
-    resolved: List[Tuple[float, float]] = []
-    for seg in segments:
+    resolved: List[Tuple[str, float, float, Path]] = []
+    for index, seg in enumerate(segments, start=1):
+        slug = seg.get("slug") or ws.slug
+        source_ws = _resolve_source(ws, settings, slug, source_cache)
+        # video_path() (find_largest_file) assumes the directory exists and
+        # raises FileNotFoundError otherwise - real for a foreign `slug`
+        # that names a workspace that was never created (typo, or genuinely
+        # doesn't exist), unlike the home workspace, which the caller
+        # already guaranteed exists.
+        source = source_ws.video_path() if source_ws.root.is_dir() else None
+        if not source or not source.exists():
+            raise StageError(
+                "Segment {0} references workspace {1!r}, which has no video - "
+                "was it deleted by cleanup? Re-run download there first.".format(
+                    index, slug
+                )
+            )
+        duration = source_ws.read_state().get("duration")
         start, end = cut_stage._padded_range(
             {"start": seg["start"], "end": seg["end"]}, settings, duration
         )
-        resolved.append((start, end))
+        resolved.append((slug, start, end, source))
 
-    fingerprint = _compilation_fingerprint(name, resolved, settings)
+    fingerprint = _compilation_fingerprint(
+        name, [(slug, start, end) for slug, start, end, _ in resolved], settings
+    )
     out_path = ws.compilations_dir / "{0}.mp4".format(name)
     existing_output = comp.get("output") or {}
 
@@ -192,7 +233,7 @@ def render_compilation(
     segment_files: List[str] = []
     total_span = 0.0
 
-    for index, (start, end) in enumerate(resolved, start=1):
+    for index, (slug, start, end, source) in enumerate(resolved, start=1):
         progress.check_cancelled()
         if end - start < min_duration:
             raise StageError(
@@ -204,7 +245,7 @@ def render_compilation(
         # job panel - use the segment's own label, same thing the compile page's
         # segment list already displays, so the two match up.
         seg_label = segments[index - 1].get("label") or "segment {0}".format(index)
-        seg_fp = _segment_fingerprint(start, end, settings)
+        seg_fp = _segment_fingerprint(start, end, slug, settings)
         seg_name = "{0:03d}-{1}.mp4".format(index, seg_fp)
         seg_path = scratch_dir / seg_name
 
@@ -338,4 +379,35 @@ def unrendered_compilations(ws: Workspace) -> List[Dict[str, Any]]:
         target = output.get("file")
         if not target or not (ws.root / target).exists():
             pending.append(comp)
+    return pending
+
+
+def unrendered_compilations_elsewhere(
+    ws: Workspace, settings: Settings
+) -> List[Dict[str, Any]]:
+    """Compilations *homed in other workspaces* that still need `ws`'s
+    footage and haven't been rendered yet.
+
+    A cross-stream compilation's segments can be sourced from a workspace
+    other than the one its `compilations.json` lives in (see the module
+    docstring), so `unrendered_compilations(ws)` alone - which only looks at
+    `ws`'s own compilations - isn't enough to know whether deleting `ws`'s
+    VOD is safe. Scans every other workspace under `settings.work_root` (same
+    "iterate work_root's dirs" pattern `server/app.py`'s `api_workspaces()`
+    already uses) for an unrendered compilation with a segment whose `slug`
+    resolves to `ws`. Each result names the owning workspace and compilation,
+    for a cleanup error message that points somewhere useful.
+    """
+    pending = []
+    root = Path(settings.work_root)
+    if not root.is_dir():
+        return pending
+    for path in sorted(root.iterdir()):
+        if not path.is_dir() or path.name.startswith("_") or path.name == ws.slug:
+            continue
+        other = Workspace(path)
+        for comp in unrendered_compilations(other):
+            segments = comp.get("segments") or []
+            if any((seg.get("slug") or other.slug) == ws.slug for seg in segments):
+                pending.append({"workspace": other.slug, "compilation": comp.get("name")})
     return pending

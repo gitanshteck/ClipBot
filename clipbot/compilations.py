@@ -8,6 +8,13 @@ approves/rejects, they're fragments of one assembled video, so mixing them
 into the approve/reject/cut review queue would make a normal `clipbot cut`
 run try to cut each one out separately too.
 
+A compilation lives in one workspace (its "home" - that's whose
+`compilations.json`, scratch dir, and rendered output it uses), but each
+segment may optionally name a *different* source workspace via `slug`,
+letting one compilation pull footage from multiple streams. `slug` defaults
+to the home workspace when omitted, so an all-local compilation round-trips
+byte-identical to before this existed.
+
 `compilations.json` shape:
 
     {
@@ -19,7 +26,7 @@ run try to cut each one out separately too.
           "id": "comp_0001",
           "name": "catan-highlights",
           "segments": [
-            {"start": 15009.1, "end": 15043.3, "label": "..."},
+            {"start": 15009.1, "end": 15043.3, "label": "...", "slug": "..."},
             ...
           ],
           "output": {"file": "clips/compilations/catan-highlights.mp4",
@@ -29,6 +36,11 @@ run try to cut each one out separately too.
         }
       ]
     }
+
+`slug` is never validated here (no filesystem access in this module) - a
+segment naming a workspace that doesn't exist, or has no video, only fails
+at render time (`stages/compile.py`), the same "structural only" deferral
+`analyze.py`'s candidate validation already documents.
 """
 
 import shutil
@@ -103,8 +115,23 @@ def _validate_name(name: Any) -> str:
     return name
 
 
+def _check_no_overlap(segments: List[Dict[str, Any]]) -> None:
+    """Segments must already be sorted by start (within whatever grouping
+    the caller cares about) before calling this."""
+    for prev, cur in zip(segments, segments[1:]):
+        if cur["start"] < prev["end"]:
+            raise ValueError(
+                "segments {0:.2f}-{1:.2f} and {2:.2f}-{3:.2f} (workspace {4!r}) "
+                "overlap".format(
+                    prev["start"], prev["end"], cur["start"], cur["end"], cur["slug"]
+                )
+            )
+
+
 def _normalize_segments(
-    segments: List[Dict[str, Any]], min_duration: float = 0.0
+    segments: List[Dict[str, Any]],
+    min_duration: float = 0.0,
+    default_slug: str = "",
 ) -> List[Dict[str, Any]]:
     normalized = []
     for seg in segments:
@@ -120,16 +147,35 @@ def _normalize_segments(
                 "compile.min_duration ({3}s)".format(start, end, end - start, min_duration)
             )
         normalized.append(
-            {"start": start, "end": end, "label": str(seg.get("label") or "")}
+            {
+                "start": start,
+                "end": end,
+                "label": str(seg.get("label") or ""),
+                "slug": str(seg.get("slug") or default_slug),
+            }
         )
-    normalized.sort(key=lambda s: s["start"])
-    for prev, cur in zip(normalized, normalized[1:]):
-        if cur["start"] < prev["end"]:
-            raise ValueError(
-                "segments {0:.2f}-{1:.2f} and {2:.2f}-{3:.2f} overlap".format(
-                    prev["start"], prev["end"], cur["start"], cur["end"]
-                )
-            )
+
+    slugs = {s["slug"] for s in normalized}
+    if len(slugs) <= 1:
+        # Single source (the common case, and the only case before
+        # cross-stream segments existed): sort the whole list by start and
+        # check overlap across all of it, byte-identical to before `slug`
+        # existed.
+        normalized.sort(key=lambda s: s["start"])
+        _check_no_overlap(normalized)
+    else:
+        # Multiple sources: a cross-stream montage is editorially sequenced,
+        # not chronological (workspace A's t=120s and workspace B's t=120s
+        # have no relationship to each other), so the given order is kept as
+        # the play order. Overlap only means something *within* one source,
+        # so check each source's own segments (sorted by start) separately
+        # without touching the stored order.
+        by_slug: Dict[str, List[Dict[str, Any]]] = {}
+        for seg in normalized:
+            by_slug.setdefault(seg["slug"], []).append(seg)
+        for group in by_slug.values():
+            _check_no_overlap(sorted(group, key=lambda s: s["start"]))
+
     return normalized
 
 
@@ -148,7 +194,7 @@ def upsert(
 
     doc = load(ws)
     min_duration = float(settings.get("compile.min_duration", 0.5))
-    normalized = _normalize_segments(segments, min_duration)
+    normalized = _normalize_segments(segments, min_duration, default_slug=ws.slug)
     now = time.time()
 
     existing = get(doc, name)
@@ -203,7 +249,7 @@ def add_segment(
     with ws.lock:
         doc = load(ws)
         comp = get(doc, name)
-        seg = _normalize_segments([segment], min_duration)[0]
+        seg = _normalize_segments([segment], min_duration, default_slug=ws.slug)[0]
         now = time.time()
 
         if comp is None:
@@ -219,7 +265,9 @@ def add_segment(
             doc["compilations"] = list(doc.get("compilations") or []) + [comp]
             doc["next_id"] = next_id + 1
 
-        comp["segments"] = _normalize_segments(comp["segments"] + [seg], min_duration)
+        comp["segments"] = _normalize_segments(
+            comp["segments"] + [seg], min_duration, default_slug=ws.slug
+        )
         comp["updated_at"] = now
         save(ws, doc)
         return comp

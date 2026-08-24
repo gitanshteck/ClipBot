@@ -18,6 +18,8 @@
     "min_height_warn": 480,
     "_comment_impersonate": "Required: Kick is behind Cloudflare and 403s without a browser TLS fingerprint. Set to null to disable. Needs pip install 'yt-dlp[default,curl-cffi]'.",
     "impersonate": "chrome",
+    "_comment_http_chunk_size": "yt-dlp's own documented flag for 'bypassing bandwidth throttling imposed by a webserver' - measured on this network: a VOD download capped at ~100Mbps over a 300Mbps line despite ~8ms latency to Kick's Cloudflare edge (rules out a TCP-window/BDP explanation), pointing at a per-connection throttle. This flag is sequential chunking only in the installed yt-dlp version (no parallel connections - checked yt_dlp/downloader/http.py directly), so it's a free, zero-dependency thing to try, not a guaranteed fix. Genuine parallel connections would need yt-dlp's aria2c external-downloader integration, not set up here. Set to null to omit the flag entirely.",
+    "http_chunk_size": "10M",
     "_comment_fallback": "Disabled deliberately. kick-dl 2.0.0 exposes only an interactive TUI ('kick-dl start', no arguments) - there is no scriptable download command, so as a fallback it can only fail, and from a dashboard job it would hang a worker on an interactive prompt. Re-enable only if a future release adds non-interactive flags.",
     "fallback_to_kick_dl": false
   },
@@ -86,7 +88,19 @@
 
     "_comment_confidence": "Segments are flagged low_confidence (kept, never dropped) if avg_logprob falls below the threshold OR the segment runs longer than max_segment_seconds. Calibrated on real stream audio: hallucinated windows scored -0.72..-0.90 and ran 40-64s, while good speech scored -0.23..-0.58 in 2-15s segments.",
     "low_confidence_threshold": -0.7,
-    "max_segment_seconds": 30.0
+    "max_segment_seconds": 30.0,
+
+    "_comment_backend": "'local' (this block's settings) or 'openai' (transcribe_openai.py, transcribe.openai.* below). Defaults to openai for wall-clock speed - see CLAUDE.md for the researched cost table (~$0.36/hour of audio on whisper-1). The dashboard's per-workspace transcribe button can override this per run; the CLI always follows this setting.",
+    "backend": "openai",
+    "openai": {
+      "_comment": "Only used when transcribe.backend is 'openai'. whisper-1, not gpt-4o-transcribe/-mini, because only whisper-1's verbose_json response carries the per-segment avg_logprob/no_speech_prob/compression_ratio this pipeline's low-confidence flagging depends on. $0.006/min.",
+      "model": "whisper-1",
+      "api_key_env": "OPENAI_API_KEY",
+      "_comment_chunking": "audio.wav is transcoded to 64kbps mono mp3 and split into chunk_seconds pieces before upload, since the API caps uploads at 25MB (a 20min/64kbps chunk is ~9.6MB). concurrency chunks upload in parallel - this is what makes the API path faster wall-clock than local mode's single-threaded ~0.8x realtime.",
+      "chunk_seconds": 1200,
+      "concurrency": 4,
+      "max_retries": 3
+    }
   },
 
   "analyze": {
@@ -103,7 +117,22 @@
 
     "_comment_warn": "Structural sanity checks only - clip length is a rubric question, so these warn rather than drop.",
     "warn_shorter_than": 5.0,
-    "warn_longer_than": 120.0
+    "warn_longer_than": 120.0,
+
+    "_comment_chunking": "Measured on a real 5.1h stream: a single call found clips densely for ~3 hours then went 83 minutes without picking anything, despite stopping voluntarily well under its output budget - a long-context recall problem, not a token-limit one. Streams under chunk_threshold_minutes get exactly one call (unchanged behavior); longer ones are split into chunk_minutes windows with chunk_overlap_minutes of context padding on each side, run concurrently, and merged. See clipbot/stages/analyze.py's module docstring.",
+    "chunk_threshold_minutes": 90,
+    "chunk_minutes": 60,
+    "chunk_overlap_minutes": 8,
+    "concurrency": 2,
+
+    "signals": {
+      "_comment": "Notable-moment signals (clipbot/highlights.py) annotate transcript lines with (energy spike)/(chat spike, Nx) tags derived from audio loudness and chat message rate - independent of the transcribed words, so a moment that's pure laughter or a loud reaction with no distinctive dialogue isn't invisible to the model anymore. Applies on every run regardless of chunking. z-score thresholds, not absolute levels, since a stream's own baseline loudness/chat activity varies too much for a fixed cutoff to mean the same thing throughout.",
+      "enabled": true,
+      "audio_bin_seconds": 5.0,
+      "audio_z_threshold": 2.0,
+      "chat_bin_seconds": 15.0,
+      "chat_z_threshold": 2.0
+    }
   },
 
   "transliterate": {

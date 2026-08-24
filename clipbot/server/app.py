@@ -130,7 +130,14 @@ def _h_download(ws, st, job, progress):
     url = job.options.get("url") or ws.read_state().get("url")
     if not url:
         raise StageError("No URL recorded for this workspace")
-    return download_stage.download_vod(url, ws, st, force=job.options.get("force", False))
+    return download_stage.download_vod(
+        url,
+        ws,
+        st,
+        force=job.options.get("force", False),
+        quality=job.options.get("quality"),
+        progress=progress,
+    )
 
 
 def _h_chat(ws, st, job, progress):
@@ -145,7 +152,8 @@ def _h_audio(ws, st, job, progress):
 
 def _h_transcribe(ws, st, job, progress):
     return transcribe_stage.transcribe_audio(
-        ws, st, force=job.options.get("force", False), progress=progress
+        ws, st, force=job.options.get("force", False),
+        backend=job.options.get("backend"), progress=progress,
     )
 
 
@@ -231,6 +239,20 @@ def _h_cleanup(ws, st, job, progress):
                 "{0} compilation(s) have segments but no rendered output. Render "
                 "them first, or force.".format(len(unrendered_comps))
             )
+        # A cross-stream compilation homed in a *different* workspace can
+        # still depend on this VOD's footage.
+        unrendered_elsewhere = compile_stage.unrendered_compilations_elsewhere(ws, st)
+        if unrendered_elsewhere:
+            detail = "; ".join(
+                "{0!r} in workspace {1!r}".format(e["compilation"], e["workspace"])
+                for e in unrendered_elsewhere
+            )
+            raise StageError(
+                "{0} compilation(s) elsewhere still need this VOD's footage and "
+                "aren't rendered yet ({1}). Render them first, or force.".format(
+                    len(unrendered_elsewhere), detail
+                )
+            )
     download_stage.delete_vod(ws)
     return None
 
@@ -239,7 +261,9 @@ def _h_pipeline(ws, st, job, progress):
     force = job.options.get("force", False)
     url = job.options.get("url") or ws.read_state().get("url")
     progress.phase("download")
-    video = download_stage.download_vod(url, ws, st, force=force)
+    video = download_stage.download_vod(
+        url, ws, st, force=force, quality=job.options.get("quality"), progress=progress
+    )
     progress.phase("chat")
     # Best-effort: an expired or chatless VOD must not sink the whole pipeline,
     # but it's fetched first because it's the one thing that can't be recovered.
@@ -581,6 +605,21 @@ async def api_workspace(slug: str):
     return workspace_summary(get_workspace(slug))
 
 
+@app.get("/api/kick/{channel}/vods")
+async def api_channel_vods(channel: str, limit: int = 20):
+    """List a Kick channel's VODs, so the dashboard can offer them without the
+    user hunting down and pasting a URL per stream."""
+    channel = channel.strip().lower()
+    if not re.match(r"^[a-z0-9_-]{1,60}$", channel):
+        raise HTTPException(status_code=400, detail="invalid channel name")
+    vods = download_stage.list_channel_vods(channel, limit=max(1, min(limit, 50)))
+    for vod in vods:
+        slug = slug_for_url(vod["url"])
+        vod["slug"] = slug
+        vod["workspace_exists"] = (settings.work_root / slug).is_dir()
+    return {"channel": channel, "vods": vods}
+
+
 @app.post("/api/workspaces")
 async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
     url = (payload.get("url") or "").strip()
@@ -588,7 +627,13 @@ async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Expected a kick.com VOD URL")
     ws = Workspace.for_url(settings.work_root, url)
     job = runner.submit(
-        "pipeline", ws.slug, {"url": url, "force": bool(payload.get("force"))}
+        "pipeline",
+        ws.slug,
+        {
+            "url": url,
+            "force": bool(payload.get("force")),
+            "quality": payload.get("quality"),
+        },
     )
     return {"slug": ws.slug, "job": job.to_dict()}
 
@@ -1198,6 +1243,16 @@ async def api_doctor():
             "name": "ANTHROPIC_API_KEY",
             "ok": bool(os.environ.get("ANTHROPIC_API_KEY")),
             "detail": "set" if os.environ.get("ANTHROPIC_API_KEY") else "not set - stage 4 will fail",
+        }
+    )
+
+    # transcribe.backend defaults to "openai", so this is a core-pipeline key
+    # in the same way ANTHROPIC_API_KEY already is, not a conditional opt-in.
+    checks.append(
+        {
+            "name": "OPENAI_API_KEY",
+            "ok": bool(os.environ.get("OPENAI_API_KEY")),
+            "detail": "set" if os.environ.get("OPENAI_API_KEY") else "not set - openai-backend transcribe will fail",
         }
     )
 

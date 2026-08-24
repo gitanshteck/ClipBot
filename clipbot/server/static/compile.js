@@ -22,6 +22,20 @@ let dirty = false;      // unsaved local edits to openSegments
 let activeCompileJobId = null;    // this workspace's in-flight compile job, if any
 let renderingSegmentLabel = null; // label of the segment currently being encoded
 
+/* --- cross-stream segments ---
+ * A segment's `slug` names which workspace its footage comes from
+ * (clipbot/compilations.py); missing/falsy means "this workspace" (SLUG).
+ * Segments from another stream are authored via `clipbot compile` / Claude
+ * Code, not this page's timeline+transcript editor (which is bound to this
+ * workspace's own video) - this page only reviews, reorders-by-removal, and
+ * renders them. See segSlug()/isSingleSource() below for why the client-side
+ * sort has to know about this too, not just the server.
+ */
+function segSlug(s) { return s.slug || SLUG; }
+function isSingleSource(list) {
+  return new Set(list.map(segSlug)).size <= 1;
+}
+
 function initCompile(slug, padStart, padEnd) {
   SLUG = slug;
   PAD_START = padStart != null ? padStart : 1.0;
@@ -362,12 +376,21 @@ function cAddDraftSegment() {
   const label = document.getElementById('c-label-val').value.trim();
   const wasEditing = editingIndex != null;
   if (wasEditing) {
-    openSegments[editingIndex] = { start, end, label };
+    // Preserve the edited segment's own slug (it's always this workspace's
+    // own here - see cEditSegment's foreign-row guard - but keep the field
+    // rather than dropping it, in case that guard is ever relaxed).
+    openSegments[editingIndex] = { ...openSegments[editingIndex], start, end, label };
     cCancelEditSegment();  // clears editingIndex and resets the button label
   } else {
     openSegments.push({ start, end, label });
   }
-  openSegments.sort((a, b) => a.start - b.start);
+  // Chronological sort only makes sense when every segment shares one
+  // source - across streams it'd scramble the authored play order into a
+  // meaningless mix of independent clocks (see clipbot/compilations.py's
+  // _normalize_segments for the server-side version of this same rule).
+  if (isSingleSource(openSegments)) {
+    openSegments.sort((a, b) => a.start - b.start);
+  }
   dirty = true;
 
   document.getElementById('c-in-val').value = '';
@@ -386,6 +409,13 @@ window.cAddDraftSegment = cAddDraftSegment;
 // which lost its position in a longer list and its label had to be retyped.
 function cEditSegment(i) {
   const s = openSegments[i];
+  if (segSlug(s) !== SLUG) {
+    // This page's draft editor (timeline + transcript) is bound to this
+    // workspace's own video, so its times would be meaningless against a
+    // foreign segment's source. Adjust those via `clipbot compile` instead.
+    toast('This segment is from ' + segSlug(s) + ' - edit it with clipbot compile, not here', true);
+    return;
+  }
   document.getElementById('c-in-val').value = formatClock(s.start);
   document.getElementById('c-out-val').value = formatClock(s.end);
   document.getElementById('c-label-val').value = s.label || '';
@@ -640,12 +670,14 @@ function renderSegList() {
     const editing = i === editingIndex;
     const rendering = renderingSegmentLabel != null &&
       renderingSegmentLabel === (s.label || 'segment ' + (i + 1));
+    const foreign = segSlug(s) !== SLUG;
     return `
     <div class="seg-row${editing ? ' editing' : ''}${rendering ? ' rendering' : ''}">
       <span class="rng">${formatClock(s.start, false)}–${formatClock(s.end, false)}</span>
+      ${foreign ? `<span class="badge" title="Footage from a different workspace">from ${esc(segSlug(s))}</span>` : ''}
       <span class="label" title="${esc(s.label || '')}">${esc(s.label || '')}</span>
       ${rendering ? '<span class="badge">rendering…</span>' : ''}
-      <button onclick="cEditSegment(${i})" title="Edit">✎</button>
+      <button onclick="cEditSegment(${i})" title="${foreign ? 'Edit with clipbot compile, not here' : 'Edit'}"${foreign ? ' disabled' : ''}>✎</button>
       <button onclick="cRemoveSegment(${i})" title="Remove">✕</button>
     </div>`;
   }).join('');
@@ -671,7 +703,7 @@ async function cSaveCompilation() {
   try {
     await api(`/api/workspaces/${SLUG}/compilations`, 'POST', {
       name: openName,
-      segments: openSegments.map(s => ({ start: s.start, end: s.end, label: s.label })),
+      segments: openSegments.map(s => ({ start: s.start, end: s.end, label: s.label, slug: s.slug || null })),
     });
     dirty = false;
     await loadCompilations();

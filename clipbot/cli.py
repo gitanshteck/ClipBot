@@ -11,6 +11,7 @@ on its own against an existing workspace without repeating earlier ones.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -64,7 +65,9 @@ def resolve_workspace(args: argparse.Namespace, settings: Settings) -> Workspace
 
 def cmd_download(args: argparse.Namespace, settings: Settings) -> int:
     ws = Workspace.for_url(settings.work_root, args.url)
-    video = download_stage.download_vod(args.url, ws, settings, force=args.force)
+    video = download_stage.download_vod(
+        args.url, ws, settings, force=args.force, quality=args.quality
+    )
     print(video)
     return 0
 
@@ -187,16 +190,29 @@ def cmd_reel(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+RANGE_SLUG_RE = re.compile(r"^([a-z0-9._-]{1,120}):(.+)$")
+
+
 def cmd_compile(args: argparse.Namespace, settings: Settings) -> int:
     ws = resolve_workspace(args, settings)
 
     if args.range:
         segments = []
         for raw in args.range:
-            parts = raw.split(",", 2)
+            # Optional 'slug:start,end[,label]' prefix pulls this segment's
+            # footage from a different workspace than --workspace. `start`
+            # is always numeric and a slug never is, so the leading-colon
+            # split is unambiguous.
+            slug = None
+            body = raw
+            slug_match = RANGE_SLUG_RE.match(raw)
+            if slug_match:
+                slug, body = slug_match.group(1), slug_match.group(2)
+
+            parts = body.split(",", 2)
             if len(parts) < 2:
                 raise StageError(
-                    "--range must be 'start,end[,label]', got {0!r}".format(raw)
+                    "--range must be '[slug:]start,end[,label]', got {0!r}".format(raw)
                 )
             try:
                 start = float(parts[0])
@@ -206,7 +222,10 @@ def cmd_compile(args: argparse.Namespace, settings: Settings) -> int:
                     "--range start/end must be numbers, got {0!r}".format(raw)
                 )
             label = parts[2] if len(parts) > 2 else ""
-            segments.append({"start": start, "end": end, "label": label})
+            seg = {"start": start, "end": end, "label": label}
+            if slug:
+                seg["slug"] = slug
+            segments.append(seg)
         try:
             compilations.upsert(ws, args.name, segments, settings)
         except ValueError as exc:
@@ -264,6 +283,21 @@ def cmd_cleanup(args: argparse.Namespace, settings: Settings) -> int:
                 len(unrendered_comps)
             )
         )
+    # A cross-stream compilation homed in a *different* workspace can still
+    # depend on this VOD's footage - see stages/compile.py's module docstring.
+    unrendered_elsewhere = compile_stage.unrendered_compilations_elsewhere(ws, settings)
+    if unrendered_elsewhere and not args.force:
+        detail = "; ".join(
+            "{0!r} in workspace {1!r}".format(e["compilation"], e["workspace"])
+            for e in unrendered_elsewhere
+        )
+        raise StageError(
+            "{0} compilation(s) elsewhere still need this VOD's footage and "
+            "aren't rendered yet: {1}.\n"
+            "Render them first, or pass --force to delete anyway.".format(
+                len(unrendered_elsewhere), detail
+            )
+        )
 
     # Not a refusal: the chat fetch needs only the channel id and start time
     # from state.json, never the video file. But this is the last natural
@@ -285,7 +319,9 @@ def cmd_run(args: argparse.Namespace, settings: Settings) -> int:
     ws = Workspace.for_url(settings.work_root, args.url)
     log.info("Workspace: %s", ws.root)
 
-    video = download_stage.download_vod(args.url, ws, settings, force=args.force)
+    video = download_stage.download_vod(
+        args.url, ws, settings, force=args.force, quality=args.quality
+    )
     # Chat first, and best-effort: Kick discards it with the VOD after 7 days
     # (30 if verified), so a later run may find nothing left to fetch. A stream
     # with no chat must not stop the rest of the pipeline.
@@ -533,11 +569,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="cut every candidate without reviewing first",
     )
+    p_run.add_argument(
+        "--quality",
+        choices=download_stage.QUALITY_CHOICES,
+        default=None,
+        help="cap download resolution (default: config/settings.json download.format)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_dl = sub.add_parser("download", help="stage 1: download a VOD")
     p_dl.add_argument("url")
     p_dl.add_argument("--force", action="store_true", help="re-download if present")
+    p_dl.add_argument(
+        "--quality",
+        choices=download_stage.QUALITY_CHOICES,
+        default=None,
+        help="cap download resolution (default: config/settings.json download.format)",
+    )
     p_dl.set_defaults(func=cmd_download)
 
     p_chat = sub.add_parser(
@@ -655,9 +703,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_compile.add_argument(
         "--range",
         action="append",
-        metavar="START,END[,LABEL]",
+        metavar="[SLUG:]START,END[,LABEL]",
         help="add/replace a segment (repeatable); omit entirely to re-render "
-        "an existing compilation",
+        "an existing compilation. An optional SLUG: prefix pulls this "
+        "segment's footage from a different workspace than --workspace, "
+        "for a compilation spanning multiple streams",
     )
     p_compile.add_argument(
         "--force", action="store_true", help="re-render even if the file is current"

@@ -11,12 +11,46 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* --- download quality picker ---
+ * Shared by workspace.html (per-stage download/re-download/run-all) and
+ * library.html (new VOD form + channel browser) so the preset list only
+ * lives in one place. Keys/order must match clipbot/stages/download.py's
+ * QUALITY_CHOICES; there's no route exposing that list, so it's mirrored
+ * here by hand - it's a short, rarely-changed constant, not worth a round
+ * trip for. Empty value means "omit `quality`", i.e. fall back to
+ * config/settings.json's `download.format`.
+ */
+function qualityPickerHtml(id) {
+  return `<select id="${id}" title="Download quality">
+    <option value="">Default (≤720p)</option>
+    <option value="best">Best available</option>
+    <option value="1080">1080p</option>
+    <option value="720">720p</option>
+    <option value="480">480p</option>
+    <option value="360">360p</option>
+  </select>`;
+}
+
 function fmtDur(sec) {
   if (sec == null) return '—';
   sec = Math.max(0, Math.floor(sec));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
            : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/* --- byte/rate formatting --- (job panel: download speed + remaining size) */
+function fmtBytes(n) {
+  if (n == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = Math.max(0, n);
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null) return null;
+  return `${fmtBytes(bytesPerSec)}/s`;
 }
 
 /* --- time helpers ---
@@ -114,9 +148,16 @@ function renderJobs() {
   el.innerHTML = list.map(j => {
     const pct = j.fraction != null ? Math.round(j.fraction * 100) : null;
     const eta = j.eta_seconds ? ` · ETA ${fmtDur(j.eta_seconds)}` : '';
+    // Byte-unit jobs (currently just downloads) additionally show speed and
+    // bytes-done/total - other stages report progress in units like
+    // "segments" and don't have a meaningful transfer rate to show.
+    const bytesLine = j.unit === 'bytes'
+      ? `<div class="meta">${fmtBytes(j.current)} / ${fmtBytes(j.total)}${j.rate ? ' · ' + fmtRate(j.rate) : ''}</div>`
+      : '';
     return `<div class="job ${j.status}">
       <div><b>${j.kind}</b> <span class="meta">${j.slug}</span></div>
       <div class="meta">${j.status}${j.phase ? ' · ' + j.phase : ''}${pct != null ? ' · ' + pct + '%' : ''}${eta}</div>
+      ${bytesLine}
       ${j.label ? `<div class="meta">${esc(j.label)}</div>` : ''}
       ${j.error ? `<div class="meta" style="color:var(--bad)">${esc(j.error)}</div>` : ''}
       ${pct != null && j.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
