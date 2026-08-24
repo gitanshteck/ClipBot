@@ -11,17 +11,20 @@ on its own against an existing workspace without repeating earlier ones.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
 
 from . import chatsync
+from . import compilations
 from . import manifest as manifest_module
 from . import review
 from .config import Settings, load_settings
 from .stages import analyze as analyze_stage
 from .stages import audio as audio_stage
 from .stages import chat as chat_stage
+from .stages import compile as compile_stage
 from .stages import cut as cut_stage
 from .stages import download as download_stage
 from .stages import diarize as diarize_stage
@@ -62,7 +65,9 @@ def resolve_workspace(args: argparse.Namespace, settings: Settings) -> Workspace
 
 def cmd_download(args: argparse.Namespace, settings: Settings) -> int:
     ws = Workspace.for_url(settings.work_root, args.url)
-    video = download_stage.download_vod(args.url, ws, settings, force=args.force)
+    video = download_stage.download_vod(
+        args.url, ws, settings, force=args.force, quality=args.quality
+    )
     print(video)
     return 0
 
@@ -185,6 +190,54 @@ def cmd_reel(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+RANGE_SLUG_RE = re.compile(r"^([a-z0-9._-]{1,120}):(.+)$")
+
+
+def cmd_compile(args: argparse.Namespace, settings: Settings) -> int:
+    ws = resolve_workspace(args, settings)
+
+    if args.range:
+        segments = []
+        for raw in args.range:
+            # Optional 'slug:start,end[,label]' prefix pulls this segment's
+            # footage from a different workspace than --workspace. `start`
+            # is always numeric and a slug never is, so the leading-colon
+            # split is unambiguous.
+            slug = None
+            body = raw
+            slug_match = RANGE_SLUG_RE.match(raw)
+            if slug_match:
+                slug, body = slug_match.group(1), slug_match.group(2)
+
+            parts = body.split(",", 2)
+            if len(parts) < 2:
+                raise StageError(
+                    "--range must be '[slug:]start,end[,label]', got {0!r}".format(raw)
+                )
+            try:
+                start = float(parts[0])
+                end = float(parts[1])
+            except ValueError:
+                raise StageError(
+                    "--range start/end must be numbers, got {0!r}".format(raw)
+                )
+            label = parts[2] if len(parts) > 2 else ""
+            seg = {"start": start, "end": end, "label": label}
+            if slug:
+                seg["slug"] = slug
+            segments.append(seg)
+        try:
+            compilations.upsert(ws, args.name, segments, settings)
+        except ValueError as exc:
+            raise StageError(str(exc))
+
+    out_path = compile_stage.render_compilation(
+        ws, settings, args.name, force=args.force
+    )
+    print(out_path)
+    return 0
+
+
 def cmd_manifest(args: argparse.Namespace, settings: Settings) -> int:
     ws = resolve_workspace(args, settings)
     json_path, csv_path = manifest_module.write_manifest(ws, settings)
@@ -208,6 +261,44 @@ def cmd_cleanup(args: argparse.Namespace, settings: Settings) -> int:
             )
         )
 
+    # Reels and compilations both re-encode from the VOD rather than copying
+    # an already-cut clip, so losing the source strands them too - the
+    # dashboard's cleanup job already checks both; the CLI previously only
+    # checked uncut clips.
+    unrendered_reels = reel_stage.unrendered_reels(ws)
+    if unrendered_reels and not args.force:
+        raise StageError(
+            "{0} clip(s) have reel settings but no rendered reel - deleting the "
+            "VOD now would strand them.\n"
+            "Render them first, or pass --force to delete anyway.".format(
+                len(unrendered_reels)
+            )
+        )
+    unrendered_comps = compile_stage.unrendered_compilations(ws)
+    if unrendered_comps and not args.force:
+        raise StageError(
+            "{0} compilation(s) have segments but no rendered output - deleting "
+            "the VOD now would strand them.\n"
+            "Render them first, or pass --force to delete anyway.".format(
+                len(unrendered_comps)
+            )
+        )
+    # A cross-stream compilation homed in a *different* workspace can still
+    # depend on this VOD's footage - see stages/compile.py's module docstring.
+    unrendered_elsewhere = compile_stage.unrendered_compilations_elsewhere(ws, settings)
+    if unrendered_elsewhere and not args.force:
+        detail = "; ".join(
+            "{0!r} in workspace {1!r}".format(e["compilation"], e["workspace"])
+            for e in unrendered_elsewhere
+        )
+        raise StageError(
+            "{0} compilation(s) elsewhere still need this VOD's footage and "
+            "aren't rendered yet: {1}.\n"
+            "Render them first, or pass --force to delete anyway.".format(
+                len(unrendered_elsewhere), detail
+            )
+        )
+
     # Not a refusal: the chat fetch needs only the channel id and start time
     # from state.json, never the video file. But this is the last natural
     # prompt before the workspace looks "finished", and Kick's retention clock
@@ -228,7 +319,9 @@ def cmd_run(args: argparse.Namespace, settings: Settings) -> int:
     ws = Workspace.for_url(settings.work_root, args.url)
     log.info("Workspace: %s", ws.root)
 
-    video = download_stage.download_vod(args.url, ws, settings, force=args.force)
+    video = download_stage.download_vod(
+        args.url, ws, settings, force=args.force, quality=args.quality
+    )
     # Chat first, and best-effort: Kick discards it with the VOD after 7 days
     # (30 if verified), so a later run may find nothing left to fetch. A stream
     # with no chat must not stop the rest of the pipeline.
@@ -476,11 +569,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="cut every candidate without reviewing first",
     )
+    p_run.add_argument(
+        "--quality",
+        choices=download_stage.QUALITY_CHOICES,
+        default=None,
+        help="cap download resolution (default: config/settings.json download.format)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_dl = sub.add_parser("download", help="stage 1: download a VOD")
     p_dl.add_argument("url")
     p_dl.add_argument("--force", action="store_true", help="re-download if present")
+    p_dl.add_argument(
+        "--quality",
+        choices=download_stage.QUALITY_CHOICES,
+        default=None,
+        help="cap download resolution (default: config/settings.json download.format)",
+    )
     p_dl.set_defaults(func=cmd_download)
 
     p_chat = sub.add_parser(
@@ -586,6 +691,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the ffmpeg command for each clip and render nothing",
     )
     p_reel.set_defaults(func=cmd_reel)
+
+    p_compile = sub.add_parser(
+        "compile",
+        help="assemble a named list of VOD ranges into one landscape video",
+    )
+    add_workspace_args(p_compile)
+    p_compile.add_argument(
+        "--name", required=True, help="compilation name (also the output filename)"
+    )
+    p_compile.add_argument(
+        "--range",
+        action="append",
+        metavar="[SLUG:]START,END[,LABEL]",
+        help="add/replace a segment (repeatable); omit entirely to re-render "
+        "an existing compilation. An optional SLUG: prefix pulls this "
+        "segment's footage from a different workspace than --workspace, "
+        "for a compilation spanning multiple streams",
+    )
+    p_compile.add_argument(
+        "--force", action="store_true", help="re-render even if the file is current"
+    )
+    p_compile.set_defaults(func=cmd_compile)
 
     p_man = sub.add_parser("manifest", help="write manifest.json + manifest.csv")
     add_workspace_args(p_man)

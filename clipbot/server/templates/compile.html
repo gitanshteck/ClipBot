@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}Compilations — ClipBot{% endblock %}
+{% block bodyclass %}compile-page{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="/static/review.css?v={{ ASSET_V }}">
+<link rel="stylesheet" href="/static/compile.css?v={{ ASSET_V }}">
+
+<section class="panel">
+  <a class="back" href="/w/{{ slug }}">&larr; Workspace</a>
+  <h1>Compilations
+    <button onclick="showCKeys()" title="Keyboard shortcuts" style="float:right;font-size:12px">⌨ Keys</button>
+  </h1>
+  <div class="meta">
+    Cut and concatenate non-contiguous ranges into one landscape video —
+    a curated supercut, separate from clips/reels.
+  </div>
+</section>
+
+<div class="compile2">
+  <!-- ---------- main editing surface ---------- -->
+  <div>
+    <div id="stage" class="stage-wrap">
+      <video id="c-player" preload="metadata" src="/media/{{ slug }}/video"></video>
+    </div>
+
+    <div class="transport">
+      <button onclick="cToggle()" id="c-play-btn" title="Play / pause">▶</button>
+      <button onclick="cSeekBy(-10)" title="Back 10s">−10s</button>
+      <button onclick="cSeekBy(10)" title="Forward 10s">+10s</button>
+      <span class="time">
+        <span id="c-t-now">0:00.0</span><span class="sep"> / </span><span id="c-t-dur">—</span>
+      </span>
+    </div>
+
+    <!-- whole-VOD overview, marked with the open compilation's segments -->
+    <div class="tl-block">
+      <div class="tl-label">
+        <span>Full stream</span>
+        <span class="note">click to seek</span>
+      </div>
+      <div class="timeline" id="c-tl-full">
+        <div class="tl-density" id="c-tl-density"></div>
+        <div id="c-tl-segs"></div>
+        <div class="tl-ticks" id="c-tl-ticks"></div>
+        <div class="tl-playhead" id="c-tl-head" style="left:0"></div>
+      </div>
+      <div class="tl-legend">
+        <span><i style="background:rgba(154,111,230,.55);border:1px solid #9a6fe6"></i> in this compilation</span>
+        <span><i style="background:rgba(25,162,210,.45);border:1px solid var(--accent);border-style:dashed"></i> draft (not added yet)</span>
+        <span><i style="background:var(--accent);opacity:.38"></i> speech</span>
+      </div>
+    </div>
+
+    <!-- zoomed view around the draft in/out -->
+    <div class="tl-block">
+      <div class="tl-label">
+        <span>Draft segment</span>
+        <span class="note">drag the <b>I</b> / <b>O</b> handles</span>
+      </div>
+      <div class="timeline zoom" id="c-tl-zoom">
+        <div class="tl-density" id="c-tz-density"></div>
+        <div class="tl-pad" id="c-tz-pad-in"></div>
+        <div class="tl-pad" id="c-tz-pad-out"></div>
+        <div class="tl-window" id="c-tz-window"></div>
+        <div class="tl-handle" id="c-tz-in"><span class="cap">I</span></div>
+        <div class="tl-handle" id="c-tz-out"><span class="cap">O</span></div>
+        <div class="tl-ticks" id="c-tz-ticks"></div>
+        <div class="tl-playhead" id="c-tz-head" style="left:0"></div>
+      </div>
+    </div>
+
+    <!-- draft in / out / label editor -->
+    <div class="editor2">
+      <h3>New segment</h3>
+      <div class="row" style="gap:14px">
+        <div class="field">
+          <label for="c-in-val">in</label>
+          <input type="text" id="c-in-val" inputmode="decimal" placeholder="m:ss">
+        </div>
+        <div class="field">
+          <label for="c-out-val">out</label>
+          <input type="text" id="c-out-val" inputmode="decimal" placeholder="m:ss">
+        </div>
+        <div class="field" style="flex:1;min-width:160px">
+          <label for="c-label-val">label</label>
+          <input type="text" id="c-label-val" placeholder="what happens here">
+        </div>
+        <span class="dur-pill" id="c-dur-pill">—</span>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <button onclick="cUseSelection()" title="Fill in from the current playhead">from playhead</button>
+        <button onclick="cAddDraftSegment()" id="c-add-btn">+ Add segment</button>
+        <button onclick="cCancelEditSegment()" id="c-cancel-edit-btn" hidden>Cancel edit</button>
+      </div>
+      <div class="hint" style="margin-top:7px">
+        Times accept <b>41:00</b>, <b>1:23:45</b>, or a bare number of seconds.
+        Rendering adds {{ pad_start }}s before and {{ pad_end }}s after each
+        segment (the hatched area) and always re-encodes, so joins land exactly
+        where you drag them. Segments always play back in chronological order
+        by start time, regardless of the order you add them in.
+      </div>
+    </div>
+
+    <!-- transcript -->
+    <div class="tx-wrap">
+      <div class="tx-bar">
+        <div class="seg" id="c-tx-script-toggle" hidden style="margin:0">
+          <button data-script="dev" class="on" onclick="cSetTxScript('dev')" title="देवनागरी">Dev</button>
+          <button data-script="hin" onclick="cSetTxScript('hin')" title="Hinglish (Latin script)">Hin</button>
+        </div>
+        <input type="search" id="c-tx-search" placeholder="Search transcript (Devanagari — देवनागरी)…" autocomplete="off">
+        <label class="meta" style="display:flex;gap:4px;align-items:center">
+          <input type="checkbox" id="c-tx-hide-low"> hide low-confidence
+        </label>
+        <span class="count" id="c-tx-count"></span>
+      </div>
+      <div class="tx-scroll" id="c-tx-scroll">
+        <div class="tx-inner" id="c-tx-inner"></div>
+      </div>
+      <div class="hint" style="padding:6px 10px">
+        Click a line to seek. <kbd>Shift</kbd>+click sets the draft's <b>out</b> point there.
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------- compilation list + editor ---------- -->
+  <aside>
+    <div class="side-sticky">
+      <div class="panel" style="padding:11px">
+        <h3 style="margin:0 0 8px">Compilations</h3>
+        <div class="complist" id="c-complist"></div>
+        <div class="row" style="margin-top:9px">
+          <input type="text" id="c-new-name" placeholder="new compilation name" style="flex:1">
+          <button onclick="cNewCompilation()">+ New</button>
+        </div>
+      </div>
+
+      <div class="panel" id="c-open-panel" style="padding:11px" hidden>
+        <h3 style="margin:0 0 4px" id="c-open-title">—</h3>
+        <div class="meta" id="c-open-meta"></div>
+
+        <div class="seglist" id="c-seglist" style="margin-top:8px"></div>
+
+        <div class="row" style="margin-top:10px">
+          <button onclick="cSaveCompilation()" id="c-save-btn">Save</button>
+          <button onclick="cRenderCompilation()" id="c-render-btn">▶ Render</button>
+          <button onclick="cDeleteCompilation()" title="Deletes the rendered file too" style="margin-left:auto">Delete</button>
+        </div>
+
+        <h4 style="margin:14px 0 6px">Output</h4>
+        <div id="c-output"></div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<dialog id="c-keys-dialog">
+  <h2 style="margin-top:0">Keyboard</h2>
+  <div class="keyhelp">
+    <div class="grp">Playback</div>
+    <kbd>space</kbd><span>play / pause</span>
+    <kbd>← →</kbd><span>seek 1 second</span>
+    <kbd>shift + ← →</kbd><span>seek 10 seconds</span>
+    <div class="grp">Draft segment</div>
+    <kbd>I</kbd><span>set <b>in</b> to playhead</span>
+    <kbd>O</kbd><span>set <b>out</b> to playhead</span>
+    <kbd>[ ]</kbd><span>nudge in / out by 0.1s (shift: 1s)</span>
+    <kbd>enter</kbd><span>add / update the draft segment</span>
+    <div class="grp">Transcript</div>
+    <kbd>/</kbd><span>focus search</span>
+    <kbd>shift + click</kbd><span>set draft's out point to that line</span>
+  </div>
+  <div class="row" style="margin-top:12px;justify-content:flex-end">
+    <button onclick="document.getElementById('c-keys-dialog').close()">Close</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/compile.js?v={{ ASSET_V }}"></script>
+<script>
+  document.body.classList.add('compile-page');
+  initCompile({{ slug|tojson }}, {{ pad_start }}, {{ pad_end }});
+</script>
+{% endblock %}

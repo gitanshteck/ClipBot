@@ -14,6 +14,7 @@
   <div class="row">
     <button id="run-all">Run all remaining</button>
     <a class="btn" id="review-link" href="/w/{{ slug }}/review">Review clips</a>
+    <a class="btn" id="compile-link" href="/w/{{ slug }}/compile">Compilations</a>
     <a class="btn" id="csv-link" href="/media/{{ slug }}/manifest.csv">Download manifest.csv</a>
   </div>
 </section>
@@ -52,7 +53,7 @@ async function load() {
   if (w.low_res) {
     lowres.hidden = false;
     lowres.innerHTML = `This VOD downloaded at <b>${w.video_width}×${w.video_height}</b> — too low to review clips visually.
-      Kick serves up to 720p60. <button class="btn" onclick="submitJob('download',{force:true})">Re-download at 720p</button>`;
+      Kick serves up to 720p60. <button class="btn" onclick="submitJob('download',{force:true, quality:'720'})">Re-download at 720p</button>`;
   } else { lowres.hidden = true; }
 
   document.getElementById('stages').innerHTML = w.stages.map(s => {
@@ -65,12 +66,44 @@ async function load() {
     const detail = s.detail && Object.keys(s.detail).length
       ? Object.entries(s.detail).filter(([k]) => k !== 'completed_at').map(([k,v]) => `${k}: ${v}`).join(' · ')
       : (s.blocked || '');
+    const isTranscribe = s.key === 'transcribe';
+    const isDownload = s.key === 'download';
+    const backendPicker = isTranscribe
+      ? `<select id="transcribe-backend" title="Transcription backend">
+           <option value="openai">OpenAI API (fast, paid)</option>
+           <option value="local">Local (faster-whisper, free)</option>
+         </select>`
+      : '';
+    const qualityPicker = isDownload ? qualityPickerHtml('download-quality') : '';
+    const jobOpts = isTranscribe
+      ? `{force:${s.done ? 'true' : 'false'}, backend: document.getElementById('transcribe-backend').value}`
+      : isDownload
+      ? `{force:${s.done ? 'true' : 'false'}, quality: document.getElementById('download-quality').value || null}`
+      : `{force:${s.done ? 'true' : 'false'}}`;
     return `<div class="stage ${state}">
       <div class="stage-head"><span class="dot ${state}"></span><b>${s.label}</b></div>
       <div class="stage-detail">${esc(detail)}</div>
-      <button ${disabled} onclick="submitJob('${s.key}',{force:${s.done ? 'true' : 'false'}})">${label}</button>
+      ${backendPicker}
+      ${qualityPicker}
+      <button ${disabled} onclick="submitJob('${s.key}',${jobOpts})">${label}</button>
     </div>`;
   }).join('');
+
+  // The selects above are rebuilt from scratch every load() (poll/SSE/10s
+  // interval), so remember the user's last choice the same way the Kick
+  // channel-browse picker does (library.html's clipbot.lastChannel).
+  const backendSel = document.getElementById('transcribe-backend');
+  if (backendSel) {
+    backendSel.value = localStorage.getItem('clipbot.transcribeBackend') || 'openai';
+    backendSel.addEventListener('change', () =>
+      localStorage.setItem('clipbot.transcribeBackend', backendSel.value));
+  }
+  const qualitySel = document.getElementById('download-quality');
+  if (qualitySel) {
+    qualitySel.value = localStorage.getItem('clipbot.downloadQuality') || '';
+    qualitySel.addEventListener('change', () =>
+      localStorage.setItem('clipbot.downloadQuality', qualitySel.value));
+  }
 
   const cuts = await api('/api/workspaces/' + SLUG + '/clips').catch(() => ({clips: []}));
   const cut = (cuts.clips || []).filter(c => c.output && c.output.file);
@@ -89,7 +122,12 @@ async function submitJob(kind, opts) {
 }
 window.submitJob = submitJob;
 
-document.getElementById('run-all').addEventListener('click', () => submitJob('pipeline', {}));
+document.getElementById('run-all').addEventListener('click', () => {
+  // The download stage row (always present) carries the quality picker;
+  // pipeline re-uses its current value since pipeline downloads too.
+  const q = document.getElementById('download-quality');
+  submitJob('pipeline', q && q.value ? { quality: q.value } : {});
+});
 onEvent('workspace', load);
 onEvent('job', load);
 load();

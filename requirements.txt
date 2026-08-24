@@ -11,6 +11,13 @@ yt-dlp[default,curl-cffi]>=2025.10.14
 # Stage 3: transcription
 faster-whisper>=1.2.1
 
+# Stage 3 (alternate backend): OpenAI-hosted transcription (transcribe.backend
+# == "openai", the default - see clipbot/stages/transcribe_openai.py). Needs
+# OPENAI_API_KEY in the environment. Small pure-Python SDK, unlike the
+# multi-GB PyTorch pulled in by requirements-diarize.txt, so it lives here
+# rather than in its own opt-in requirements file.
+openai>=1.0
+
 # Stage 4: Claude analysis
 anthropic>=0.120.2
 

@@ -23,16 +23,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import chatsync
+from .. import compilations
 from .. import fxspec
 from .. import library
 from .. import manifest as manifest_module
 from .. import review
+from .. import speakerfx
 from ..config import PROJECT_ROOT, load_settings
 from ..ffrun import run_ffmpeg
 from ..preview import PreviewRunner
 from ..stages import analyze as analyze_stage
 from ..stages import audio as audio_stage
 from ..stages import chat as chat_stage
+from ..stages import compile as compile_stage
 from ..stages import cut as cut_stage
 from ..stages import download as download_stage
 from ..stages import reel as reel_stage
@@ -76,7 +79,10 @@ def _asset_version() -> str:
     """
     digest = hashlib.sha1()
     static_dir = HERE / "static"
-    for name in ("app.css", "app.js", "review.css", "review.js", "reel.js", "fx.js"):
+    for name in (
+        "app.css", "app.js", "review.css", "review.js", "reel.js", "fx.js",
+        "compile.css", "compile.js",
+    ):
         path = static_dir / name
         if path.is_file():
             digest.update(str(path.stat().st_mtime_ns).encode("utf-8"))
@@ -124,7 +130,14 @@ def _h_download(ws, st, job, progress):
     url = job.options.get("url") or ws.read_state().get("url")
     if not url:
         raise StageError("No URL recorded for this workspace")
-    return download_stage.download_vod(url, ws, st, force=job.options.get("force", False))
+    return download_stage.download_vod(
+        url,
+        ws,
+        st,
+        force=job.options.get("force", False),
+        quality=job.options.get("quality"),
+        progress=progress,
+    )
 
 
 def _h_chat(ws, st, job, progress):
@@ -139,7 +152,8 @@ def _h_audio(ws, st, job, progress):
 
 def _h_transcribe(ws, st, job, progress):
     return transcribe_stage.transcribe_audio(
-        ws, st, force=job.options.get("force", False), progress=progress
+        ws, st, force=job.options.get("force", False),
+        backend=job.options.get("backend"), progress=progress,
     )
 
 
@@ -186,6 +200,15 @@ def _h_reel(ws, st, job, progress):
     return out
 
 
+def _h_compile(ws, st, job, progress):
+    name = job.options.get("name")
+    if not name:
+        raise StageError("compile job requires a 'name'")
+    return compile_stage.render_compilation(
+        ws, st, name, force=job.options.get("force", False), progress=progress
+    )
+
+
 def _h_manifest(ws, st, job, progress):
     json_path, _ = manifest_module.write_manifest(ws, st)
     return json_path
@@ -208,6 +231,28 @@ def _h_cleanup(ws, st, job, progress):
                 "{0} clip(s) have reel settings but no rendered reel. Render them "
                 "first, or force.".format(len(unrendered))
             )
+        # Same reasoning as reels: every compile segment re-encodes from the
+        # VOD, so an outstanding compilation would be strandable too.
+        unrendered_comps = compile_stage.unrendered_compilations(ws)
+        if unrendered_comps:
+            raise StageError(
+                "{0} compilation(s) have segments but no rendered output. Render "
+                "them first, or force.".format(len(unrendered_comps))
+            )
+        # A cross-stream compilation homed in a *different* workspace can
+        # still depend on this VOD's footage.
+        unrendered_elsewhere = compile_stage.unrendered_compilations_elsewhere(ws, st)
+        if unrendered_elsewhere:
+            detail = "; ".join(
+                "{0!r} in workspace {1!r}".format(e["compilation"], e["workspace"])
+                for e in unrendered_elsewhere
+            )
+            raise StageError(
+                "{0} compilation(s) elsewhere still need this VOD's footage and "
+                "aren't rendered yet ({1}). Render them first, or force.".format(
+                    len(unrendered_elsewhere), detail
+                )
+            )
     download_stage.delete_vod(ws)
     return None
 
@@ -216,7 +261,9 @@ def _h_pipeline(ws, st, job, progress):
     force = job.options.get("force", False)
     url = job.options.get("url") or ws.read_state().get("url")
     progress.phase("download")
-    video = download_stage.download_vod(url, ws, st, force=force)
+    video = download_stage.download_vod(
+        url, ws, st, force=force, quality=job.options.get("quality"), progress=progress
+    )
     progress.phase("chat")
     # Best-effort: an expired or chatless VOD must not sink the whole pipeline,
     # but it's fetched first because it's the one thing that can't be recovered.
@@ -244,6 +291,7 @@ for _kind, _handler in (
     ("diarize", _h_diarize),
     ("cut", _h_cut),
     ("reel", _h_reel),
+    ("compile", _h_compile),
     ("manifest", _h_manifest),
     ("cleanup", _h_cleanup),
     ("pipeline", _h_pipeline),
@@ -395,7 +443,9 @@ def external_activity(ws: Workspace) -> Optional[Dict[str, Any]]:
                 continue
             if video_id not in line and ws.slug not in line:
                 continue
-            for kind in ("transcribe", "analyze", "cut", "audio", "download", "run"):
+            for kind in (
+                "transcribe", "analyze", "cut", "audio", "download", "compile", "run",
+            ):
                 if " {0}".format(kind) in line:
                     return {
                         "kind": "pipeline" if kind == "run" else kind,
@@ -513,6 +563,23 @@ async def page_review(request: Request, slug: str):
     )
 
 
+@app.get("/w/{slug}/compile", response_class=HTMLResponse)
+async def page_compile(request: Request, slug: str):
+    get_workspace(slug)
+    # Same padding passthrough as page_review, for the same reason: the
+    # compile page's timeline draws each segment's padded range, which has to
+    # match what render_compilation will actually cut.
+    return templates.TemplateResponse(
+        "compile.html",
+        {
+            "request": request,
+            "slug": slug,
+            "pad_start": float(settings.get("cut.pad_start", 1.0)),
+            "pad_end": float(settings.get("cut.pad_end", 1.5)),
+        },
+    )
+
+
 # --- API ------------------------------------------------------------------
 
 
@@ -538,6 +605,21 @@ async def api_workspace(slug: str):
     return workspace_summary(get_workspace(slug))
 
 
+@app.get("/api/kick/{channel}/vods")
+async def api_channel_vods(channel: str, limit: int = 20):
+    """List a Kick channel's VODs, so the dashboard can offer them without the
+    user hunting down and pasting a URL per stream."""
+    channel = channel.strip().lower()
+    if not re.match(r"^[a-z0-9_-]{1,60}$", channel):
+        raise HTTPException(status_code=400, detail="invalid channel name")
+    vods = download_stage.list_channel_vods(channel, limit=max(1, min(limit, 50)))
+    for vod in vods:
+        slug = slug_for_url(vod["url"])
+        vod["slug"] = slug
+        vod["workspace_exists"] = (settings.work_root / slug).is_dir()
+    return {"channel": channel, "vods": vods}
+
+
 @app.post("/api/workspaces")
 async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
     url = (payload.get("url") or "").strip()
@@ -545,7 +627,13 @@ async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Expected a kick.com VOD URL")
     ws = Workspace.for_url(settings.work_root, url)
     job = runner.submit(
-        "pipeline", ws.slug, {"url": url, "force": bool(payload.get("force"))}
+        "pipeline",
+        ws.slug,
+        {
+            "url": url,
+            "force": bool(payload.get("force")),
+            "quality": payload.get("quality"),
+        },
     )
     return {"slug": ws.slug, "job": job.to_dict()}
 
@@ -588,6 +676,59 @@ async def api_add_clip(slug: str, payload: Dict[str, Any] = Body(...)):
     return clip
 
 
+@app.get("/api/workspaces/{slug}/compilations")
+async def api_compilations(slug: str):
+    ws = get_workspace(slug)
+    return {"compilations": compilations.list_compilations(ws)}
+
+
+@app.post("/api/workspaces/{slug}/compilations")
+async def api_save_compilation(slug: str, payload: Dict[str, Any] = Body(...)):
+    """Create, or fully replace the segment list of, a named compilation.
+
+    Whole-document replace, not additive - this is the compile page's own
+    editor Save. Adding one segment from elsewhere (the review page's "+
+    Compilation" action) goes through the dedicated segments route below
+    instead, so two tabs adding to the same compilation don't clobber each
+    other's work.
+    """
+    ws = get_workspace(slug)
+    try:
+        comp = compilations.upsert(
+            ws, payload.get("name"), payload.get("segments") or [], settings
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("compilations", {"slug": slug})
+    return comp
+
+
+@app.post("/api/workspaces/{slug}/compilations/{name}/segments")
+async def api_add_compilation_segment(
+    slug: str, name: str, payload: Dict[str, Any] = Body(...)
+):
+    ws = get_workspace(slug)
+    try:
+        comp = compilations.add_segment(ws, name, payload, settings)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("compilations", {"slug": slug})
+    return comp
+
+
+@app.delete("/api/workspaces/{slug}/compilations/{name}")
+async def api_delete_compilation(slug: str, name: str):
+    ws = get_workspace(slug)
+    try:
+        compilations.delete(ws, name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="no such compilation")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("compilations", {"slug": slug})
+    return {"deleted": name}
+
+
 @app.get("/api/workspaces/{slug}/transcript")
 async def api_transcript(slug: str):
     ws = get_workspace(slug)
@@ -602,6 +743,24 @@ async def api_transcript(slug: str):
         "segment_count": doc.get("segment_count"),
         "low_confidence_count": doc.get("low_confidence_count"),
         "realtime_factor": doc.get("realtime_factor"),
+        "segments": doc.get("segments", []),
+    }
+
+
+@app.get("/api/workspaces/{slug}/captions")
+async def api_captions(slug: str):
+    # Same {id, start, end} keying as transcript.json's segments (see
+    # stages/transliterate.py), so a frontend can index this by id to swap
+    # display text without re-deriving offsets.
+    ws = get_workspace(slug)
+    if not ws.captions_path.exists():
+        return {"segments": [], "present": False}
+    doc = ws.read_json(ws.captions_path)
+    return {
+        "present": True,
+        "model": doc.get("model"),
+        "segment_count": doc.get("segment_count"),
+        "failed_batches": doc.get("failed_batches"),
         "segments": doc.get("segments", []),
     }
 
@@ -747,6 +906,13 @@ async def api_reel_plan(slug: str, payload: Dict[str, Any] = Body(...)):
     plan["filter_complex"] = reelspec.build_filter(plan)
     plan["warn_above"] = float(settings.get("reel.warn_upscale_above", 1.5))
 
+    clip = _clip_or_none(ws, payload.get("clip_id"))
+    origin = 0.0
+    span = float(state.get("duration") or 0.0) or 1.0
+    if clip is not None:
+        start, end = cut_stage._padded_range(clip, settings, state.get("duration"))
+        origin, span = start, max(0.1, end - start)
+
     # Effects are resolved here too, non-strict, so the FX strip can draw itself
     # and flag a missing sound or an effect that has fallen outside the clip -
     # all without running ffmpeg. Only pixel-accurate confirmation costs a
@@ -754,12 +920,6 @@ async def api_reel_plan(slug: str, payload: Dict[str, Any] = Body(...)):
     plan["fx_plan"] = None
     plan["fx_warnings"] = []
     if plan.get("fx"):
-        clip = _clip_or_none(ws, payload.get("clip_id"))
-        origin = 0.0
-        span = float(state.get("duration") or 0.0) or 1.0
-        if clip is not None:
-            start, end = cut_stage._padded_range(clip, settings, state.get("duration"))
-            origin, span = start, max(0.1, end - start)
         try:
             fx_plan = fxspec.resolve_fx(
                 plan["fx"], origin=origin, span=span, canvas=plan["canvas"],
@@ -773,6 +933,33 @@ async def api_reel_plan(slug: str, payload: Dict[str, Any] = Body(...)):
         plan["fx_plan"] = fx_plan
         plan["fx_warnings"] = (fx_plan or {}).get("warnings") or []
     plan["fx_defaults"] = settings.get("reel.fx", {})
+
+    # Same "geometry only, skip the IO-heavy render assets" treatment as fx
+    # above: resolve_speaker_slots is pure math once handed the workspace's
+    # speaking spans, so the canvas preview can draw real, named slot rects
+    # for this layer instead of nothing at all (the previously-documented gap -
+    # unlike chat/captions, a speaker slot's position depends on who's
+    # actually talking in this clip, which pure-math reelspec.resolve() alone
+    # has no way to know).
+    plan["speaker_slots"] = []
+    if plan.get("speakers"):
+        spans = []
+        if ws.transcript_path.exists():
+            try:
+                transcript_doc = ws.read_json(ws.transcript_path)
+                map_doc = speakers_module.load(ws)
+                resolved_segs = speakers_module.resolved_segments(transcript_doc, map_doc)
+                spans = speakers_module.speaking_spans(resolved_segs)
+            except (ValueError, OSError):
+                spans = []
+        slots = speakerfx.resolve_speaker_slots(plan["speakers"], spans, plan["canvas"], origin, span)
+        if slots:
+            registry = {s["id"]: s for s in library.list_speakers(settings)}
+            for slot in slots:
+                profile = registry.get(slot["speaker_id"])
+                slot["name"] = profile["name"] if profile else slot["speaker_id"]
+                slot["color"] = (profile or {}).get("color") or "#19A2D2"
+            plan["speaker_slots"] = slots
     return plan
 
 
@@ -1059,6 +1246,16 @@ async def api_doctor():
         }
     )
 
+    # transcribe.backend defaults to "openai", so this is a core-pipeline key
+    # in the same way ANTHROPIC_API_KEY already is, not a conditional opt-in.
+    checks.append(
+        {
+            "name": "OPENAI_API_KEY",
+            "ok": bool(os.environ.get("OPENAI_API_KEY")),
+            "detail": "set" if os.environ.get("OPENAI_API_KEY") else "not set - openai-backend transcribe will fail",
+        }
+    )
+
     try:
         import ctranslate2
 
@@ -1100,6 +1297,23 @@ async def api_doctor():
 # --- media ----------------------------------------------------------------
 
 
+def _safe_media_path(
+    directory: Path, name: str, filename: Optional[str] = None, kind: str = "file"
+) -> Path:
+    """Resolve `filename` (defaulting to `name`) inside `directory`, rejecting
+    any name that could escape it. Shared by every /media/* route below - each
+    only differs in which directory it serves from, whether the on-disk
+    filename is the raw name or a derived one (a compilation's file is always
+    "<name>.mp4"), and what to call the 404 if it's missing.
+    """
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="bad name")
+    path = (directory / (filename or name)).resolve()
+    if directory.resolve() not in path.parents or not path.exists():
+        raise HTTPException(status_code=404, detail="no such {0}".format(kind))
+    return path
+
+
 @app.get("/media/{slug}/video")
 async def media_video(slug: str, request: Request):
     ws = get_workspace(slug)
@@ -1112,11 +1326,7 @@ async def media_video(slug: str, request: Request):
 @app.get("/media/{slug}/clip/{name}")
 async def media_clip(slug: str, name: str, request: Request):
     ws = get_workspace(slug)
-    if "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=400, detail="bad name")
-    path = (ws.clips_dir / name).resolve()
-    if ws.clips_dir.resolve() not in path.parents or not path.exists():
-        raise HTTPException(status_code=404, detail="no such clip")
+    path = _safe_media_path(ws.clips_dir, name, kind="clip")
     return serve_file(path, request.headers.get("range", ""))
 
 
@@ -1125,13 +1335,22 @@ async def media_reel(slug: str, name: str, request: Request, download: int = 0):
     # Separate route because the clip route rejects names containing "/", and
     # reels live in clips/reels/.
     ws = get_workspace(slug)
-    if "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=400, detail="bad name")
-    path = (ws.reels_dir / name).resolve()
-    if ws.reels_dir.resolve() not in path.parents or not path.exists():
-        raise HTTPException(status_code=404, detail="no such reel")
+    path = _safe_media_path(ws.reels_dir, name, kind="reel")
     return serve_file(
         path, request.headers.get("range", ""), download_name=name if download else ""
+    )
+
+
+@app.get("/media/{slug}/compilation/{name}")
+async def media_compilation(slug: str, name: str, request: Request, download: int = 0):
+    # A compilation's rendered file is always named "<name>.mp4" - see
+    # render_compilation - so the compilation's name doubles as the on-disk
+    # filename stem, no lookup through compilations.json needed.
+    ws = get_workspace(slug)
+    filename = "{0}.mp4".format(name)
+    path = _safe_media_path(ws.compilations_dir, name, filename=filename, kind="compilation")
+    return serve_file(
+        path, request.headers.get("range", ""), download_name=filename if download else ""
     )
 
 

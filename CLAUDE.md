@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-08-06.
+> 2026-08-20.
 
 ## What this actually is, right now
 
@@ -22,8 +22,10 @@ after the rest of the system was built. The real state:
 
 - All 6 pipeline stages (download, audio, transcribe, analyze, cut, cleanup)
   are fully implemented, plus a chat-harvest stage (1b), an opt-in speaker
-  diarization stage (2b), a Hinglish-caption transliteration stage (3c), and
-  a reel-render stage (5b) the README's table doesn't even list.
+  diarization stage (2b), a Hinglish-caption transliteration stage (3c), a
+  reel-render stage (5b), and a compile stage (5c) — assembling a named list
+  of non-contiguous VOD ranges into one landscape supercut — none of which
+  the README's table even lists.
 - There is a full local web dashboard/editor (`clipbot/server/`, FastAPI) —
   not just a CLI. It's the primary way clips actually get reviewed, cropped,
   effect-decorated, and re-rendered as 9:16 reels.
@@ -82,7 +84,7 @@ clipbot/
   cli.py            argparse CLI — every subcommand, the single source of truth
                      for what commands exist (run, download, chat, chat-sync,
                      audio, transcribe, analyze, transliterate, cut, reel,
-                     manifest, cleanup, info, list,
+                     compile, manifest, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path})
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
@@ -95,6 +97,10 @@ clipbot/
   manifest.py        write_manifest() -> manifest.json + manifest.csv (utf-8-sig)
   review.py          clips.json state machine: reconcile(), update_clip(),
                      add_manual_clip(), clips_for_cutting(), counts()
+  compilations.py    compilations.json sidecar for named multi-range
+                     supercuts: load()/save()/upsert()/set_output()/
+                     add_segment()/delete() - kept separate from review.py
+                     on purpose (see stages/compile.py)
   reelspec.py        vertical-reel geometry: normalize()/resolve()/build_filter()/
                      build_argv() — pure math, no IO
   fxspec.py          per-clip effects schema + ffmpeg filter builders — pure
@@ -107,12 +113,18 @@ clipbot/
   speakerfx.py       speaker avatar/ring overlay: resolve_speakers() + the
                      filter-chain builder - NOT pure like reelspec/fxspec,
                      since it synthesizes circle-cropped avatar and ring PNGs
-                     via Pillow (cached in _cache/avatars/)
+                     via Pillow (cached in _cache/avatars/). Its
+                     resolve_speaker_slots() is the one exception - the pure,
+                     no-IO geometry prefix of resolve_speakers(), split out
+                     so api_reel_plan can call it for the dashboard's canvas
+                     preview without paying for image generation
   chatrender.py      chat messages -> PNG overlay frames (Pillow, not libass)
   captionrender.py   Hinglish caption segments -> PNG overlay frames (Pillow;
                      smaller mirror of chatrender.py, no emote/badge images)
   chatsync.py        estimate_offset() — correlate chat rate against audio
                      energy to find chat_offset_seconds
+  highlights.py      notable_moments() — energy/chat-activity spike detection
+                     analyze.py annotates onto the transcript it sends Claude
   ffrun.py           shared ffmpeg subprocess runner with progress + cancellation
   preview.py         PreviewRunner — the dashboard's live "Effects" proxy preview
   progress.py        Progress / NULL_PROGRESS — CLI-safe, dashboard-aware progress
@@ -122,18 +134,21 @@ clipbot/
     chat.py            stage 1b (Kick chat REST API harvest)
     audio.py          stage 2  (ffmpeg -vn to 16kHz mono PCM)
     diarize.py         stage 2b (opt-in: pyannote speaker diarization)
-    transcribe.py      stage 3  (faster-whisper, confidence flagging)
+    transcribe.py      stage 3  (dispatcher: local faster-whisper or OpenAI API)
+    transcribe_openai.py  stage 3 alt backend (OpenAI whisper-1, default; chunked+parallel)
     transliterate.py   stage 3c (Claude API, Devanagari -> Hinglish captions)
     analyze.py         stage 4  (Claude API, prompt caching, JSON extraction)
     cut.py             stage 5  (ffmpeg cut, copy or re-encode)
     reel.py            stage 5b (vertical 9:16 re-encode through fx filter graph)
+    compile.py         stage 5c (landscape supercut: cut + concat named ranges)
   server/
     app.py            FastAPI app, all HTTP routes, security guard()
     jobs.py           JobRunner (2 worker lanes) + EventBus (SSE)
     media.py          hand-rolled HTTP Range file serving
     __main__.py       `python -m clipbot.server` entry point (uvicorn)
-    templates/        Jinja2: base.html, library.html, workspace.html, review.html
-    static/           vanilla JS/CSS: app.js, fx.js, reel.js, review.js, *.css
+    templates/        Jinja2: base.html, library.html, workspace.html, review.html,
+                       compile.html
+    static/           vanilla JS/CSS: app.js, fx.js, reel.js, review.js, compile.js, *.css
                        (ignore the *.bak files sitting alongside — stale, unused)
 
 config/
@@ -151,6 +166,10 @@ tests/
   test_speakers.py             speaker merge/assignment logic, speakers spec
                                 validation + slot layout, and the same
                                 legacy-path-unaffected invariant for speakers
+  test_compile.py               compilations.json CRUD, segment/compilation
+                                fingerprinting, ffconcat list shape, and
+                                skip-unchanged/force behavior (ffmpeg calls
+                                stubbed - see the stage-by-stage section)
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
@@ -180,21 +199,90 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 | 1b | chat | `stages/chat.py` | `chat.json` | Kick REST API, cursor pagination; best-effort, never blocks the rest of `run` |
 | 2 | audio | `stages/audio.py` | `audio.wav` | ffmpeg `-vn`, 16kHz mono PCM |
 | 2b | diarize | `stages/diarize.py` | `diarization.json` | pyannote, CPU-only here; opt-in, needs `requirements-diarize.txt` + an HF token, never part of `run` |
-| 3 | transcribe | `stages/transcribe.py` | `transcript.json` | faster-whisper `large-v3`; flags but never drops low-confidence segments |
+| 3 | transcribe | `stages/transcribe.py` (dispatcher) → `stages/transcribe_openai.py` (default) or local faster-whisper | `transcript.json` | `transcribe.backend` picks OpenAI whisper-1 (default, chunked+parallel, ~$0.36/hour) or local faster-whisper `large-v3`; flags but never drops low-confidence segments either way |
 | 3c | transliterate | `stages/transliterate.py` | `captions.json` | Claude API, batched; Devanagari transcript -> Hinglish (Latin script) for caption overlays; opt-in, never part of `run` |
 | 4 | analyze | `stages/analyze.py` | `candidates.json` | Claude API against the rubric; structural validation only |
 | 5 | cut | `stages/cut.py` | `clips/*.mp4` | ffmpeg copy (default) or re-encode; writes into `clips.json[*].output` |
 | 5b | reel | `stages/reel.py` | `clips/reels/*.mp4` | vertical 9:16 re-encode through the fx/chat/captions/speakers filter graph |
-| 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel isn't rendered yet, unless `--force` |
+| 5c | compile | `stages/compile.py` | `clips/compilations/<name>.mp4` | cuts + concatenates a named list of non-contiguous VOD ranges into one landscape supercut; opt-in, never part of `run` |
+| 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel/compilation isn't rendered yet, unless `--force` |
 
 ### download.py
 
-- `download_vod(url, ws, settings, force=False) -> Path`. Skips if
-  `ws.video_path()` already resolves to a file.
+- `download_vod(url, ws, settings, force=False, quality=None,
+  progress=NULL_PROGRESS) -> Path`. Skips if `ws.video_path()` already
+  resolves to a file.
 - yt-dlp invocation: `--no-playlist --newline --write-info-json -f
-  <download.format> -o <root>/video.%(ext)s --impersonate chrome <url>`, run
-  via `run_command(..., capture=True, tee=True)` (streams to console **and**
-  captures for error messages).
+  <resolved format> --progress-template <template> [--http-chunk-size
+  <size>] -o <root>/video.%(ext)s --impersonate chrome <url>`, run via
+  `_run_yt_dlp` — a `Popen`-based runner mirroring `ffrun.run_ffmpeg`'s
+  shape (not `run_command`, which has neither progress nor cancellation).
+- **Real progress + cancellation**, previously missing entirely for this
+  stage (every other stage already had it). `_run_yt_dlp` drives yt-dlp with
+  `--progress-template "download:CLIPBOT_PROGRESS
+  %(progress.downloaded_bytes)s|%(progress.total_bytes)s|
+  %(progress.total_bytes_estimate)s|%(progress.speed)s"` — a private marker
+  prefix so `_parse_progress_line` can pick out machine-readable lines by a
+  plain `startswith` check rather than regexing yt-dlp's human-readable bar
+  (same reasoning `ffrun.py` gives for keying off ffmpeg's `-progress
+  pipe:1` output instead of its normal log). Each parsed line calls
+  `progress.update(downloaded, total=total_or_estimate, rate=speed)` —
+  `Progress.update()`'s `rate` kwarg (added for this) rides along in the
+  emitted payload, unlike `eta_seconds`, which `Progress` still derives
+  itself from elapsed time. `-f bv*+ba/b/best`-style formats download video
+  then audio as two separate files; yt-dlp's own `downloaded_bytes` resets
+  when the second one starts, detected by `downloaded_bytes` dropping below
+  the previous reading and triggering a fresh `progress.phase("download",
+  unit="bytes")` — mirrors yt-dlp's own two-pass terminal output (video bar,
+  then audio bar), not a bug. Checks `progress.cancelled` per line and
+  `terminate()`/`wait(timeout=3)`/`kill()`s the subprocess on cancel, same
+  pattern `run_ffmpeg` uses — a running download job's dashboard Cancel
+  button previously did nothing. Every raw line is also `log.debug`-logged
+  (visible under `-v`, quiet by default) — matches every other long stage in
+  this codebase (transcribe/analyze/reel/compile all stay console-quiet
+  during the work itself and rely on a summary log line at the end), and
+  reproduces what `run_command(tee=True)`'s per-line debug logging did
+  before this. Non-progress-template lines are kept as a tail (last 80),
+  written to `logs/download.log` and included in the `StageError` on
+  failure — same failure-reporting contract `run_command`/`run_ffmpeg`
+  already provide, so the kick-dl-fallback/404-hint logic below is
+  unaffected.
+- **`download.http_chunk_size`** (default `"10M"`, e.g. `--http-chunk-size
+  10M`; `null` omits the flag): yt-dlp's own documented flag for "bypassing
+  bandwidth throttling imposed by a webserver". Added after measuring a real
+  download capped at ~100Mbps over a 300Mbps line despite ~8ms latency to
+  Kick's Cloudflare edge (ruling out a TCP-window/BDP explanation) —
+  pointing at a per-connection throttle. **Sequential chunking only** in the
+  installed yt-dlp version (checked `yt_dlp/downloader/http.py` directly —
+  no threading, and `-N`/`--concurrent-fragments` is never read by the
+  progressive-HTTP downloader at all, only DASH/HLS fragments), so this is a
+  free, zero-dependency thing to try, not a guaranteed fix. Genuine parallel
+  connections would need yt-dlp's `aria2c` external-downloader integration —
+  deliberately not set up (not installed on the reference machine); a
+  documented future follow-up, not built.
+- **Selectable quality, threaded through every download pathway.**
+  `resolve_format(settings, quality=None) -> str` turns a `quality` key
+  (`"best"/"1080"/"720"/"480"/"360"`, `QUALITY_CHOICES`) into a yt-dlp `-f`
+  selector via `QUALITY_PRESETS` — same `bv*[height<=H]+ba/b[height<=H]/best`
+  shape as the hand-authored `download.format` default (that combo, not the
+  height cap itself, is what fixed the run that silently landed on 160p);
+  `"best"` means no height cap, not yt-dlp's bare `best`. `quality=None`
+  (the default everywhere it isn't explicitly threaded) falls back to
+  `download.format` unchanged. Only the yt-dlp path honors it — `kick-dl`'s
+  fallback has no scriptable quality flag. Reachable from: `clipbot
+  download --quality`/`clipbot run --quality` (CLI); the dashboard's
+  per-workspace download-stage quality `<select>`
+  (`server/templates/workspace.html`, id `download-quality`, also read by
+  the "Run all remaining" pipeline button and forced to `"720"` by the
+  low-res banner's "Re-download at 720p" action) and the library page's
+  quality picker (`server/templates/library.html`, shared by the "paste a
+  URL" form and every channel-browser "Download" button) — both pickers are
+  rendered by the one shared `qualityPickerHtml()` helper in
+  `server/static/app.js`, whose option list is hand-mirrored from
+  `QUALITY_CHOICES` (no route exposes that list). Dashboard job options key
+  is `quality`, read by `_h_download`/`_h_pipeline` and by
+  `api_create_workspace` (which forwards `payload.get("quality")` into the
+  `pipeline` job it submits).
 - **`--impersonate chrome` is mandatory, not cosmetic**: Kick sits behind
   Cloudflare and 403s yt-dlp's default HTTP client without it.
 - The kick-dl fallback (`_download_with_kick_dl`) is real code but is
@@ -212,10 +300,16 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   (recorded because the format selector is unreliable — one run silently
   returned 160p).
 - Warns if `video_height < download.min_height_warn` (480).
-- `list_channel_vods(channel, limit=5)` hits
-  `kick.com/api/v2/channels/{channel}/videos` to turn a 404 into a helpful
-  list of real VOD UUIDs — Kick's live-stream session UUIDs look identical to
-  VOD UUIDs but 404 if copied mid-stream.
+- `list_channel_vods(channel, limit=20)` hits
+  `kick.com/api/v2/channels/{channel}/videos` and returns full metadata dicts
+  (`uuid`, `title`, `url`, `created_at`, `duration_seconds`, `thumbnail`,
+  `is_live`, `viewer_count`) — note the API's own `duration` field is
+  **milliseconds**, converted here. Two callers: `_explain_404` (turns a 404
+  into a helpful list of real VODs — Kick's live-stream session UUIDs look
+  identical to VOD UUIDs but 404 if copied mid-stream — called with
+  `limit=5`) and the dashboard's `GET /api/kick/{channel}/vods` (the
+  "browse channel" VOD picker on the library page, so a stream can be
+  downloaded by clicking instead of pasting its URL).
 
 ### chat.py (stage 1b)
 
@@ -297,6 +391,23 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
     the missing model nor what to do about it. `HF_TOKEN_HINT` lists both
     gated models' URLs up front so a new setup hits this zero times, not
     once.
+  - **A third gotcha, one layer deeper still: PyTorch 2.6 changed
+    `torch.load`'s default to `weights_only=True`, and pyannote's own
+    checkpoints fail under it.** Measured: they store plain Python objects
+    alongside tensors (`torch.torch_version.TorchVersion`, recording which
+    torch version wrote the file), which the safe-unpickler used by
+    `weights_only=True` doesn't recognize, so loading raises
+    `UnpicklingError`. `_trust_pyannote_checkpoints()` is a context manager
+    that wraps `torch.load` to force `weights_only=False` regardless of
+    what the caller passes - a `functools.partial` preset default alone
+    doesn't work here, because pyannote's own `pl_load` helper always
+    explicitly re-passes `weights_only=weights_only` (defaulting to `None`
+    at its call site), which would just override a partial's preset value
+    right back. Scoped tightly around the `Pipeline.from_pretrained` call
+    only, not a global setting - this is torch's own documented option (1)
+    for a trusted source, and the only checkpoints loaded here are the
+    official ones this stage just downloaded from Hugging Face's pyannote
+    org.
 - **A single blocking call** (`pipeline(audio_path, **kwargs)`), unlike
   `transcribe.py`'s lazy generator - pyannote exposes no per-segment yield
   point, so there's no mid-run progress or cancellation, only a
@@ -313,7 +424,15 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 ### transcribe.py
 
 - `transcribe_audio(ws, settings, force=False, audio_path=None,
-  out_path=None, mark_stage=True, progress=NULL_PROGRESS) -> Path`.
+  out_path=None, mark_stage=True, progress=NULL_PROGRESS, backend=None)
+  -> Path`. **Now a dispatcher first**: `backend` (per-call override) or
+  `transcribe.backend` (setting, default **`"openai"`**) picks between this
+  module's local faster-whisper path (below) and
+  `stages/transcribe_openai.py`'s hosted-API path — same
+  override-vs-settings-default relationship `force` already has relative to
+  a caller's own default. `cli.py` never passes `backend`, so the CLI
+  always follows the setting; the dashboard's transcribe stage button does
+  (see the server section's job-handler note).
 - Device: `auto` → `cuda` iff `ctranslate2.get_cuda_device_count() > 0`,
   else `cpu` (**no ROCm/AMD backend exists**, so a Radeon GPU always falls
   through to CPU). Compute type `default` → `float16` on cuda, `int8` on cpu.
@@ -343,21 +462,118 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   avg_logprob, no_speech_prob, compression_ratio, low_confidence, flags}]}`.
 - Docstring explicitly frames this as the module most likely to be swapped
   (whisper.cpp/Vulkan for the idle Radeon, a hosted API) — the contract that
-  matters is the `transcript.json` shape, nothing else.
+  matters is the `transcript.json` shape, nothing else. `transcribe_openai.py`
+  (below) is that swap, now the default.
+
+### transcribe_openai.py (stage 3, alternate backend, now the default)
+
+- `transcribe_audio_openai(ws, settings, force=False, audio_path=None,
+  out_path=None, mark_stage=True, progress=NULL_PROGRESS) -> Path` — called
+  by `transcribe.transcribe_audio`'s dispatcher, never directly.
+- **Deliberately `whisper-1`, not `gpt-4o-transcribe`/`gpt-4o-mini-transcribe`**:
+  only `whisper-1`'s `verbose_json` response carries per-segment
+  `avg_logprob`/`no_speech_prob`/`compression_ratio` — the exact fields
+  `transcribe.py`'s low-confidence flagging already depends on. The newer
+  models only support `response_format=json` with per-token logprobs, a
+  different shape the existing thresholds can't be applied to. $0.006/min
+  — roughly $0.36/hour of audio, ~$1.66 for a 4.6h VOD (measured against
+  OpenAI's published pricing, August 2026).
+- **Chunking, not a single upload**: the API caps uploads at 25MB and a
+  multi-hour 16kHz mono PCM `audio.wav` is hundreds of MB. `_chunk_audio`
+  transcodes to 64kbps mono mp3 and splits with ffmpeg's `-f segment
+  -segment_time <transcribe.openai.chunk_seconds, default 1200s/20min>`
+  into `<workspace>/_transcribe_openai/` (underscore-prefixed scratch dir,
+  deleted on success, kept on failure for debugging) — a 20-minute chunk at
+  64kbps is ~9.6MB, comfortable margin under the cap. **Known limitation,
+  accepted on purpose**: chunk boundaries are fixed-time cuts, not
+  silence-aware, so a word can occasionally split across a chunk edge — not
+  engineered around, because the existing low-confidence flagging already
+  exists to catch exactly this kind of artifact (a boundary-mangled segment
+  scores a low `avg_logprob` and gets flagged, never silently trusted).
+- **Chunks upload with bounded thread-pool parallelism**
+  (`transcribe.openai.concurrency`, default 4) — this, not any per-request
+  speed difference, is the actual "faster wall-clock" mechanism versus local
+  mode's single-threaded ~0.8x realtime. Same "network I/O, not
+  CPU-bound" justification `server/jobs.py` already gives for using threads
+  over processes.
+- **Per-chunk retry** (`transcribe.openai.max_retries`, default 3, with
+  backoff); a chunk that still fails after retries gets one synthetic
+  segment spanning its time range (`text=""`, `low_confidence=true`,
+  `flags=["openai_chunk_failed"]`) rather than aborting the whole run — same
+  count-failures-don't-abort precedent `transliterate.py`'s
+  `failed_batches` already sets. Tracked as `failed_chunks` in the output.
+- Segment `start`/`end` are offset by `chunk_index * chunk_seconds` and
+  renumbered sequentially across the whole file, reusing
+  `transcribe.py`'s existing `low_confidence_threshold`/
+  `max_segment_seconds` thresholds against the returned per-segment stats
+  — same flagging logic, same schema, different segment source.
+- `transcript.json`: same shape `transcribe.py` documents, plus
+  `"backend": "openai"` and `"failed_chunks": <int>`. `device`/
+  `compute_type` are harmless placeholders (`"openai-api"`/`"n/a"`) since
+  nothing downstream branches on them.
+- Logs an estimated cost (duration from `state.duration`, never
+  `kick_duration` — the usual invariant — × `$0.006/min`) before spending
+  any money, in both CLI and dashboard log streams.
+- Needs `pip install -U openai` (in `requirements.txt` directly — small
+  pure-Python SDK, unlike `requirements-diarize.txt`'s multi-GB PyTorch) and
+  `OPENAI_API_KEY` in the environment (`transcribe.openai.api_key_env`
+  names the var, default `OPENAI_API_KEY`) — checked unconditionally by the
+  dashboard's `/api/doctor`, same treatment `ANTHROPIC_API_KEY` gets, since
+  this is now the default transcribe path, not a conditional opt-in.
 
 ### analyze.py
 
 - `analyze_transcript(ws, settings, force=False, progress=NULL_PROGRESS) -> Path`.
-- `build_prompt()`: loads `analyze.rubric_file` (`config/rubric.md`) and
+- **Long transcripts are analyzed in overlapping windows, not one call.**
+  Measured on a real 5.1h/4148-segment stream: a single call found clips
+  densely for the first ~3 hours, then went **83 minutes without picking
+  anything**, despite stopping voluntarily (`stop_reason="end_turn"`, under
+  6% of its 32000-token output budget used) — a long-context "lost in the
+  middle" recall problem, not a token-limit problem. `analyze_transcript`
+  builds windows via `_build_windows(duration, chunk_minutes,
+  overlap_minutes)` only when `duration > analyze.chunk_threshold_minutes *
+  60` (default 90 min) — shorter streams take the exact same single-call
+  path as before, byte-identical prompt (see `build_prompt`'s trailing
+  per-line `.rstrip()`, added specifically so a blank `{{WINDOW_NOTE}}`
+  doesn't perturb the cached prompt on the common, non-chunked path).
+  Each window covers a "core" range (`analyze.chunk_minutes`, default 60)
+  plus `analyze.chunk_overlap_minutes` (default 8) of **context-only**
+  padding on each side; `_window_note()` builds the `{{WINDOW_NOTE}}` text
+  that instructs the model to only propose clips whose `start_time` falls
+  inside its own core range — this headers off most cross-window duplicates
+  *before* they're generated, rather than relying only on `validate_clips`'s
+  post-hoc overlap trimming. Windows run through `_call_model` (the shared
+  single-call implementation, used by both the chunked and non-chunked
+  paths) via a `ThreadPoolExecutor(max_workers=analyze.concurrency)`
+  (default 2) — same network-I/O-in-threads reasoning `server/jobs.py`
+  already documents for the dashboard's job lanes. A window that errors
+  doesn't abort the run (same count-failures-don't-abort precedent as
+  `transliterate.py`'s `failed_batches`); `usage` in the output is summed
+  across every chunk call, `stop_reason` is `"max_tokens"` if any chunk hit
+  it else `"end_turn"`.
+- **Notable-moment signals** (`clipbot/highlights.py`, below) annotate
+  transcript lines with `(energy spike)` / `(chat spike, Nx)` tags derived
+  from audio loudness and chat message rate, independent of the transcribed
+  words — applies on every run, chunked or not, gated by
+  `analyze.signals.enabled`.
+- `build_prompt(transcript, settings, state, segments=None, window_note="",
+  signals=None)`: loads `analyze.rubric_file` (`config/rubric.md`) and
   `analyze.prompt_template` (`config/analysis_prompt.md`), strips `<!-- -->`
-  comments from both, substitutes `{{TRANSCRIPT}}` / `{{RUBRIC}}` /
-  `{{DURATION}}` / `{{STREAM_TITLE}}`.
+  comments from both, substitutes `{{TRANSCRIPT}}` (via `format_transcript`,
+  which now also takes `signals` for the spike annotations) / `{{RUBRIC}}` /
+  `{{DURATION}}` (always the *full* stream length, even inside a window -
+  the window's own range is conveyed by `{{WINDOW_NOTE}}` instead) /
+  `{{STREAM_TITLE}}` / `{{WINDOW_NOTE}}`. `segments` overrides
+  `transcript["segments"]` for a chunked window's padded slice.
 - **Prompt caching**: splits the template on the literal marker
   `{{CACHE_BREAKPOINT}}` — everything above (the transcript) is sent with
   `cache_control: {"type": "ephemeral"}`; everything below (the rubric +
   task instructions) is not. This ordering is deliberate: editing only the
   rubric and re-running rebills roughly 10% of input cost within the cache
-  TTL. **If you reorder `analysis_prompt.md`, you lose this savings.**
+  TTL. **If you reorder `analysis_prompt.md`, you lose this savings.** On
+  the chunked path each window is its own cacheable block, so a rubric-only
+  re-run still gets cheap reads per window; the ~8min overlap between
+  adjacent windows is sent (and cached) twice, a modest, expected overhead.
 - Calls `anthropic.Anthropic()` — requires `ANTHROPIC_API_KEY` in the
   environment. Model default `claude-sonnet-4-6` (settings.json), `max_tokens`
   32000.
@@ -384,10 +600,13 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
     that leaves it under 1.0s) — this is what guarantees the cut stage never
     produces duplicate footage.
 - `candidates.json`: `{model, rubric_file, rubric_sha1, transcript_segments,
-  stop_reason, usage: {input_tokens, output_tokens,
-  cache_creation_input_tokens, cache_read_input_tokens}, clips:
-  [{start_time, end_time, description, why}]}`. `rubric_sha1` is what lets
-  you tell which version of your criteria produced a given set of picks.
+  chunked, chunk_count, signal_count, stop_reason, usage: {input_tokens,
+  output_tokens, cache_creation_input_tokens, cache_read_input_tokens},
+  clips: [{start_time, end_time, description, why}]}`. `rubric_sha1` is what
+  lets you tell which version of your criteria produced a given set of
+  picks; `chunked`/`chunk_count` record whether this run went through the
+  windowed path; `signal_count` is how many energy/chat-spike spans
+  `highlights.notable_moments` found for this run.
 - **`claude-sonnet-4-6` does not support schema-enforced structured
   outputs** (needs Sonnet 5 / Opus 4.8+) — that's the whole reason
   `extract_json` has to be defensive. Switching `analyze.model` to
@@ -429,6 +648,40 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   rather than a mutation of it — `transcribe.py` stays the sole writer of
   `transcript.json`, same single-writer-per-file discipline as
   `candidates.json`/`clips.json`.
+
+### highlights.py
+
+- Not a pipeline stage — a helper `analyze.py` calls, added specifically
+  because the transcript it sends Claude is 100% text, so a moment that's
+  pure laughter or a loud reaction with no distinctive words is invisible
+  to the model no matter how the rubric is worded.
+- `compute_energy_spikes(audio_path, bin_seconds=5.0, z_threshold=2.0) ->
+  [{start, end, z_score}]` — reuses `chatsync.audio_energy_envelope`
+  (already streams `audio.wav` in O(1) memory, no new way of reading audio)
+  and z-scores each bin against the whole-VOD mean/std, merging adjacent
+  outlier bins into spans.
+- `compute_chat_spikes(chat_doc, offset_seconds, duration, bin_seconds=15.0,
+  z_threshold=2.0) -> [{start, end, z_score, message_rate_multiplier}]` —
+  reuses `stages.chat.messages_between` (the existing shared query
+  function, already handling the chat-clock-vs-VOD-clock offset
+  correction) to bin message counts, same z-score/merge logic.
+- Both are z-score outlier detection against that signal's own whole-VOD
+  mean/std, not a fixed threshold — a stream's own baseline loudness/chat
+  activity varies too much (quiet talking vs. an intense game moment) for
+  one absolute cutoff to mean the same thing throughout.
+- `notable_moments(ws, settings) -> [{start, end, label}]` is the entry
+  point `analyze.py` calls — merges both signals, sorted by start.
+  Degrades gracefully by design: skips (logs, doesn't raise) the energy
+  signal if `audio.wav` is missing, skips the chat signal if `chat.json` is
+  missing or its `status` isn't `"ok"`, and returns `[]` outright if
+  `analyze.signals.enabled` is `false`. A notable-moments list is a hint,
+  not a hard dependency — a broken signal must never sink the analyze
+  stage.
+- `analyze.format_transcript`'s `signals` argument annotates any transcript
+  line whose time range overlaps a moment span with its `label` (e.g.
+  `(energy spike)`, `(chat spike, 3.1x)`), appended the same way
+  `(low-confidence)` already is. Applies on every analyze run regardless of
+  whether the chunked windowing path is engaged.
 
 ### cut.py
 
@@ -532,21 +785,146 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   what backs the dashboard's live "Effects" preview.
   **Known loose end**: it never passes `chat_list`/`caption_list`/
   `speaker_plan` — chat, captions and speaker avatars are geometry-only in
-  `/reel/plan` and don't actually render in the `/reel/preview` proxy
-  despite `reel.preview.include_chat` existing in `settings.json`; that
-  setting is unused, same unregistered-feature shape as the `waveform` job
-  kind below. The dashboard's live canvas (`reel.js`'s `drawReelPreview`)
-  compensates by drawing chat/captions as a labelled reserved-space
-  rectangle instead of a facsimile of the real content — **speakers gets no
-  such treatment at all**: unlike chat/captions, a speaker slot's position
-  depends on which speakers actually talk in a given clip
-  (`speaking_spans()`, workspace IO), which `/reel/plan`'s pure-math
-  `reelspec.resolve()` has no way to compute, so `plan["speakers"]` on that
-  route is just the validated spec block, not resolved slot rects. The
-  canvas preview currently shows nothing for the speakers layer at all.
+  `/reel/plan` and don't actually render in the `/reel/preview` proxy. (An
+  unused `reel.preview.include_chat` setting used to imply otherwise; it's
+  been removed rather than left as dead config, same call made on the
+  `benchmark` job kind below.) The dashboard's live canvas (`reel.js`'s
+  `drawReelPreview`) compensates by drawing chat/captions/speakers as a
+  labelled reserved-space rectangle instead of a facsimile of the real
+  content. Speakers needed one more piece to get this treatment at all:
+  unlike chat/captions, a speaker slot's position depends on which speakers
+  actually talk in a given clip (`speaking_spans()`, workspace IO), which
+  `reelspec.resolve()`'s pure math alone has no way to compute. Resolved by
+  splitting `speakerfx.resolve_speakers()`'s render-plan pipeline: the pure
+  "rebase spans onto this clip, find who's active, lay out slots" prefix is
+  now its own function, `speakerfx.resolve_speaker_slots()` — no avatar/ring
+  image generation, so it's safe for `api_reel_plan` to call on every
+  debounced spec edit, unlike the full `resolve_speakers()` the real render
+  uses. `api_reel_plan` calls it and attaches the result as
+  `plan["speaker_slots"]` (each slot's rect plus the speaker's name/color,
+  looked up from `library.list_speakers`), which `drawReelPreview` now draws
+  the same reserved-rectangle way as chat/captions.
 - `unrendered_reels(ws)` mirrors `uncut_approved` — blocks VOD deletion
   while reel-configured clips lack a rendered file (reels re-encode from
-  source, so losing the VOD strands them).
+  source, so losing the VOD strands them). `stages/compile.py`'s
+  `unrendered_compilations(ws)` is the third sibling in this family, checked
+  by both the CLI's `cmd_cleanup` and the dashboard's `_h_cleanup` alongside
+  `uncut_approved`/`unrendered_reels` — previously only the dashboard
+  checked all three; the CLI checked none but `uncut_approved`.
+
+### compile.py (stage 5c)
+
+- A third sibling of cut/reel, for the same "different output, different
+  idempotence key" reason reel is separate from cut: cut produces N
+  archival per-clip files, reel produces one vertical re-encode per clip,
+  compile produces **one landscape video assembled from several
+  non-contiguous source ranges** — a supercut, e.g. a curated YouTube
+  highlights reel. `clip["output"]`/`clip["reel_output"]` live on
+  `clips.json`; a compilation's state lives entirely in its own sidecar,
+  `compilations.json` (owned by `clipbot/compilations.py`), **not**
+  `clips.json` — a compilation's segments must never be picked up by a
+  normal `clipbot cut` run as individual clip outputs, so they're kept out
+  of the approve/reject/cut review queue entirely rather than added via
+  `review.add_manual_clip`.
+- `render_compilation(ws, settings, name, force=False, progress=NULL_PROGRESS)
+  -> Path`. Looks up the named compilation's `segments` (`{start, end,
+  label, slug}`) from `compilations.json`.
+- **Cross-stream**: each segment carries a `slug` naming which workspace its
+  footage comes from — defaults to the home workspace (`ws`, the one this
+  compilation's `compilations.json`/scratch dir/output live in) when
+  omitted, so an all-local compilation is unaffected. `_resolve_source`
+  opens (and caches per render) whichever workspace a segment names — always
+  `ws` itself for the home slug, never re-derived from `settings.work_root`,
+  since the CLI's `--workspace` accepts an arbitrary path, not just a slug
+  under `work_root`. A segment naming a workspace with no video (wrong slug,
+  or deleted by cleanup) raises a `StageError` naming the segment index and
+  slug. Padding (`cut_stage._padded_range`) clamps against *that source's
+  own* `state.duration`, not the home workspace's. `_segment_fingerprint`/
+  `_compilation_fingerprint` both hash the resolved `slug` alongside the
+  numeric range, so two segments from different sources with a coincidentally
+  identical range can't collide in the scratch cache.
+- **Ordering/overlap is source-aware** (`compilations._normalize_segments`):
+  when every segment in a compilation shares one `slug`, segments are sorted
+  by `start` and checked for overlap across the whole list, exactly as
+  before `slug` existed. Once a compilation spans multiple sources, the
+  *given* order is kept as the play order instead — one source's timestamp
+  has no relationship to another's, so "chronological" would be meaningless;
+  a montage spanning streams is editorially sequenced, not time-sorted — and
+  overlap is only checked *within* each source's own segments. `compile.js`'s
+  client-side segment list applies the identical branch (`isSingleSource()`)
+  before its own local re-sort, so adding a same-stream segment to an
+  already-mixed compilation via the page's timeline editor doesn't scramble
+  the cross-stream ordering back into raw numeric order.
+- Padding reuses `cut_stage._padded_range` as-is — same `cut.pad_start`/
+  `cut.pad_end` settings reel.py already reuses rather than inventing its
+  own padding knob.
+- **Every segment is always re-encoded, never stream-copied** (`compile.encoder`/
+  `compile.preset`/`compile.crf`, deliberately not inheriting `cut.encoder`/
+  `cut.preset`/`cut.crf`, same "doesn't inherit" precedent as
+  `reel.preset_x264` not inheriting `cut.preset`): the final join uses the
+  concat demuxer's `-c copy` mode, which requires every input to share
+  identical codec parameters, and a stream-copy cut snaps to the nearest
+  keyframe (fine for an archival clip, not for a boundary that has to land
+  exactly where a highlight was picked).
+- Each re-encoded segment is cached in a per-compilation scratch directory
+  (`ws.compile_scratch_dir(name)` = `root/_compile/<name>/`, filename keyed
+  by a hash of its resolved range + encode settings) and **not** deleted
+  after a successful render — a re-render skips any segment whose resolved
+  range and settings are unchanged, the same skip-if-unchanged discipline
+  cut.py applies per clip.
+- The join step writes an ffconcat list of bare segment filenames (all in
+  the same scratch directory, so no path-escaping is needed) and runs
+  `ffmpeg -f concat -safe 0 -i list.ffconcat -c copy -movflags +faststart`
+  — a fast, lossless join of the already-uniformly-encoded segments.
+- Whole-compilation idempotence key is a hash of the compilation name +
+  every resolved segment range + the encode/padding settings
+  (`_compilation_fingerprint`) — self-maintaining the same way reel.py's
+  argv hash is, rather than a hand-listed field tuple like cut.py's.
+- Output recorded via `compilations.set_output`: `{file, bytes, duration
+  (sum of padded segment spans — exact, since the join is a lossless
+  stream copy), rendered_at, fingerprint}`, at
+  `clips/compilations/<name>.mp4` (a subdirectory of `clips_dir`, same
+  treatment `reels_dir` gets, so compilations don't inflate the flat
+  per-clip listing).
+- `unrendered_compilations(ws)` mirrors `cut.uncut_approved`/
+  `reel.unrendered_reels` — blocks VOD deletion while a compilation *homed
+  in `ws`* has segments but no rendered file (every segment re-encodes from
+  the source video, so losing it strands them the same way an un-rendered
+  reel does). `unrendered_compilations_elsewhere(ws, settings)` is the
+  cross-stream counterpart: since a compilation homed in a *different*
+  workspace can still have a segment sourced from `ws`, it scans every other
+  workspace under `settings.work_root` (same "iterate work_root's dirs"
+  pattern `server/app.py`'s `api_workspaces()` uses) for an unrendered
+  compilation with a segment whose `slug` resolves to `ws`, returning
+  `{"workspace", "compilation"}` pairs naming where the dependency lives.
+  Both checks are run by both the CLI's `cmd_cleanup` and the dashboard's
+  `_h_cleanup`.
+- CLI: `clipbot compile --workspace <slug> --name <name> --range
+  [slug:]start,end[,label] [--range ...] [--force]`. `--range` upserts
+  (replaces, not merges) the named compilation's segment list before
+  rendering; omitting it entirely just re-renders the existing definition.
+  An optional `slug:` prefix on a `--range` (detected via
+  `RANGE_SLUG_RE` — unambiguous since a range's `start` is always numeric
+  and a slug never is) sources that one segment from a different workspace
+  than `--workspace`, for a compilation spanning multiple streams. This is
+  the mechanism a Claude Code session drives directly (after reading
+  `candidates.json`/`transcript.json` across workspaces and talking through
+  which moments to use with the user) rather than any new Claude-API-driven
+  picker stage — cross-stream compilation authorship is deliberately a
+  conversation-plus-CLI workflow, not automated.
+- Also reachable from the dashboard — `/w/{slug}/compile`
+  (`templates/compile.html` + `static/compile.js`), see the dashboard
+  section below. The CLI and the dashboard write the exact same
+  `compilations.json` sidecar, so a compilation created by one is fully
+  visible and editable in the other (verified: `clipbot compile` output
+  shows up in the dashboard's list with its rendered file playable, and
+  `external_activity()` surfaces a CLI-driven compile run as busy instead
+  of idle). The dashboard's role for a cross-stream compilation is
+  **review and render only, not authoring**: the page's timeline/transcript
+  editor is bound to one workspace's own video, so a segment whose `slug`
+  differs from the page's own gets a "from `<slug>`" badge in the segment
+  list and its ✎ edit button disabled (tooltip points at the CLI) — ✕
+  remove, Save, and Render all still work on the full mixed list.
 
 ## Spec modules (pure math, no IO)
 
@@ -805,11 +1183,31 @@ error message instead of a silent no-op or a 500.
   rejects slugs starting with `_` (reserved for `_cache`/`_library`), and
   confirms the resolved path doesn't escape `work_root` (path traversal guard).
 - Route groups (see `app.py` for the full list): pages (`/`, `/w/{slug}`,
-  `/w/{slug}/review`); workspaces (`GET/POST /api/workspaces`); clips
-  (`GET/POST /api/workspaces/{slug}/clips`, **`PATCH .../clips/{clip_id}`**
+  `/w/{slug}/review`, `/w/{slug}/compile`); channel browsing (`GET
+  /api/kick/{channel}/vods` — wraps `download_stage.list_channel_vods`,
+  stamping each result with `slug`/`workspace_exists` via `slug_for_url` so
+  the library page's "Browse a channel" picker can show "Open" instead of
+  "Download" for a VOD already pulled down; backs clicking a listed VOD
+  straight into a `POST /api/workspaces` instead of requiring its URL to be
+  pasted in); workspaces (`GET/POST /api/workspaces`); clips (`GET/POST
+  /api/workspaces/{slug}/clips`,
+  **`PATCH .../clips/{clip_id}`**
   — this is the route `specerror.py` references: it catches `KeyError` →
   404 and `ValueError` → 400, so a bad reel/effects spec surfaces as a
-  clean 400 with the validator's message); transcript; chat (`sync`,
+  clean 400 with the validator's message); compilations (`GET/POST
+  /api/workspaces/{slug}/compilations` — the `POST` is a whole-list
+  replace via `compilations.upsert`, the compile page's own editor Save;
+  `POST .../compilations/{name}/segments` — additive, `compilations.
+  add_segment`, what the review page's "+ Compilation" clip action calls;
+  `DELETE .../compilations/{name}` — also purges the rendered `.mp4` and
+  scratch dir, `KeyError` → 404); transcript (`GET .../transcript`,
+  Devanagari — and `GET .../captions`, the Hinglish transliteration if
+  `clipbot transliterate` has been run; both return `{present, segments}`,
+  and `captions.json`'s segments share `transcript.json`'s segment `id`s
+  exactly, so a frontend can index one by the other to swap a transcript
+  row's displayed script without re-deriving offsets — this is what backs
+  review.html's and compile.html's Dev/Hin transcript toggle, hidden
+  whenever `captions.json` doesn't exist for that workspace); chat (`sync`,
   `offset`, `messages`); speakers (`GET .../speakers` — transcript segments
   merged with their assigned speaker, for the transcript view;
   `POST .../speakers/assign` — manual range override, `speaker_id: null`
@@ -822,28 +1220,35 @@ error message instead of a silent no-op or a 500.
   (assets, presets, text styles,
   speaker profiles — `GET/POST /api/library/speakers`,
   `DELETE .../speakers/{id}` — an audition media route); jobs
-  (`POST .../jobs`, `GET /api/jobs`, cancel); `GET /api/doctor`
+  (`POST .../jobs`, `GET /api/jobs`, cancel — `kind: "compile"` takes a
+  `name`, same shape as `kind: "reel"` taking `clip_ids`); `GET /api/doctor`
   (diagnostics: tool resolvability, API key presence, CUDA device count,
-  free disk, Python version); media (video/clip/reel serving with
-  `?download=1`, manifest CSV download); and `GET /api/events`
-  (Server-Sent Events, with `Last-Event-ID` replay).
+  free disk, Python version); media (video/clip/reel/**compilation**
+  serving with `?download=1`, manifest CSV download — a compilation's file
+  is always `<name>.mp4`, so the name doubles as the lookup key, no
+  `compilations.json` read needed on the media route); and `GET
+  /api/events` (Server-Sent Events, with `Last-Event-ID` replay — event
+  kinds include `job`, `progress`, `log`, `workspace`, `clips`,
+  `compilations`, `preview`, `library`).
 - `external_activity(ws)` detects a **CLI-driven** job the dashboard didn't
   start itself: partial download files (`.part`/`.ytdl`), or (Windows-only)
   a `wmic process ... get commandline` scan matching `clipbot` + the
-  workspace's video id/slug — needed for stages like transcribe that write
-  no partial file to detect otherwise.
+  workspace's video id/slug for one of `transcribe`/`analyze`/`cut`/
+  `audio`/`download`/`compile`/`run` — needed for stages like transcribe
+  (and compile) that write no partial file to detect otherwise.
 
 ### jobs.py — JobRunner / EventBus
 
 - **Two worker lanes**: `HEAVY_KINDS = (download, audio, transcribe,
-  analyze, diarize, pipeline, reel)`, `LIGHT_KINDS = (cut, chat,
-  transliterate, manifest, cleanup, waveform, benchmark)`, each on its own
+  analyze, diarize, pipeline, reel, compile)`, `LIGHT_KINDS = (cut, chat,
+  transliterate, manifest, cleanup, waveform)`, each on its own
   thread — a 3-second clip cut never queues behind a 90-minute transcribe,
   and chat harvest (must run before Kick's retention expires it) never
   queues behind an x264 render. `transliterate` is light for the same
   reason as `chat`: a handful of batched Claude calls, not CPU/GPU-bound.
   `diarize` is heavy for the same reason as `transcribe`: CPU-bound (no CUDA
-  on this machine) and can run long on a multi-hour VOD.
+  on this machine) and can run long on a multi-hour VOD. `compile` is heavy
+  for the same reason as `reel`: every segment is a full x264 re-encode.
 - Threads, not subprocesses, because none of the actual work is
   Python-CPU-bound (CTranslate2 releases the GIL; ffmpeg/yt-dlp are
   subprocesses; Claude calls are network I/O) and the ~3GB Whisper model can
@@ -851,6 +1256,14 @@ error message instead of a silent no-op or a 500.
 - `Job` states: `queued → running → {succeeded, failed, cancelled,
   interrupted}`. **One job per workspace at a time**, enforced at
   `submit()`, to prevent concurrent `state.json` writes.
+- `Job.to_dict()` carries progress fields dashboards render generically:
+  `fraction`, `phase`, `label`, `eta_seconds`, plus `current`/`total`/`unit`/
+  `rate` (the last four added for `download`'s byte-based progress, but
+  populated for any stage that passes them through `Progress.update()` —
+  `_on_progress` forwards whatever `update()` emits rather than special-
+  casing a stage). `unit == "bytes"` is what `app.js`'s `renderJobs()` keys
+  off of to show a speed/remaining-size line; other stages' `unit` values
+  (e.g. compile's `"segments"`) don't get that line.
 - `EventBus` keeps a `deque(maxlen=400)` history with monotonic ids for SSE
   `Last-Event-ID` replay on a reconnecting browser tab.
 
@@ -861,7 +1274,11 @@ error message instead of a silent no-op or a 500.
 `waveform` handler — submitting one raises `StageError("Unknown job kind
 'waveform'")`. `chatsync.py` reads `audio.wav` directly instead of a
 pre-computed `waveform.json`. This looks like a partially-built/abandoned
-feature — don't assume a waveform file exists anywhere.
+feature — don't assume a waveform file exists anywhere. (`LIGHT_KINDS` used
+to also list `"benchmark"`, with the same unregistered-handler problem but
+none of `waveform`'s supporting scaffolding — no `Workspace` path, no
+settings, no dashboard purpose; `transcribe --max-seconds` benchmark mode is
+CLI-only. Removed outright rather than left as a second dead kind.)
 
 ## Effects/reel preview pipeline (clipbot/preview.py)
 
@@ -884,6 +1301,7 @@ feature — don't assume a waveform file exists anywhere.
 
 Every leaf is overridable by a `CLIPBOT_*` env var — see `ENV_OVERRIDES` in
 `clipbot/config.py` for the exact list (work root, library dir, tool paths,
+transcribe backend,
 whisper model/device/language, Claude model, rubric file path).
 
 Sections and the values worth knowing without opening the file:
@@ -892,13 +1310,26 @@ Sections and the values worth knowing without opening the file:
   (`ffmpeg-2026-07-30-git-.../bin/`) because ffmpeg isn't on this machine's
   PATH; relative paths resolve against the project root.
 - **`download`** — `format` pins `height<=720` explicitly ("best" once
-  silently returned 160p); `fallback_to_kick_dl: false` (see above).
+  silently returned 160p); `fallback_to_kick_dl: false` (see above);
+  `http_chunk_size: "10M"` (yt-dlp bandwidth-throttling-bypass flag,
+  sequential only in the installed yt-dlp version — see download.py's
+  section for what's actually been measured; `null` omits the flag).
 - **`chat`** — bot list matched on `sender.slug`, lowercase; full
   `chatrender` style block (fonts, sizes, colors) lives here too.
-- **`transcribe`** — `language: "hi"` (forced, not auto-detect);
-  `low_confidence_threshold: -0.7`; `max_segment_seconds: 30.0`.
+- **`transcribe`** — `backend: "openai"` (default; `"local"` selects
+  faster-whisper instead — dashboard has a per-run picker on the transcribe
+  stage button); `language: "hi"` (forced, not auto-detect);
+  `low_confidence_threshold: -0.7`; `max_segment_seconds: 30.0`; nested
+  `openai.*` block (`model: "whisper-1"`, `api_key_env`, `chunk_seconds:
+  1200`, `concurrency: 4`, `max_retries: 3`) only used when `backend` is
+  `"openai"`.
 - **`analyze`** — `model: "claude-sonnet-4-6"`; `thinking: false` (see
-  analyze.py above for why); `effort: "medium"`.
+  analyze.py above for why); `effort: "medium"`; `chunk_threshold_minutes:
+  90` / `chunk_minutes: 60` / `chunk_overlap_minutes: 8` / `concurrency: 2`
+  (windowed analysis for long streams, see analyze.py above); nested
+  `signals.*` block (`enabled`, `audio_bin_seconds`, `audio_z_threshold`,
+  `chat_bin_seconds`, `chat_z_threshold`) controls the energy/chat-spike
+  annotations from `highlights.py`.
 - **`transliterate`** — `model: "claude-haiku-4-5"` (deliberately cheaper
   than `analyze.model` — mechanical task, not a judgment call);
   `batch_size: 50`; `thinking: false`.
@@ -908,6 +1339,11 @@ Sections and the values worth knowing without opening the file:
   `num_speakers`/`min_speakers`/`max_speakers` all `null` by default (let
   pyannote infer).
 - **`cut`** — `pad_start: 1.0`, `pad_end: 1.5`, `re_encode: false`.
+- **`compile`** — `min_duration: 0.5`; `encoder: "libx264"`, `preset: "slow"`,
+  `crf: 18` **deliberately does not inherit `cut.encoder`/`cut.preset`/
+  `cut.crf`** (same reasoning as `reel.preset_x264` below — it's a final
+  deliverable); padding reuses `cut.pad_start`/`cut.pad_end` rather than its
+  own setting, same choice `reel` already made.
 - **`reel`** — `canvas: "1080x1920"`, `preset: "cam_top"`; `preset_x264:
   "slow"` **deliberately does not inherit `cut.preset`** (measured: 30s of
   1080×1920@60 is 6s at `veryfast` vs 19s at `slow` — "quality is worth the
@@ -954,6 +1390,23 @@ Sections and the values worth knowing without opening the file:
   and `layout_speaker_slots` geometry; and `speakerfx.resolve_speakers`
   against a real tiny Pillow-generated source image, covering appear vs.
   discord mode and the strict/non-strict missing-avatar behaviour.
+- `tests/test_highlights.py` — `compute_energy_spikes` against a small
+  synthetic WAV file (quiet baseline + a loud burst, written directly with
+  the stdlib `wave` module), `compute_chat_spikes` against a synthetic
+  chat.json dict (including the offset-correction sign convention), and
+  `notable_moments`'s graceful-degradation path against a real temp
+  `Workspace` with neither `audio.wav` nor `chat.json` present.
+- `tests/test_compile.py` — `compilations.json` CRUD/fingerprinting/
+  skip-unchanged-or-force behavior (ffmpeg calls stubbed, same reasoning
+  cut.py's own untested subprocess calls rely on), plus the cross-stream
+  additions specifically: `_normalize_segments`'s source-aware ordering/
+  overlap branch (single-slug still sorts+checks globally, multi-slug
+  preserves given order and only checks overlap per source), fingerprints
+  changing with source `slug` (not just numeric range),
+  `render_compilation` resolving segments from two real temp `Workspace`s
+  and raising a clear error for a segment naming a workspace with no video,
+  and `unrendered_compilations_elsewhere` blocking one workspace's cleanup
+  on an unrendered compilation homed in another.
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
 
@@ -1009,8 +1462,11 @@ Sections and the values worth knowing without opening the file:
   needed) or `config/analysis_prompt.md` (keep `{{PLACEHOLDERS}}` and the
   JSON schema intact).
 - ...swap the transcription backend → write a new module that emits the
-  same `transcript.json` shape as `stages/transcribe.py`; nothing else needs
-  to change.
+  same `transcript.json` shape as `stages/transcribe.py`, then add a branch
+  to that module's `transcribe_audio()` dispatcher (see
+  `stages/transcribe_openai.py` for the working example: OpenAI's API is
+  the current default backend) — nothing downstream of `transcript.json`
+  needs to change.
 - ...add a new CLI subcommand → `clipbot/cli.py`'s `build_parser()` +
   a `cmd_*` function; add a matching dashboard job handler in
   `server/app.py` only if the dashboard should expose it too.
@@ -1033,6 +1489,20 @@ Sections and the values worth knowing without opening the file:
 - ...understand the review/approval state machine → `clipbot/review.py`
   (`reconcile()` is the interesting one: it re-matches a fresh rubric run's
   candidates against existing human-edited clips by time-overlap).
+- ...assemble a landscape supercut from several non-contiguous VOD ranges,
+  optionally spanning multiple streams (e.g. a curated YouTube highlights
+  video) → `clipbot compile --range [slug:]start,end,label ...` /
+  `clipbot/stages/compile.py` + `clipbot/compilations.py` (also reachable
+  from the dashboard at `/w/{slug}/compile` for review/render, not
+  cross-stream authoring — see compile.py's section above) — not
+  `clipbot cut`, which only ever produces separate per-clip files.
+- ...add a new full dashboard page (not just a route) → a new template
+  extending `base.html` (gets the shared topbar/job-panel/SSE for free) +
+  a dedicated `static/<page>.js` if it's non-trivial (see `compile.html`/
+  `compile.js` for a from-scratch example built by adapting review.js's
+  timeline/transcript techniques rather than including review.js wholesale)
+  + a page route in `app.py` + a nav link from wherever makes sense
+  (`workspace.html` for a per-workspace page).
 
 ## Keeping this file honest
 

@@ -24,6 +24,7 @@ ENV_OVERRIDES = {
     "CLIPBOT_WHISPER_MODEL": "transcribe.model",
     "CLIPBOT_WHISPER_DEVICE": "transcribe.device",
     "CLIPBOT_WHISPER_LANGUAGE": "transcribe.language",
+    "CLIPBOT_TRANSCRIBE_BACKEND": "transcribe.backend",
     "CLIPBOT_CLAUDE_MODEL": "analyze.model",
     "CLIPBOT_RUBRIC_FILE": "analyze.rubric_file",
 }

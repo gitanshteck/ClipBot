@@ -26,6 +26,7 @@ diarization.json:
     }
 """
 
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -51,6 +52,44 @@ HF_TOKEN_HINT = (
     "https://huggingface.co/settings/tokens\n"
     '4. Set it:  PowerShell:  $env:HF_TOKEN = "hf_..."'
 )
+
+
+@contextlib.contextmanager
+def _trust_pyannote_checkpoints():
+    """PyTorch 2.6 changed `torch.load`'s default to `weights_only=True`,
+    which breaks pyannote's checkpoint loading: its pipeline/model
+    checkpoints store plain Python objects alongside tensors (measured -
+    `torch.torch_version.TorchVersion`, recording which torch version wrote
+    the file), and the safe-unpickler used by `weights_only=True` doesn't
+    know that class, so loading fails with `UnpicklingError`.
+
+    pyannote's own `pl_load` helper always explicitly passes
+    `weights_only=weights_only` (defaulting to `None` at its call site), so
+    a `functools.partial` preset default would just get overridden right
+    back by that explicit keyword - this instead wraps `torch.load` to force
+    `weights_only=False` regardless of what the caller passes, for every
+    nested call (pipeline config, segmentation model, embedding model) that
+    happens during `Pipeline.from_pretrained`.
+
+    Deliberately scoped to just that call, not a global process-wide
+    setting: this is torch's own documented option (1) for a trusted
+    source (see the error message), and the only checkpoints loaded here
+    are the official ones this stage just downloaded from Hugging Face's
+    pyannote org, not arbitrary user-supplied files.
+    """
+    import torch
+
+    original_load = torch.load
+
+    def _patched_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return original_load(*args, **kwargs)
+
+    torch.load = _patched_load
+    try:
+        yield
+    finally:
+        torch.load = original_load
 
 
 def _resolve_device(requested: str) -> str:
@@ -98,7 +137,8 @@ def _load_pipeline(settings: Settings):
     log.info("Loading %s (device=%s)", model_name, device)
     started = time.time()
     try:
-        pipeline = Pipeline.from_pretrained(model_name, use_auth_token=token)
+        with _trust_pyannote_checkpoints():
+            pipeline = Pipeline.from_pretrained(model_name, use_auth_token=token)
     except AttributeError as exc:
         # pyannote's own from_pretrained doesn't raise when a *sub*-model
         # (segmentation, embedding) is gated/inaccessible either - deep

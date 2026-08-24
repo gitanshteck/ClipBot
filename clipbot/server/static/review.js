@@ -19,39 +19,16 @@ let clipQuery = '';
 let dirty = false;
 let previewUntil = null;   // when set, playback stops here (preview mode)
 
-/* ---------------- time helpers ---------------- */
+let compilationNames = [];
+let compilationPickerClipId = null;
+// renderClips() fully rebuilds the list on every `clips`/`workspace` SSE
+// event (from ANY client, not just this one) - without this, expanding one
+// clip's "why" and then approving a different clip would silently re-collapse
+// the first the instant that event landed.
+let expandedWhy = new Set();
 
-function formatClock(total, withTenths) {
-  if (total == null || isNaN(total)) return '';
-  total = Math.max(0, total);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total - h * 3600) / 60);
-  const s = total - h * 3600 - m * 60;
-  const ss = withTenths === false
-    ? String(Math.floor(s)).padStart(2, '0')
-    : s.toFixed(1).padStart(4, '0');
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-}
-
-function parseClock(str) {
-  if (str == null) return NaN;
-  str = String(str).trim();
-  if (str === '') return NaN;
-  if (/^-?\d+(\.\d+)?$/.test(str)) return parseFloat(str);
-  const parts = str.split(':').map(p => p.trim());
-  if (parts.length < 2 || parts.length > 3) return NaN;
-  if (parts.some(p => p === '' || isNaN(parseFloat(p)))) return NaN;
-  const n = parts.map(parseFloat);
-  return parts.length === 3 ? n[0] * 3600 + n[1] * 60 + n[2] : n[0] * 60 + n[1];
-}
-
-function toast(msg, bad) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'toast show' + (bad ? ' bad' : '');
-  clearTimeout(el._t);
-  el._t = setTimeout(() => { el.className = 'toast'; }, 2200);
-}
+/* formatClock/parseClock/toast live in app.js now - shared with compile.js,
+ * loaded before this file via base.html. */
 
 /* ---------------- init ---------------- */
 
@@ -94,14 +71,65 @@ function initReview(slug, padStart, padEnd) {
 
   onEvent('clips', loadClips);
   onEvent('workspace', loadClips);
+  onEvent('compilations', loadCompilationNames);
   loadAll();
 }
 window.initReview = initReview;
 
 async function loadAll() {
-  await Promise.all([loadClips(), loadTranscript(), loadSpeakers()]);
+  await Promise.all([loadClips(), loadTranscript(), loadSpeakers(), loadCompilationNames()]);
 }
 window.loadAll = loadAll;
+
+/* ---------------- add to compilation ---------------- */
+
+async function loadCompilationNames() {
+  try {
+    const data = await api(`/api/workspaces/${SLUG}/compilations`);
+    compilationNames = (data.compilations || []).map(c => c.name);
+    const dl = document.getElementById('comp-names-list');
+    if (dl) dl.innerHTML = compilationNames.map(n => `<option value="${esc(n)}">`).join('');
+  } catch (e) { /* best-effort - the picker still works by typing a new name */ }
+}
+
+function openCompilationPicker(clipId) {
+  compilationPickerClipId = clipId;
+  document.getElementById('comp-picker-name').value = '';
+  document.getElementById('comp-picker').showModal();
+}
+window.openCompilationPicker = openCompilationPicker;
+
+async function confirmAddToCompilation() {
+  const name = document.getElementById('comp-picker-name').value.trim();
+  if (!name) { toast('Enter a compilation name', true); return; }
+  const clip = clips.find(c => c.id === compilationPickerClipId);
+  if (!clip) return;
+  // If this is the clip currently open in the editor with unsaved in/out
+  // edits, clip.start/end here is the last-SAVED range, not what's on
+  // screen - use the live editor fields instead so the compilation gets the
+  // range the user actually sees.
+  const useLive = dirty && selected && selected.id === clip.id;
+  const start = useLive ? editedStart() : clip.start;
+  const end = useLive ? editedEnd() : clip.end;
+  if (isNaN(start) || isNaN(end) || end <= start) {
+    toast('Fix the in/out fields first', true);
+    return;
+  }
+  const btn = document.getElementById('comp-picker-add-btn');
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/workspaces/${SLUG}/compilations/${encodeURIComponent(name)}/segments`, 'POST', {
+      start, end, label: clip.title || clip.description || '',
+    });
+    document.getElementById('comp-picker').close();
+    toast(`Added to "${name}"`);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+window.confirmAddToCompilation = confirmAddToCompilation;
 
 /* ---------------- transport ---------------- */
 
@@ -224,7 +252,24 @@ function zoomWindow() {
   return { from: Math.max(0, s - margin), to: Math.min(duration || e + margin, e + margin) };
 }
 
+// Trim-handle dragging and in/out keystrokes can call drawZoom() far faster
+// than the screen can redraw (a 1000Hz mouse fires pointermove up to ~1000x/
+// sec; drawDensity() below rescans the whole segment array - 1200+ on a long
+// VOD - and rebuilds an innerHTML string every time). Coalescing to one real
+// draw per animation frame keeps every caller's code unchanged - each still
+// just calls drawZoom() - while capping the actual work to the display's
+// refresh rate instead of the input event rate.
+let _zoomFrameQueued = false;
 function drawZoom() {
+  if (_zoomFrameQueued) return;
+  _zoomFrameQueued = true;
+  requestAnimationFrame(() => {
+    _zoomFrameQueued = false;
+    drawZoomNow();
+  });
+}
+
+function drawZoomNow() {
   const block = document.getElementById('zoom-block');
   if (!selected) { block.hidden = true; return; }
   block.hidden = false;
@@ -403,6 +448,8 @@ window.saveEdits = saveEdits;
 
 async function resetToModel() {
   if (!selected) return;
+  const btn = document.getElementById('reset-btn');
+  if (btn) btn.disabled = true;
   try {
     await api(`/api/workspaces/${SLUG}/clips/${selected.id}`, 'PATCH', {
       start: selected.source_start, end: selected.source_end
@@ -410,7 +457,11 @@ async function resetToModel() {
     await loadClips();
     selectClip(selected.id);
     toast('Reset to the model’s range');
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 window.resetToModel = resetToModel;
 
@@ -494,13 +545,15 @@ function renderClips() {
         ${c.output && c.output.file ? '<span class="badge">file ✓</span>' : ''}
         ${c.reel_output && c.reel_output.file ? '<span class="badge">reel ✓</span>' : ''}
       </div>
-      ${why ? `<div class="why clamp" id="why-${c.id}">${why}</div>
-               <button class="more" onclick="event.stopPropagation();toggleWhy('${c.id}',this)">more</button>` : ''}
+      ${why ? `<div class="why${expandedWhy.has(c.id) ? '' : ' clamp'}" id="why-${c.id}">${why}</div>
+               <button class="more" onclick="event.stopPropagation();toggleWhy('${c.id}',this)">${expandedWhy.has(c.id) ? 'less' : 'more'}</button>` : ''}
       <div class="acts">
         <button class="${c.status === 'approved' ? 'on-ok' : ''}"
-                onclick="event.stopPropagation();setStatus('${c.id}','approved')">Approve</button>
+                onclick="event.stopPropagation();setStatus('${c.id}','approved',this)">Approve</button>
         <button class="${c.status === 'rejected' ? 'on-no' : ''}"
-                onclick="event.stopPropagation();setStatus('${c.id}','rejected')">Reject</button>
+                onclick="event.stopPropagation();setStatus('${c.id}','rejected',this)">Reject</button>
+        <button onclick="event.stopPropagation();openCompilationPicker('${c.id}')"
+                title="Add this clip's range to a compilation">+ Compilation</button>
       </div>
     </div>`;
   }).join('');
@@ -510,6 +563,7 @@ function toggleWhy(id, btn) {
   const el = document.getElementById('why-' + id);
   const clamped = el.classList.toggle('clamp');
   btn.textContent = clamped ? 'more' : 'less';
+  if (clamped) expandedWhy.delete(id); else expandedWhy.add(id);
 }
 window.toggleWhy = toggleWhy;
 
@@ -536,7 +590,12 @@ function selectClip(id) {
 }
 window.selectClip = selectClip;
 
-async function setStatus(id, status) {
+async function setStatus(id, status, btn) {
+  // loadClips() on success fully rebuilds the clip list, so the disabled
+  // flag set here only needs to survive long enough to block a second click
+  // on *this* button before that happens - re-enabling in `finally` still
+  // matters for the failure path, where the card (and this button) survives.
+  if (btn) btn.disabled = true;
   try {
     const clip = clips.find(c => c.id === id);
     // Clicking the active status again clears it back to pending.
@@ -544,7 +603,11 @@ async function setStatus(id, status) {
     await api(`/api/workspaces/${SLUG}/clips/${id}`, 'PATCH', { status: next });
     await loadClips();
     toast(next === 'pending' ? 'Cleared' : next.charAt(0).toUpperCase() + next.slice(1));
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 window.setStatus = setStatus;
 
@@ -555,6 +618,8 @@ async function addManualClip() {
     toast('Enter a valid in and out, e.g. 41:00 and 43:00', true);
     return;
   }
+  const btn = document.getElementById('add-clip-btn');
+  if (btn) btn.disabled = true;
   try {
     const clip = await api(`/api/workspaces/${SLUG}/clips`, 'POST', { start, end });
     document.getElementById('new-start').value = '';
@@ -562,7 +627,11 @@ async function addManualClip() {
     await loadClips();
     selectClip(clip.id);
     toast('Clip added — not cut yet');
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 window.addManualClip = addManualClip;
 
@@ -574,10 +643,20 @@ function useSelection() {
 window.useSelection = useSelection;
 
 async function cutApproved() {
+  const btn = document.getElementById('cut-btn');
+  if (btn) btn.disabled = true;
   try {
     await api(`/api/workspaces/${SLUG}/jobs`, 'POST', { kind: 'cut' });
     toast('Cutting started — watch the workspace page');
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    // loadClips() (via the clips/workspace SSE events the cut job will fire)
+    // recomputes this button's disabled state from the approved count as
+    // the job progresses - this just guards the POST itself against a
+    // double-click, not the longer-lived "no approved clips" state.
+    if (btn) btn.disabled = false;
+  }
 }
 window.cutApproved = cutApproved;
 
@@ -586,13 +665,48 @@ window.cutApproved = cutApproved;
 const ROW_H = 46;
 let txView = [];        // indices into `segments` after search/filter
 let txQuery = '';
+let captionsIndex = null;                 // Map(segment id -> Hinglish text), or null if none
+let txScript = localStorage.getItem('clipbot.txScript') || 'dev';   // 'dev' | 'hin'
 
 async function loadTranscript() {
-  const data = await api(`/api/workspaces/${SLUG}/transcript`);
+  // Fetched together and rendered once, rather than rendering Devanagari
+  // first and re-rendering in Hinglish once captions arrive - that sequence
+  // flashed the wrong script for anyone whose saved preference was already
+  // 'hin'.
+  const [data, captions] = await Promise.all([
+    api(`/api/workspaces/${SLUG}/transcript`),
+    loadCaptionsIndex(SLUG),
+  ]);
   segments = data.segments || [];
-  applyTranscriptFilter();
+  captionsIndex = captions;
+  const toggle = document.getElementById('tx-script-toggle');
+  if (toggle) toggle.hidden = !captionsIndex;
   if (duration) drawFullTimeline();
+  setTxScript(txScript);
 }
+
+// What a transcript row actually shows - the Hinglish text if that pass ran
+// and the toggle is set to it, Devanagari otherwise (including any segment a
+// failed transliteration batch left untranslated - captions.json already
+// carries the Devanagari fallback for those, see transliterate.py).
+function displayText(s) {
+  if (txScript === 'hin' && captionsIndex && captionsIndex.has(s.id)) {
+    return captionsIndex.get(s.id);
+  }
+  return s.text || '';
+}
+
+function setTxScript(mode) {
+  txScript = mode;
+  localStorage.setItem('clipbot.txScript', mode);
+  document.querySelectorAll('#tx-script-toggle button').forEach(b =>
+    b.classList.toggle('on', b.dataset.script === mode));
+  document.getElementById('tx-search').placeholder = mode === 'hin'
+    ? 'Search transcript (Hinglish)…'
+    : 'Search transcript (Devanagari — देवनागरी)…';
+  applyTranscriptFilter();
+}
+window.setTxScript = setTxScript;
 
 function applyTranscriptFilter() {
   const hideLow = document.getElementById('tx-hide-low').checked;
@@ -602,7 +716,7 @@ function applyTranscriptFilter() {
     const s = segments[i];
     const low = s.low_confidence || (s.flags && s.flags.length);
     if (hideLow && low) continue;
-    if (q && !(s.text || '').toLowerCase().includes(q)) continue;
+    if (q && !displayText(s).toLowerCase().includes(q)) continue;
     txView.push(i);
   }
   document.getElementById('tx-count').textContent =
@@ -634,18 +748,26 @@ function renderTxWindow(force) {
     const low = s.low_confidence || (s.flags && s.flags.length);
     const active = s.start <= t && t <= s.end;
     const inClip = selS != null && !isNaN(selS) && s.end > selS && s.start < selE;
-    const spk = speakerRegistry[segmentSpeakers[s.id]];
+    const spkId = segmentSpeakers[s.id];
+    const spk = speakerRegistry[spkId];
+    // A raw diarization cluster label with no library profile yet - give it
+    // some visible marker too, rather than rendering identically to a
+    // segment with no speaker assignment at all (the previous behavior:
+    // `spk` was undefined either way, so an un-named cluster was invisible).
+    const isRawCluster = spkId && !spk;
     const inRange = speakerMode && rangeStart != null && (
       rangeEnd != null
         ? (s.id >= Math.min(rangeStart, rangeEnd) && s.id <= Math.max(rangeStart, rangeEnd))
         : s.id === rangeStart
     );
-    const border = spk ? `border-left:4px solid ${esc(spk.color || '#19A2D2')}` : '';
+    const border = spk ? `border-left:4px solid ${esc(spk.color || '#19A2D2')}`
+                 : isRawCluster ? `border-left:4px dashed #888` : '';
+    const rowTitle = spk ? esc(spk.name) : isRawCluster ? esc(spkId) + ' (unnamed cluster)' : '';
     html += `<div class="tx-row${low ? ' lowconf' : ''}${active ? ' active' : ''}${inClip ? ' inclip' : ''}${inRange ? ' spkrange' : ''}"
                   style="top:${vi * ROW_H}px;height:${ROW_H}px;${border}"
-                  data-i="${i}" data-id="${s.id}" data-start="${s.start}" title="${spk ? esc(spk.name) : ''}">
+                  data-i="${i}" data-id="${s.id}" data-start="${s.start}" title="${rowTitle}">
         <span class="t">${formatClock(s.start, false)}</span>
-        <span class="x">${highlight(s.text || '')}</span>
+        <span class="x">${highlight(displayText(s))}</span>
       </div>`;
   }
   inner.innerHTML = html;
@@ -738,6 +860,11 @@ async function loadSpeakers() {
     (reg.speakers || []).forEach(s => { speakerRegistry[s.id] = s; });
     segmentSpeakers = {};
     (seg.segments || []).forEach(s => { if (s.speaker_id) segmentSpeakers[s.id] = s.speaker_id; });
+    // Without this, a workspace where diarization never ran and one where it
+    // ran but nothing's been named yet look identical - both just show an
+    // empty speaker list.
+    const hint = document.getElementById('diarize-hint');
+    if (hint) hint.style.display = seg.diarized ? 'none' : '';
     renderSpeakerSelect();
     renderTxWindow(true);
   } catch (e) { /* best effort - a workspace with no transcript yet is fine */ }
@@ -747,11 +874,24 @@ function renderSpeakerSelect() {
   const sel = document.getElementById('speaker-assign-select');
   if (!sel) return;
   const prev = sel.value;
-  const ids = Object.keys(speakerRegistry);
-  sel.innerHTML = ids.map(id =>
+  const namedIds = Object.keys(speakerRegistry);
+  // segmentSpeakers can hold raw diarization cluster labels (e.g. "SPEAKER_00")
+  // that never went through library.save_speaker - list those too, so
+  // "✎ edit" has something to name/rename them into, not just already-named
+  // speakers.
+  const rawIds = Array.from(new Set(Object.values(segmentSpeakers)))
+    .filter(id => id && !speakerRegistry[id]);
+  let html = namedIds.map(id =>
     `<option value="${id}">${esc(speakerRegistry[id].name)}</option>`
-  ).join('') + '<option value="__new__">+ New speaker…</option>';
-  if (ids.includes(prev)) sel.value = prev;
+  ).join('');
+  if (rawIds.length) {
+    html += `<optgroup label="Unnamed clusters">` + rawIds.map(id =>
+      `<option value="${esc(id)}">${esc(id)} (unnamed)</option>`
+    ).join('') + `</optgroup>`;
+  }
+  html += '<option value="__new__">+ New speaker…</option>';
+  sel.innerHTML = html;
+  if (namedIds.includes(prev) || rawIds.includes(prev)) sel.value = prev;
 }
 
 function toggleSpeakerMode() {
@@ -794,80 +934,168 @@ async function applySpeakerAssign() {
   const sel = document.getElementById('speaker-assign-select');
   let speakerId = sel.value;
   if (!speakerId || speakerId === '__new__') {
-    const name = (prompt('New speaker name:') || '').trim();
-    if (!name) return;
-    try {
-      const created = await api('/api/library/speakers', 'POST', { name });
-      speakerRegistry[created.id] = created;
-      renderSpeakerSelect();
-      speakerId = created.id;
-      sel.value = speakerId;
-    } catch (e) { toast(e.message, true); return; }
+    // Opens the shared speaker dialog instead of a prompt(); on save it sets
+    // sel.value to the new speaker and re-enters this function, so the rest
+    // of the assignment flow (including the confirm() below) still runs.
+    openSpeakerDialog('create', { afterCreate: (newId) => {
+      sel.value = newId;
+      applySpeakerAssign();
+    }});
+    return;
   }
   const lo = Math.min(rangeStart, rangeEnd), hi = Math.max(rangeStart, rangeEnd);
+  const speakerName = speakerRegistry[speakerId] ? speakerRegistry[speakerId].name : speakerId;
+  if (!confirm(`Assign ${hi - lo + 1} segment(s) to ${speakerName}? This overwrites any existing assignment in that range.`)) return;
+  const assignBtn = document.getElementById('speaker-assign-btn');
+  const clearBtn = document.getElementById('speaker-clear-btn');
+  if (assignBtn) assignBtn.disabled = true;
+  if (clearBtn) clearBtn.disabled = true;
   try {
     await api(`/api/workspaces/${SLUG}/speakers/assign`, 'POST',
              { start_id: lo, end_id: hi, speaker_id: speakerId });
     for (let id = lo; id <= hi; id++) segmentSpeakers[id] = speakerId;
-    toast(`Assigned ${hi - lo + 1} segment(s) to ${speakerRegistry[speakerId].name}`);
+    toast(`Assigned ${hi - lo + 1} segment(s) to ${speakerName}`);
     rangeStart = rangeEnd = null;
-    updateSpeakerRangeUI();
     renderTxWindow(true);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    // Re-derives disabled state from the (possibly just-cleared) range
+    // instead of hardcoding false, so a failed request correctly leaves
+    // both buttons enabled for a retry.
+    updateSpeakerRangeUI();
+  }
 }
 window.applySpeakerAssign = applySpeakerAssign;
 
-async function editSelectedSpeaker() {
+function editSelectedSpeaker() {
   const sel = document.getElementById('speaker-assign-select');
   const id = sel && sel.value;
+  if (!id || id === '__new__') { toast('Pick a speaker or unnamed cluster first', true); return; }
   const speaker = speakerRegistry[id];
-  if (!speaker) { toast('Pick an existing speaker first (not "+ New speaker")', true); return; }
-
-  let avatarAssets = [];
-  try {
-    const index = await api('/api/library');
-    avatarAssets = (index.assets || []).filter(a => a.kind === 'avatar');
-  } catch (e) { /* best effort */ }
-  const list = avatarAssets.length
-    ? avatarAssets.map(a => `  ${a.id}  ${a.name}`).join('\n')
-    : '  (none yet - drop an image into _library/avatars/ and hit Rescan on the Library page)';
-  const avatarId = prompt(
-    `Avatar asset id for ${speaker.name} (blank to clear):\n${list}`,
-    speaker.avatar_asset || ''
-  );
-  if (avatarId === null) return;  // cancelled
-  const color = prompt(
-    `Ring/name colour for ${speaker.name} (#RRGGBB):`,
-    speaker.color || '#19A2D2'
-  );
-  if (color === null) return;
-
-  try {
-    const updated = await api('/api/library/speakers', 'POST', {
-      speaker_id: speaker.id,
-      name: speaker.name,
-      avatar_asset: avatarId.trim() || null,
-      color: color.trim() || null,
+  if (speaker) {
+    openSpeakerDialog('edit', {
+      sourceId: id, name: speaker.name,
+      avatar_asset: speaker.avatar_asset, color: speaker.color,
     });
-    speakerRegistry[updated.id] = updated;
-    renderTxWindow(true);
-    toast(`Updated ${updated.name}`);
-  } catch (e) { toast(e.message, true); }
+  } else {
+    // A raw diarization cluster label (e.g. "SPEAKER_00") with no library
+    // profile yet - this is the "name this diarization cluster" action:
+    // saving creates a new speaker and rewrites every segment currently
+    // pointing at the raw label to point at it instead.
+    openSpeakerDialog('rename', { sourceId: id, name: '' });
+  }
 }
 window.editSelectedSpeaker = editSelectedSpeaker;
+
+/* ---------- speaker dialog (create / edit / rename-a-cluster) ---------- */
+// One dialog replaces what used to be three sequential native prompt() calls
+// across two functions (a new-speaker name prompt in applySpeakerAssign, and
+// an avatar-id + a color prompt in editSelectedSpeaker) - unstyled, blocking,
+// and with no inline validation of the avatar-id/color format. The <input
+// type=color> here can't produce an invalid value at all, unlike the old
+// free-text color prompt.
+
+let speakerDialogMode = null;       // 'create' | 'edit' | 'rename'
+let speakerDialogSourceId = null;   // speaker id being edited, or raw cluster id being renamed
+let speakerDialogAfterSave = null;  // optional (speakerId) => void, run after a successful save
+let avatarAssetsCache = null;
+
+async function loadAvatarAssetsCache() {
+  if (avatarAssetsCache) return avatarAssetsCache;
+  try {
+    const index = await api('/api/library');
+    avatarAssetsCache = (index.assets || []).filter(a => a.kind === 'avatar');
+  } catch (e) {
+    avatarAssetsCache = [];
+  }
+  return avatarAssetsCache;
+}
+
+async function openSpeakerDialog(mode, opts) {
+  opts = opts || {};
+  speakerDialogMode = mode;
+  speakerDialogSourceId = opts.sourceId || null;
+  speakerDialogAfterSave = opts.afterCreate || null;
+
+  document.getElementById('speaker-dialog-title').textContent =
+    mode === 'edit' ? 'Edit speaker' : 'New speaker';
+  document.getElementById('speaker-dialog-source-hint').textContent =
+    mode === 'rename'
+      ? `Naming cluster "${opts.sourceId}" — every segment currently assigned to it will point at this speaker instead.`
+      : '';
+  document.getElementById('speaker-dialog-name').value = opts.name || '';
+  document.getElementById('speaker-dialog-color').value = opts.color || '#19a2d2';
+  document.getElementById('speaker-dialog-error').textContent = '';
+
+  const assets = await loadAvatarAssetsCache();
+  const avatarSel = document.getElementById('speaker-dialog-avatar');
+  avatarSel.innerHTML = '<option value="">(none)</option>' +
+    assets.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  avatarSel.value = opts.avatar_asset || '';
+
+  document.getElementById('speaker-dialog').showModal();
+  document.getElementById('speaker-dialog-name').focus();
+}
+window.openSpeakerDialog = openSpeakerDialog;
+
+async function saveSpeakerDialog() {
+  const name = document.getElementById('speaker-dialog-name').value.trim();
+  const errEl = document.getElementById('speaker-dialog-error');
+  if (!name) { errEl.textContent = 'Enter a name.'; return; }
+  const avatar_asset = document.getElementById('speaker-dialog-avatar').value || null;
+  const color = document.getElementById('speaker-dialog-color').value;
+
+  const btn = document.getElementById('speaker-dialog-save-btn');
+  btn.disabled = true;
+  try {
+    const speaker = await api('/api/library/speakers', 'POST', {
+      name, avatar_asset, color,
+      speaker_id: speakerDialogMode === 'edit' ? speakerDialogSourceId : null,
+    });
+    speakerRegistry[speaker.id] = speaker;
+
+    if (speakerDialogMode === 'rename' && speakerDialogSourceId) {
+      await api(`/api/workspaces/${SLUG}/speakers/rename`, 'POST',
+               { old_id: speakerDialogSourceId, new_id: speaker.id });
+      for (const segId of Object.keys(segmentSpeakers)) {
+        if (segmentSpeakers[segId] === speakerDialogSourceId) segmentSpeakers[segId] = speaker.id;
+      }
+    }
+
+    renderSpeakerSelect();
+    renderTxWindow(true);
+    document.getElementById('speaker-dialog').close();
+    toast(speakerDialogMode === 'edit' ? `Updated ${speaker.name}` : `Saved ${speaker.name}`);
+    if (speakerDialogAfterSave) speakerDialogAfterSave(speaker.id);
+  } catch (e) {
+    errEl.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.saveSpeakerDialog = saveSpeakerDialog;
 
 async function clearSpeakerAssign() {
   if (rangeStart == null || rangeEnd == null) return;
   const lo = Math.min(rangeStart, rangeEnd), hi = Math.max(rangeStart, rangeEnd);
+  if (!confirm(`Clear the speaker assignment for ${hi - lo + 1} segment(s)?`)) return;
+  const assignBtn = document.getElementById('speaker-assign-btn');
+  const clearBtn = document.getElementById('speaker-clear-btn');
+  if (assignBtn) assignBtn.disabled = true;
+  if (clearBtn) clearBtn.disabled = true;
   try {
     await api(`/api/workspaces/${SLUG}/speakers/assign`, 'POST',
              { start_id: lo, end_id: hi, speaker_id: null });
     for (let id = lo; id <= hi; id++) delete segmentSpeakers[id];
     toast(`Cleared speaker for ${hi - lo + 1} segment(s)`);
     rangeStart = rangeEnd = null;
-    updateSpeakerRangeUI();
     renderTxWindow(true);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    updateSpeakerRangeUI();
+  }
 }
 window.clearSpeakerAssign = clearSpeakerAssign;
 

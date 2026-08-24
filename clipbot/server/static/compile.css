@@ -1,0 +1,56 @@
+/* Compilations page. Loaded only here - review.css supplies the shared
+   .timeline/.tl-*/.tx-*/.editor2/.field building blocks, this file only adds
+   what's specific to compile.html. Unlike review-page, the job panel stays
+   visible (this page is fundamentally about watching a render finish), so
+   layout stays inside <main>'s normal 1100px width rather than review2's
+   wide, jobpanel-hiding grid. */
+
+.compile2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .compile2 { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---- segment markers on the full timeline ---- */
+
+.tl-clip.seg {
+  background: rgba(154,111,230,.55);
+  border-color: #9a6fe6;
+}
+.tl-clip.draft {
+  background: rgba(25,162,210,.20);
+  border: 1px dashed var(--accent);
+}
+
+/* ---- compilation list (sidebar) ---- */
+
+.complist { display: grid; gap: 6px; max-height: 34vh; overflow-y: auto; }
+.comp-row {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 9px; cursor: pointer; font-size: 12px;
+}
+.comp-row:hover { border-color: var(--accent); }
+.comp-row.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.comp-row .name { font-weight: 600; }
+.comp-row .meta { margin-top: 2px; }
+
+/* ---- segment list (open compilation editor) ---- */
+
+.seglist { display: grid; gap: 6px; }
+.seg-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 7px;
+  padding: 6px 8px; font-size: 12px;
+}
+.seg-row .rng { font: 11px ui-monospace, Consolas, monospace; color: var(--dim); white-space: nowrap; }
+.seg-row .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seg-row button { padding: 2px 7px; font-size: 11px; }
+.seg-row.editing { border-color: var(--warn); }
+.seg-row.rendering { border-color: var(--accent); background: rgba(25, 162, 210, .12); }
+.seg-row.rendering .badge { background: var(--accent); color: #fff; }
+
+#c-output video { width: 100%; border-radius: 6px; background: #000; }

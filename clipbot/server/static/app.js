@@ -11,12 +11,109 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* --- download quality picker ---
+ * Shared by workspace.html (per-stage download/re-download/run-all) and
+ * library.html (new VOD form + channel browser) so the preset list only
+ * lives in one place. Keys/order must match clipbot/stages/download.py's
+ * QUALITY_CHOICES; there's no route exposing that list, so it's mirrored
+ * here by hand - it's a short, rarely-changed constant, not worth a round
+ * trip for. Empty value means "omit `quality`", i.e. fall back to
+ * config/settings.json's `download.format`.
+ */
+function qualityPickerHtml(id) {
+  return `<select id="${id}" title="Download quality">
+    <option value="">Default (≤720p)</option>
+    <option value="best">Best available</option>
+    <option value="1080">1080p</option>
+    <option value="720">720p</option>
+    <option value="480">480p</option>
+    <option value="360">360p</option>
+  </select>`;
+}
+
 function fmtDur(sec) {
   if (sec == null) return '—';
   sec = Math.max(0, Math.floor(sec));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
            : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/* --- byte/rate formatting --- (job panel: download speed + remaining size) */
+function fmtBytes(n) {
+  if (n == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = Math.max(0, n);
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null) return null;
+  return `${fmtBytes(bytesPerSec)}/s`;
+}
+
+/* --- time helpers ---
+ * Promoted out of review.js so both review.js and compile.js get them from
+ * this shared load instead of duplicating them - purely a move, behavior
+ * unchanged.
+ */
+
+function formatClock(total, withTenths) {
+  if (total == null || isNaN(total)) return '';
+  total = Math.max(0, total);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total - h * 3600) / 60);
+  const s = total - h * 3600 - m * 60;
+  const ss = withTenths === false
+    ? String(Math.floor(s)).padStart(2, '0')
+    : s.toFixed(1).padStart(4, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+}
+
+function parseClock(str) {
+  if (str == null) return NaN;
+  str = String(str).trim();
+  if (str === '') return NaN;
+  if (/^-?\d+(\.\d+)?$/.test(str)) return parseFloat(str);
+  const parts = str.split(':').map(p => p.trim());
+  if (parts.length < 2 || parts.length > 3) return NaN;
+  if (parts.some(p => p === '' || isNaN(parseFloat(p)))) return NaN;
+  const n = parts.map(parseFloat);
+  return parts.length === 3 ? n[0] * 3600 + n[1] * 60 + n[2] : n[0] * 60 + n[1];
+}
+
+/* --- captions (Hinglish transliteration) ---
+ * Shared by review.js and compile.js, both of which show a transcript panel
+ * and want an optional Devanagari/Hinglish toggle on it. captions.json's
+ * segments share transcript.json's segment ids exactly (see
+ * stages/transliterate.py), so this just needs to build an id -> text
+ * lookup - each page keeps its own toggle state and re-render logic.
+ * Resolves to null (not present) rather than throwing, so a workspace with
+ * no Hinglish pass, or an older server build that predates this route,
+ * just leaves the toggle hidden instead of breaking the page.
+ */
+async function loadCaptionsIndex(slug) {
+  try {
+    const data = await api(`/api/workspaces/${slug}/captions`);
+    if (!data.present) return null;
+    const index = new Map();
+    for (const s of data.segments || []) index.set(s.id, s.text);
+    return index;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* --- toast --- (any page that calls this needs a <div class="toast" id="toast"></div>) */
+
+function toast(msg, bad) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'toast show' + (bad ? ' bad' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = 'toast'; }, 2200);
 }
 
 async function api(path, method = 'GET', body) {
@@ -51,9 +148,16 @@ function renderJobs() {
   el.innerHTML = list.map(j => {
     const pct = j.fraction != null ? Math.round(j.fraction * 100) : null;
     const eta = j.eta_seconds ? ` · ETA ${fmtDur(j.eta_seconds)}` : '';
+    // Byte-unit jobs (currently just downloads) additionally show speed and
+    // bytes-done/total - other stages report progress in units like
+    // "segments" and don't have a meaningful transfer rate to show.
+    const bytesLine = j.unit === 'bytes'
+      ? `<div class="meta">${fmtBytes(j.current)} / ${fmtBytes(j.total)}${j.rate ? ' · ' + fmtRate(j.rate) : ''}</div>`
+      : '';
     return `<div class="job ${j.status}">
       <div><b>${j.kind}</b> <span class="meta">${j.slug}</span></div>
       <div class="meta">${j.status}${j.phase ? ' · ' + j.phase : ''}${pct != null ? ' · ' + pct + '%' : ''}${eta}</div>
+      ${bytesLine}
       ${j.label ? `<div class="meta">${esc(j.label)}</div>` : ''}
       ${j.error ? `<div class="meta" style="color:var(--bad)">${esc(j.error)}</div>` : ''}
       ${pct != null && j.status === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
@@ -100,7 +204,7 @@ function connect() {
     (_handlers[kind] || []).forEach(fn => fn(payload));
   };
 
-  ['job', 'progress', 'log', 'workspace', 'clips', 'segment', 'preview', 'library'].forEach(k =>
+  ['job', 'progress', 'log', 'workspace', 'clips', 'compilations', 'segment', 'preview', 'library'].forEach(k =>
     src.addEventListener(k, dispatch(k)));
 }
 

@@ -18,13 +18,17 @@ from .utils import StageError, get_logger
 log = get_logger(__name__)
 
 
-def run_ffmpeg(argv, total_seconds, progress, base, span, log_path, out_path=None):
+def run_ffmpeg(argv, total_seconds, progress, base, span, log_path, out_path=None, label=None):
     """Run ffmpeg, reporting progress and honouring cancellation.
 
     `progress.update` is called with `base + fraction * span`, so a caller
     rendering many clips can map each one onto its own slice of an overall bar.
     `log_path` receives the command line plus the tail of ffmpeg's own output,
-    which is what makes a failed render debuggable after the fact.
+    which is what makes a failed render debuggable after the fact. `label`
+    (optional, defaults to None - unchanged behavior for callers that don't
+    pass one) rides along on every progress update, so a UI watching the
+    dashboard's `progress` SSE event can show which unit is rendering *right
+    now*, not just after it finishes.
     """
     proc = subprocess.Popen(
         argv,
@@ -58,7 +62,7 @@ def run_ffmpeg(argv, total_seconds, progress, base, span, log_path, out_path=Non
                     continue
                 if total_seconds:
                     frac = max(0.0, min(1.0, (micros / 1e6) / total_seconds))
-                    progress.update(base + frac * span)
+                    progress.update(base + frac * span, label=label)
             elif "=" not in line:
                 tail.append(line)
     finally:

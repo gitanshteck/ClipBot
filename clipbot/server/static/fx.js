@@ -18,6 +18,7 @@ let fxWarnings = [];
 let fxPreview = { key: null, busy: false, started: 0, timer: null };
 let fxDrawerKind = 'sfx';
 let fxDrawerQuery = '';
+let textStylesCache = null;  // saved library text styles, for the text.style picker
 
 const FX_LABELS = {
   punch: '⤢ Punch', shake: '≋ Shake', flash: '✦ Flash', freeze: '❚❚ Freeze end',
@@ -121,6 +122,33 @@ function setFxField(id, field, value) {
   fxTouched();
 }
 window.setFxField = setFxField;
+
+// duck is a sub-object (fxspec.py's DEFAULT_DUCK), not a flat field - setFxField
+// can't reach into it, and this is the only nested-field case in the whole
+// inspector, so a small dedicated setter is simpler than teaching setFxField
+// dot-paths for one caller.
+function setFxDuckField(id, field, value) {
+  const eff = fxById(id);
+  if (!eff) return;
+  eff.duck = eff.duck || { enabled: true, threshold: 0.05, ratio: 8.0, attack: 20.0, release: 300.0 };
+  eff.duck[field] = value;
+  fxTouched();
+}
+window.setFxDuckField = setFxDuckField;
+
+async function loadTextStylesCache() {
+  if (textStylesCache) return textStylesCache;
+  try {
+    // load_text_styles returns {styles: {style_id: {...}}} - a dict, not a
+    // list - text.style only ever references one by name (string), so the
+    // ids are all this picker needs.
+    const data = await api('/api/library/textstyles');
+    textStylesCache = Object.keys(data.styles || {});
+  } catch (e) {
+    textStylesCache = [];
+  }
+  return textStylesCache;
+}
 
 function removeFx(id) {
   const s = fxSpec();
@@ -272,6 +300,18 @@ function num(id, field, value, min, max, step) {
            onchange="setFxField('${id}','${field}',+this.value)"></label>`;
 }
 
+// fxspec.py's RANGES bounds "dur" per-type, not with one shared range - a
+// punch/shake/flash/freeze value the server would reject at 400 could
+// previously look perfectly in-range in this UI (0.02-60 for everything).
+const DUR_RANGES = {
+  punch: [0.05, 5.0],
+  shake: [0.05, 5.0],
+  flash: [0.02, 2.0],
+  freeze: [0.05, 3.0],
+  sticker: [0.05, 60.0],
+  text: [0.05, 60.0],
+};
+
 function renderFxInspector() {
   const host = document.getElementById('fx-inspector');
   if (!host) return;
@@ -284,9 +324,19 @@ function renderFxInspector() {
   let body = '';
 
   if (eff.at != null) body += num(id, 'at', eff.at, 0, 99999, 0.05);
-  if (eff.dur != null) body += num(id, 'dur', eff.dur, 0.02, 60, 0.05);
+  if (eff.dur != null) {
+    const [durMin, durMax] = DUR_RANGES[eff.type] || [0.02, 60];
+    body += num(id, 'dur', eff.dur, durMin, durMax, 0.05);
+  }
 
-  if (eff.type === 'punch') body += num(id, 'amount', eff.amount, 1.02, 2, 0.01);
+  if (eff.type === 'punch') {
+    body += num(id, 'amount', eff.amount, 1.02, 2, 0.01);
+    body += `<label class="fx-field"><span>ease</span>
+      <select onchange="setFxField('${id}','ease',this.value)">
+        <option value="step" ${eff.ease !== 'smooth' ? 'selected' : ''}>step</option>
+        <option value="smooth" ${eff.ease === 'smooth' ? 'selected' : ''}>smooth</option>
+      </select></label>`;
+  }
   if (eff.type === 'shake') {
     body += num(id, 'amount', eff.amount, 1, 40, 1) + num(id, 'freq', eff.freq, 1, 30, 1);
     body += `<label class="fx-field"><span>decay</span>
@@ -305,15 +355,50 @@ function renderFxInspector() {
   if (eff.type === 'sfx' || eff.type === 'music') {
     body += num(id, 'gain_db', eff.gain_db, -40, 12, 0.5);
   }
+  if (eff.type === 'music') {
+    const duck = eff.duck || { enabled: true, threshold: 0.05, ratio: 8.0, attack: 20.0, release: 300.0 };
+    body += `<div class="hint" style="margin-top:2px">ducking — lowers this track while there's speech</div>`;
+    body += `<label class="fx-field"><span>duck</span>
+      <input type="checkbox" ${duck.enabled !== false ? 'checked' : ''}
+             onchange="setFxDuckField('${id}','enabled',this.checked)"></label>`;
+    body += `<label class="fx-field"><span>threshold</span>
+      <input type="number" value="${duck.threshold}" min="0.001" max="1" step="0.01"
+             onchange="setFxDuckField('${id}','threshold',+this.value)"></label>`;
+    body += `<label class="fx-field"><span>ratio</span>
+      <input type="number" value="${duck.ratio}" min="1" max="20" step="0.5"
+             onchange="setFxDuckField('${id}','ratio',+this.value)"></label>`;
+    body += `<label class="fx-field"><span>attack (ms)</span>
+      <input type="number" value="${duck.attack}" min="0.01" max="2000" step="1"
+             onchange="setFxDuckField('${id}','attack',+this.value)"></label>`;
+    body += `<label class="fx-field"><span>release (ms)</span>
+      <input type="number" value="${duck.release}" min="0.01" max="9000" step="1"
+             onchange="setFxDuckField('${id}','release',+this.value)"></label>`;
+  }
   if (eff.type === 'sticker') {
     body += num(id, 'w', eff.w, 0.02, 1, 0.01) + num(id, 'x', eff.x, 0, 1, 0.01)
-          + num(id, 'y', eff.y, 0, 1, 0.01) + num(id, 'fade', eff.fade, 0, 2, 0.05);
+          + num(id, 'y', eff.y, 0, 1, 0.01) + num(id, 'fade', eff.fade, 0, 2, 0.05)
+          + num(id, 'opacity', eff.opacity != null ? eff.opacity : 1.0, 0.05, 1, 0.05);
   }
   if (eff.type === 'text') {
     body += `<label class="fx-field wide"><span>text</span>
       <input type="text" value="${esc(eff.text || '')}" maxlength="120"
              onchange="setFxField('${id}','text',this.value)"></label>`;
     body += num(id, 'x', eff.x, 0, 1, 0.01) + num(id, 'y', eff.y, 0, 1, 0.01);
+    // text.style can be an inline object too (fxspec.py's normalize_text_style),
+    // but that's a much bigger editor (font/size/color/border/shadow/uppercase) -
+    // this covers the common case of picking a name already saved from the
+    // Library page's style editor. A style set as an inline object elsewhere
+    // shows as "(custom)" here rather than silently losing it.
+    const styleIsString = typeof eff.style === 'string' || eff.style == null;
+    const styleOptions = (textStylesCache || []).map(s =>
+      `<option value="${esc(s)}" ${eff.style === s ? 'selected' : ''}>${esc(s)}</option>`
+    ).join('');
+    body += `<label class="fx-field"><span>style</span>
+      <select onchange="setFxField('${id}','style',this.value || null)" ${styleIsString ? '' : 'disabled'}>
+        <option value="">(default)</option>
+        ${styleOptions}
+        ${styleIsString ? '' : '<option value="" selected>(custom, edit via clips.json)</option>'}
+      </select></label>`;
     body += `<div class="hint">Straight apostrophes are rejected by ffmpeg —
              use ’. Colour emoji can't be drawn as text; use a sticker.</div>`;
   }
@@ -626,6 +711,7 @@ window.cancelFxPreview = cancelFxPreview;
 function initFx() {
   loadFxLibrary(false);
   loadFxPresets();
+  loadTextStylesCache().then(() => { if (fxSelected) renderFxInspector(); });
 
   // Pushed, not polled: the server publishes when the proxy finishes.
   onEvent('preview', (data) => {
