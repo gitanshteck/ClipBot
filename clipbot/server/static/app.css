@@ -47,13 +47,14 @@ input, textarea, select {
   background: var(--bg); color: var(--text); border: 1px solid var(--line);
   border-radius: 7px; padding: 6px 10px; font: inherit;
 }
-input[type=url] { flex: 1; min-width: 320px; }
+input[type=url], input[type=text] { flex: 1; min-width: 320px; }
 input[type=number] { width: 90px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 .card h2 { font-size: 15px; margin-bottom: 6px; }
 .card .row { margin-top: 10px; }
+.card .thumb { width: 100%; border-radius: var(--radius); aspect-ratio: 16 / 9; object-fit: cover; margin-bottom: 8px; }
 
 .dots { display: flex; gap: 5px; margin: 10px 0; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); display: inline-block; }
@@ -71,6 +72,7 @@ input[type=number] { width: 90px; }
 .stage { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .stage-head { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
 .stage-detail { color: var(--dim); font-size: 11px; min-height: 30px; word-break: break-word; }
+.stage select { width: 100%; margin-bottom: 6px; }
 
 .cutlist { display: grid; gap: 10px; }
 .cutrow { display: grid; grid-template-columns: 220px 1fr; gap: 12px; align-items: center; }

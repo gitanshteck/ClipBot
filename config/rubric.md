@@ -35,16 +35,28 @@ Signals, roughly in order of how well they travel:
    near-miss. Must be legible without the preceding hour.
 2. **Emotional spike** — genuine laughter, panic, disbelief, going quiet and then
    losing it. Energy *change* matters more than volume; forced hype travels badly
-   and is off-brand here.
-3. **Funny bit** — a joke that lands, a running gag, self-roast, banter with chat.
+   and is off-brand here. This is a signal on its own, not just connective tissue
+   to a gameplay payoff — real laughter or a loud, energized reaction is worth
+   flagging even when nothing else notable happens around it. The transcript
+   can't hear tone of voice, so trust the `(energy spike)` / `(chat spike)`
+   annotations described under "Signal annotations" below at least as much as
+   the words on the line.
+3. **Wholesome or interesting tangent** — a side conversation that has nothing to
+   do with gaming or tech but would still hold a stranger's attention: an odd
+   fact, a story about an animal, a random observation, a genuine "did you know"
+   moment. This doesn't need to fit any other pillar to count — it's clip-worthy
+   because it's a good moment, full stop. (See "Use your judgement on topics"
+   below — this signal and that section are the same idea; it's promoted up here
+   because these are some of the easiest clips to under-flag.)
+4. **Funny bit** — a joke that lands, a running gag, self-roast, banter with chat.
    Hinglish wordplay and code-switched punchlines count — a lot of the humour
    lives in the switch itself.
-4. **A take worth arguing with** — a sharp opinion on a game, a company, a piece
+5. **A take worth arguing with** — a sharp opinion on a game, a company, a piece
    of hardware, an industry move. Strong opinions travel; safe ones don't.
-5. **Tech moment that teaches something** — a setting that fixes a real problem, a
+6. **Tech moment that teaches something** — a setting that fixes a real problem, a
    spec myth busted, a purchase called good or bad and *why*. Must be self-
    contained and useful to someone who wasn't there.
-6. **Chat interaction** — reading a donation, reacting to a raid, a viewer callout
+7. **Chat interaction** — reading a donation, reacting to a raid, a viewer callout
    that gets a real reaction.
 
 ### Use your judgement on topics
@@ -102,9 +114,30 @@ what's in the clip.
 Write `why` plainly: which signal it hits and what makes it land. If it's a
 judgement call rather than an obvious pillar match, say so.
 
+## Signal annotations
+
+Some transcript lines are tagged `(energy spike)` and/or `(chat spike, Nx)` —
+these come from the stream's own audio loudness and chat message rate, not from
+the words. They exist specifically to catch what a transcript can't: real
+laughter, a shout, a sudden reaction — none of that has to produce
+distinctive words to be a signal that something happened. Treat a marked
+spike as a strong hint to look closely at that moment, even if the
+transcribed text right there looks mundane, is short, or is flagged
+low-confidence. Not every spike is a clip — a spike during a loud game
+moment with no real reaction isn't one — but an un-investigated spike is a
+likely miss.
+
 ## Volume
 
-Roughly **5–15 candidates per hour** of stream. Quality over coverage, but lean
-slightly generous on genuinely interesting talk — those are the easiest ones to
-miss and the hardest to find again by scrubbing. An empty list is a valid answer
-for a slow stream.
+Roughly **5–15 candidates per hour** of stream — for a 5-hour stream that's
+25–75, not "a good cluster from early on and then a handful more." Scan the
+full stream section by section; finding several strong clips in one part is
+not a reason to look less hard in the rest of it. A quiet or repetitive
+stretch producing nothing is fine and expected — but that should be a
+finding about *that stretch specifically*, not an artifact of having already
+found enough elsewhere.
+
+Quality over coverage, but lean generous on genuinely interesting talk and on
+signal-annotated moments — those are the easiest ones to miss and the
+hardest to find again by scrubbing. An empty list is a valid answer for a
+slow stream, but only after every section of it got a real look.

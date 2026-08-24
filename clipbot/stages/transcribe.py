@@ -1,9 +1,13 @@
-"""Stage 3: transcribe the extracted audio locally with faster-whisper.
+"""Stage 3: transcribe the extracted audio, locally or via OpenAI's API.
 
-Produces segment-level timestamps in `transcript.json`. This module is the one
-most likely to get swapped out (whisper.cpp on Vulkan, a hosted API, ...) — the
-contract downstream stages rely on is the JSON schema at the bottom of this
-docstring, nothing more.
+Produces segment-level timestamps in `transcript.json`. `transcribe_audio()`
+is a thin dispatcher: `transcribe.backend` (default `"openai"`) or a
+per-call `backend` override picks between this module's local
+faster-whisper path and `transcribe_openai.py`'s hosted-API path. This
+module's own docstring used to invite exactly this swap ("the contract
+downstream stages rely on is the JSON schema, nothing more") - the local
+path below is that contract's original, still-default-capable
+implementation, not the only one anymore.
 
 Hindi/English code-switching is the hard case here: the model handles it
 unevenly, and the usual failure is a segment coming back with plausible-looking
@@ -114,8 +118,29 @@ def transcribe_audio(
     out_path: Optional[Path] = None,
     mark_stage: bool = True,
     progress: Progress = NULL_PROGRESS,
+    backend: Optional[str] = None,
 ) -> Path:
-    """Transcribe the workspace audio. Returns the transcript JSON path."""
+    """Transcribe the workspace audio. Returns the transcript JSON path.
+
+    `backend` is a per-call override ("local" or "openai"); `None` (the
+    default) falls through to the `transcribe.backend` setting. This is the
+    same override-vs-settings-default relationship `force` already has
+    relative to a caller's own default.
+    """
+    backend = str(backend or settings.get("transcribe.backend", "openai"))
+    if backend == "openai":
+        from .transcribe_openai import transcribe_audio_openai
+
+        return transcribe_audio_openai(
+            ws,
+            settings,
+            force=force,
+            audio_path=audio_path,
+            out_path=out_path,
+            mark_stage=mark_stage,
+            progress=progress,
+        )
+
     audio = Path(audio_path) if audio_path else ws.audio_path
     target = Path(out_path) if out_path else ws.transcript_path
 
@@ -297,6 +322,7 @@ def transcribe_audio(
             STAGE,
             transcript_file=target.name,
             model=model_name,
+            backend="local",
             device=device,
             segments=len(segments),
             low_confidence=low_conf,

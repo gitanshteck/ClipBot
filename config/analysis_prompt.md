@@ -6,6 +6,14 @@ clipbot/stages/analyze.py:
     {{RUBRIC}}       contents of the rubric file (config/rubric.md)
     {{DURATION}}     stream duration, human-readable
     {{STREAM_TITLE}} VOD title, if known
+    {{WINDOW_NOTE}}  empty string on a normal (single-call) run; on a
+                     chunked run (long streams only - see
+                     analyze.chunk_threshold_minutes) this is filled with a
+                     sentence telling the model which part of the transcript
+                     is its "core" window vs. surrounding context-only
+                     padding. Leaving this a placeholder (not hardcoded
+                     prose) is what keeps the non-chunked prompt byte-
+                     identical to before chunking existed.
 
 {{CACHE_BREAKPOINT}} marks where prompt caching splits the message. Everything
 ABOVE it is cached; everything below is re-sent each call. The transcript sits
@@ -18,13 +26,20 @@ the pipeline parses the response.
 -->
 
 Below is a timestamped transcript of a livestream VOD titled "{{STREAM_TITLE}}",
-running {{DURATION}}.
+running {{DURATION}}. {{WINDOW_NOTE}}
 
 Each line is `[start - end] text`, in seconds from the start of the stream.
 Lines marked `(low-confidence)` came back with weak recognition scores — the
 audio is Hindi with English code-switching, and background music and silence can
 make the transcription model hallucinate plausible-looking text. Read flagged
 lines as approximate, and don't build a clip on flagged text alone.
+
+Some lines also carry `(energy spike)` and/or `(chat spike, Nx)` tags. These
+come from the stream's own audio loudness and chat message rate, not from the
+words - they flag moments a transcript alone can't show you, like real
+laughter or a loud reaction with no distinctive dialogue. Treat a tagged line
+as a strong hint to look closely at that moment, per the rubric's "Signal
+annotations" section.
 
 # Transcript
 
