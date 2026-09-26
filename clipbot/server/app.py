@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -27,8 +32,10 @@ from .. import compilations
 from .. import fxspec
 from .. import library
 from .. import manifest as manifest_module
+from .. import platforms
 from .. import review
 from .. import speakerfx
+from .. import ytsegments
 from ..config import PROJECT_ROOT, load_settings
 from ..ffrun import run_ffmpeg
 from ..preview import PreviewRunner
@@ -42,10 +49,11 @@ from ..stages import reel as reel_stage
 from ..stages import transcribe as transcribe_stage
 from ..stages import diarize as diarize_stage
 from ..stages import transliterate as transliterate_stage
+from ..stages import youtube as youtube_stage
 from .. import reelspec
 from .. import speakers as speakers_module
-from ..utils import StageError, get_logger, human_size, resolve_tool
-from ..workspace import Workspace, slug_for_url
+from ..utils import StageError, ToolMissingError, get_logger, human_size, resolve_tool
+from ..workspace import MODE_EMBED, Workspace, slug_for_url
 from .jobs import BusLogHandler, EventBus, JobRunner
 from .media import serve_file
 
@@ -81,7 +89,7 @@ def _asset_version() -> str:
     static_dir = HERE / "static"
     for name in (
         "app.css", "app.js", "review.css", "review.js", "reel.js", "fx.js",
-        "compile.css", "compile.js",
+        "compile.css", "compile.js", "player.js",
     ):
         path = static_dir / name
         if path.is_file():
@@ -130,7 +138,8 @@ def _h_download(ws, st, job, progress):
     url = job.options.get("url") or ws.read_state().get("url")
     if not url:
         raise StageError("No URL recorded for this workspace")
-    return download_stage.download_vod(
+    # Kick: the full VOD. YouTube: audio only (see stages/youtube.py).
+    return download_stage.acquire(
         url,
         ws,
         st,
@@ -261,18 +270,21 @@ def _h_pipeline(ws, st, job, progress):
     force = job.options.get("force", False)
     url = job.options.get("url") or ws.read_state().get("url")
     progress.phase("download")
-    video = download_stage.download_vod(
+    media = download_stage.acquire(
         url, ws, st, force=force, quality=job.options.get("quality"), progress=progress
     )
-    progress.phase("chat")
-    # Best-effort: an expired or chatless VOD must not sink the whole pipeline,
-    # but it's fetched first because it's the one thing that can't be recovered.
-    try:
-        chat_stage.fetch_chat(ws, st, force=force, progress=progress)
-    except StageError as exc:
-        log.warning("Chat unavailable, continuing without it: %s", exc)
+    # Kick-only: YouTube has no chat stage yet.
+    if ws.platform == platforms.KICK:
+        progress.phase("chat")
+        # Best-effort: an expired or chatless VOD must not sink the whole
+        # pipeline, but it's fetched first because it's the one thing that
+        # can't be recovered.
+        try:
+            chat_stage.fetch_chat(ws, st, force=force, progress=progress)
+        except StageError as exc:
+            log.warning("Chat unavailable, continuing without it: %s", exc)
     progress.phase("audio")
-    audio_stage.extract_audio(ws, st, force=force, video=video)
+    audio_stage.extract_audio(ws, st, force=force, video=media)
     progress.phase("transcribe")
     transcribe_stage.transcribe_audio(ws, st, force=force, progress=progress)
     progress.phase("analyze")
@@ -340,6 +352,40 @@ def stage_states(ws: Workspace) -> List[Dict[str, Any]]:
     approved = [c for c in clip_doc.get("clips") or [] if c.get("status") == "approved"]
 
     has_chat = ws.chat_path.exists()
+
+    if platforms.platform_of(state) == platforms.YOUTUBE:
+        # A YouTube workspace never downloads the video: the audio-only source
+        # is the first artifact and the dashboard plays the embedded player. So
+        # nothing here gates on `has_video`. Clips are cut straight from YouTube
+        # (the same `cut` job, see clipbot/ytsegments.py). There are no chat /
+        # reel / cleanup rows: chat replay isn't built, reels are not supported
+        # for YouTube, and there is no VOD to delete.
+        source_audio = ws.source_audio_path()
+        return [
+            entry("download", "Fetch audio", has_audio or bool(source_audio), True),
+            entry("audio", "Extract audio", has_audio, bool(source_audio),
+                  "needs the audio download"),
+            entry("transcribe", "Transcribe", has_transcript, has_audio, "needs audio"),
+            entry("analyze", "Find clips", has_candidates, has_transcript,
+                  "needs a transcript"),
+            entry("transliterate", "Hinglish captions", has_captions, has_transcript,
+                  "needs a transcript"),
+            entry(
+                "diarize",
+                "Speaker diarization",
+                has_diarization,
+                has_audio,
+                "needs audio; also needs requirements-diarize.txt installed and "
+                "an HF_TOKEN env var",
+            ),
+            entry(
+                "cut",
+                "Fetch approved clips",
+                bool(stages.get("cut")),
+                bool(approved),
+                "needs at least one approved clip",
+            ),
+        ]
 
     return [
         entry("download", "Download VOD", has_video, True),
@@ -429,8 +475,9 @@ def external_activity(ws: Workspace) -> Optional[Dict[str, Any]]:
     # (".../gitanshteck/videos/79ac1495-...") while the slug joins channel and id
     # with a hyphen ("gitanshteck-79ac1495-..."), so a slug substring test never
     # matches a pipeline started from a URL - which is exactly how the CLI is
-    # normally driven.
-    video_id = ws.slug.split("-", 1)[-1]
+    # normally driven. Case-insensitive because YouTube ids are case-sensitive
+    # ("dQw4w9WgXcQ") while slugs are lowercased; the true id is in state.json.
+    needles = {(ws.video_id or ws.slug.split("-", 1)[-1]).lower(), ws.slug.lower()}
     try:
         import subprocess as _sp
 
@@ -439,9 +486,10 @@ def external_activity(ws: Workspace) -> Optional[Dict[str, Any]]:
             stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=6,
         ).stdout.decode("utf-8", "replace")
         for line in out.splitlines():
-            if "clipbot" not in line:
+            lowered = line.lower()
+            if "clipbot" not in lowered:
                 continue
-            if video_id not in line and ws.slug not in line:
+            if not any(needle in lowered for needle in needles):
                 continue
             for kind in (
                 "transcribe", "analyze", "cut", "audio", "download", "compile", "run",
@@ -508,6 +556,13 @@ def workspace_summary(ws: Workspace) -> Dict[str, Any]:
 
     return {
         "slug": ws.slug,
+        # Which library tab this workspace belongs to. Absent in state.json
+        # means Kick: every workspace that predates YouTube support is one.
+        "platform": platforms.platform_of(state),
+        # local | embed | none - derived from what is on disk (see
+        # Workspace.source_mode), never stored.
+        "source_mode": ws.source_mode(),
+        "video_id": state.get("video_id"),
         "title": title or state.get("url") or ws.slug,
         "external": external_activity(ws),
         "url": state.get("url"),
@@ -534,22 +589,73 @@ def workspace_summary(ws: Workspace) -> Dict[str, Any]:
 # --- pages ----------------------------------------------------------------
 
 
-@app.get("/", response_class=HTMLResponse)
-async def page_library(request: Request):
-    return templates.TemplateResponse("library.html", {"request": request})
+PLATFORM_COOKIE = "clipbot_platform"
+
+
+def _library_page(request: Request, platform: str):
+    template = "library.html" if platform == platforms.KICK else "library_youtube.html"
+    response = templates.TemplateResponse(
+        template, {"request": request, "platform": platform}
+    )
+    # Remember the tab, so "/" (and the brand link) returns to it.
+    response.set_cookie(
+        PLATFORM_COOKIE, platform, max_age=365 * 24 * 3600, samesite="lax"
+    )
+    return response
+
+
+@app.get("/")
+async def page_home(request: Request):
+    """The library is one tab per platform: send you to the one you used last
+    (YouTube on a first visit, since that is where new streams are)."""
+    last = request.cookies.get(PLATFORM_COOKIE)
+    target = last if last in platforms.PLATFORMS else platforms.YOUTUBE
+    return RedirectResponse("/" + target, status_code=302)
+
+
+@app.get("/kick", response_class=HTMLResponse)
+async def page_library_kick(request: Request):
+    return _library_page(request, platforms.KICK)
+
+
+@app.get("/youtube", response_class=HTMLResponse)
+async def page_library_youtube(request: Request):
+    return _library_page(request, platforms.YOUTUBE)
+
+
+def _player_source(ws: Workspace) -> Dict[str, Any]:
+    """What the review and compile pages should play (static/player.js).
+
+    `youtube`: embed the video - a YouTube workspace with no video on disk.
+    `local`: the page's own <video> element, exactly as before; this is also
+    what a Kick workspace whose VOD was deleted gets, so it still shows its
+    existing "no video available" message.
+    """
+    if ws.source_mode() == MODE_EMBED:
+        state = ws.read_state()
+        return {
+            "kind": "youtube",
+            "video_id": state.get("video_id"),
+            # The audio-probed length: the clock the transcript and every clip
+            # range are on. The embed falls back to YouTube's own figure only
+            # if this is missing.
+            "duration": state.get("duration"),
+        }
+    return {"kind": "local"}
 
 
 @app.get("/w/{slug}", response_class=HTMLResponse)
 async def page_workspace(request: Request, slug: str):
-    get_workspace(slug)
+    ws = get_workspace(slug)
+    # `platform` lights the right topbar tab and points "back" at that tab.
     return templates.TemplateResponse(
-        "workspace.html", {"request": request, "slug": slug}
+        "workspace.html", {"request": request, "slug": slug, "platform": ws.platform}
     )
 
 
 @app.get("/w/{slug}/review", response_class=HTMLResponse)
 async def page_review(request: Request, slug: str):
-    get_workspace(slug)
+    ws = get_workspace(slug)
     # The review UI draws the cut padding on the timeline, so it needs the same
     # numbers the cut stage will actually apply.
     return templates.TemplateResponse(
@@ -557,6 +663,8 @@ async def page_review(request: Request, slug: str):
         {
             "request": request,
             "slug": slug,
+            "platform": ws.platform,
+            "source": _player_source(ws),
             "pad_start": float(settings.get("cut.pad_start", 1.0)),
             "pad_end": float(settings.get("cut.pad_end", 1.5)),
         },
@@ -565,7 +673,7 @@ async def page_review(request: Request, slug: str):
 
 @app.get("/w/{slug}/compile", response_class=HTMLResponse)
 async def page_compile(request: Request, slug: str):
-    get_workspace(slug)
+    ws = get_workspace(slug)
     # Same padding passthrough as page_review, for the same reason: the
     # compile page's timeline draws each segment's padded range, which has to
     # match what render_compilation will actually cut.
@@ -574,6 +682,8 @@ async def page_compile(request: Request, slug: str):
         {
             "request": request,
             "slug": slug,
+            "platform": ws.platform,
+            "source": _player_source(ws),
             "pad_start": float(settings.get("cut.pad_start", 1.0)),
             "pad_end": float(settings.get("cut.pad_end", 1.5)),
         },
@@ -620,17 +730,73 @@ async def api_channel_vods(channel: str, limit: int = 20):
     return {"channel": channel, "vods": vods}
 
 
+# A channel listing spawns yt-dlp and asks YouTube (several seconds, and
+# repeated automated requests are what bot checks look for), so page loads are
+# served from this short cache; the Fetch button passes refresh=1.
+_STREAMS_TTL = 600.0
+_streams_cache: Dict[Any, Any] = {}
+
+
+@app.get("/api/youtube/{handle}/streams")
+async def api_youtube_streams(handle: str, limit: int = 20, refresh: int = 0):
+    """List a YouTube channel's past streams, so the dashboard can offer them
+    without the user hunting down and pasting a URL per stream."""
+    handle = handle.strip().lstrip("@")
+    if not re.match(r"^[A-Za-z0-9._-]{1,60}$", handle):
+        raise HTTPException(status_code=400, detail="invalid channel handle")
+    limit = max(1, min(limit, 50))
+    key = (handle.lower(), limit)
+    cached = _streams_cache.get(key)
+    if cached and not refresh and time.time() - cached[0] < _STREAMS_TTL:
+        streams = cached[1]
+    else:
+        try:
+            streams = await asyncio.to_thread(
+                youtube_stage.list_channel_streams, handle, settings, limit
+            )
+        except (StageError, ToolMissingError) as exc:
+            # Not a 500: the message says what to do (update yt-dlp, install a
+            # JS runtime...) and the page shows it.
+            raise HTTPException(status_code=502, detail=str(exc))
+        _streams_cache[key] = (time.time(), streams)
+    out = []
+    for stream in streams:
+        item = dict(stream)
+        slug = slug_for_url(item["url"])
+        item["slug"] = slug
+        # Recomputed on every call, cached or not, so "Add" turns into "Open"
+        # the moment a workspace exists.
+        item["workspace_exists"] = (settings.work_root / slug).is_dir()
+        out.append(item)
+    return {"channel": handle, "streams": out}
+
+
 @app.post("/api/workspaces")
 async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
     url = (payload.get("url") or "").strip()
-    if not url or "kick.com" not in url:
-        raise HTTPException(status_code=400, detail="Expected a kick.com VOD URL")
-    ws = Workspace.for_url(settings.work_root, url)
+    try:
+        # `platform` is the library tab the request came from: it only matters
+        # for a bare YouTube video id, which is ambiguous without it.
+        parsed = platforms.parse_url(url, platform_hint=payload.get("platform"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if parsed is not None:
+        canonical = parsed.canonical_url
+    elif "kick.com" in url:
+        # Unchanged legacy leniency: yt-dlp handles some Kick URL shapes the
+        # slug regex doesn't know, and this route always accepted them.
+        canonical = url
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Expected a kick.com or youtube.com VOD URL",
+        )
+    ws = Workspace.for_url(settings.work_root, canonical)
     job = runner.submit(
         "pipeline",
         ws.slug,
         {
-            "url": url,
+            "url": canonical,
             "force": bool(payload.get("force")),
             "quality": payload.get("quality"),
         },
@@ -1238,6 +1404,25 @@ async def api_doctor():
     probe("ffprobe", "ffprobe", "not found on PATH - set tools.ffprobe")
     probe("yt-dlp", "yt_dlp", "pip install -U 'yt-dlp[default,curl-cffi]'")
 
+    # YouTube needs a current yt-dlp plus a JS runtime; both checks shell out
+    # (yt-dlp --version alone takes a moment), so keep them off the event loop.
+    checks.extend(await asyncio.to_thread(youtube_stage.health_checks, settings))
+    # Cutting clips/segments straight from YouTube needs ffmpeg's -request_size
+    # HTTP option; without it every read is throttled to a crawl (see
+    # clipbot/ytsegments.py). Only reported when ffmpeg can be run at all - the
+    # ffmpeg check above already covers "not found".
+    supported = await asyncio.to_thread(ytsegments.ffmpeg_supports_request_size, settings)
+    if supported is not None:
+        checks.append(
+            {
+                "name": "ffmpeg -request_size (YouTube clips)",
+                "ok": supported,
+                "detail": "supported" if supported else
+                "this ffmpeg is too old (needs 8.1+): cutting from YouTube would fail - "
+                "set tools.ffmpeg to a current build",
+            }
+        )
+
     checks.append(
         {
             "name": "ANTHROPIC_API_KEY",
@@ -1292,6 +1477,14 @@ async def api_doctor():
         }
     )
     return {"checks": checks}
+
+
+@app.post("/api/doctor/youtube")
+async def api_doctor_youtube():
+    """Actually ask YouTube for a public video's format list - the one check
+    that proves extraction works end to end. A network round trip of several
+    seconds, so the Doctor dialog runs it on request rather than on open."""
+    return await asyncio.to_thread(youtube_stage.probe_youtube, settings)
 
 
 # --- media ----------------------------------------------------------------

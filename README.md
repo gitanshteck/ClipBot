@@ -1,6 +1,7 @@
 # ClipBot
 
-Local pipeline that turns Kick livestream VODs into candidate clips for editing.
+Local pipeline that turns Kick and YouTube livestream VODs into candidate clips
+for editing.
 
 **Status: the full pipeline (download → cut → reel) and the review/editor
 dashboard are built and in daily use** against real gitanshteck VODs.
@@ -20,6 +21,11 @@ video is fetched.
 | 5 | Cut clips (ffmpeg) | `cut` | done |
 | 5b | Author + render vertical 9:16 reels with chat/effects | `reel` | done |
 | 6 | Delete the full VOD | `cleanup` | done |
+
+The table is the main path. Chat harvest (1b), speaker diarization (2b), Hinglish
+captions (3c) and compilations (5c) exist too. For a **YouTube** stream, stage 1
+fetches the audio only and nothing is downloaded as video — see
+[YouTube](#youtube).
 
 ## Setup
 
@@ -89,15 +95,102 @@ python -m clipbot info --workspace yourchannel-<video-id>
 Add `-v` for debug logging (including the exact ffmpeg/yt-dlp command lines) and
 `--force` to redo a stage whose output already exists.
 
+## YouTube
+
+A YouTube stream goes through the same pipeline **without downloading the
+video**. ClipBot fetches the audio only (~0.3 GB for a 4-hour stream, against
+~15 GB of 1080p), transcribes and analyses it as usual, and the dashboard plays
+the video from YouTube itself through an embedded player. Use the **YouTube** tab
+in the dashboard (paste a link, or browse a channel's streams), or:
+
+```bash
+python -m clipbot run "https://www.youtube.com/watch?v=<video-id>"
+```
+
+Accepted links are `youtube.com/watch?v=…`, `youtu.be/…` and `youtube.com/live/…`;
+a channel, playlist or Short link is refused with a message saying so. The
+workspace is `work/yt-<video-id>/`.
+
+**What works today:** the whole find-clips pipeline (audio → transcript →
+candidates), reviewing candidates and adjusting their in/out points against the
+embedded player with the usual keyboard shortcuts, and **cutting clips and
+rendering compilations straight from YouTube**. "Cut approved" (called "Fetch
+approved clips" on the workspace page) and the compile page's Render fetch only
+the seconds they need, so the full video is never downloaded: on the test video a
+10-second clip 1000 seconds in took about a second to fetch. Compilations
+download their segments and join them into one file you can save from the compile
+page.
+
+Two things to know about those cuts. They are **always re-encoded** (with `cut.*`
+for clips and `compile.*` for compilations), never stream-copied: YouTube serves
+audio and video as separate streams, and a copy of them measured badly (clips
+start seconds early with silence at the front, and joined segments had timestamp
+collisions at the seams). Re-encoding is frame-exact and joins cleanly. On the
+720p30 test video it ran at roughly 9 to 10 times realtime; **1080p60 game
+footage will be slower**. And all the segments of one compilation must come from
+videos with the same resolution and frame rate, and can't be mixed with segments
+cut from a downloaded Kick VOD.
+
+**What doesn't yet:** chat overlays (YouTube chat isn't harvested), and a
+full-video download for YouTube: nothing is kept locally, so if YouTube ever
+stops serving a stream to yt-dlp there is no local copy to fall back on. The
+Doctor's **Test YouTube** check is how you find out. **Reels are Kick-only by
+design:** the crop editor paints video frames into a canvas, which a YouTube
+embed can't provide.
+
+YouTube is harder on downloaders than Kick, so setup needs more than
+`pip install -r requirements.txt`:
+
+- **A current yt-dlp, which needs Python 3.10+.** ClipBot only runs the `yt-dlp`
+  program, so install it under a newer Python than the one this project runs on
+  and point ClipBot at it:
+
+  ```bash
+  "C:\Path\To\Python313\python.exe" -m pip install -U "yt-dlp[default,curl-cffi]"
+  ```
+
+  then set the `CLIPBOT_YT_DLP` environment variable to the full path of the new
+  `yt-dlp.exe` (it's in that Python's `Scripts` folder). An old yt-dlp fails on
+  YouTube with `The page needs to be reloaded`.
+- **A JavaScript runtime**, which yt-dlp uses to solve YouTube's challenges. Deno
+  2.3+ is what it looks for by default:
+
+  ```bash
+  winget install DenoLand.Deno
+  ```
+
+  (Node 22+ also works if you set `download.youtube.js_runtime` to `"node"`.)
+  **Open a new shell** afterwards so the PATH change is visible.
+- **ffmpeg 8.1 or newer**, for cutting clips straight from YouTube. It needs
+  ffmpeg's `-request_size` option, which first shipped in 8.1: without bounded
+  requests YouTube throttles every read to a crawl, so ClipBot refuses to start
+  the cut on an older ffmpeg and says so. The Gyan.FFmpeg build from the setup
+  section above (8.1.2 when this was written) has it; check `ffmpeg -version` if
+  you installed ffmpeg some other way.
+- If YouTube asks you to prove you're not a bot, set
+  `download.youtube.cookies_from_browser` to a browser you're signed in to
+  (Firefox avoids Chrome's locked cookie database).
+
+The dashboard's **Doctor** dialog checks all of this (yt-dlp's version, the
+JavaScript runtime, ffmpeg's `-request_size`), and its **Test YouTube** button
+asks YouTube for a public video's format list, the one check that proves
+extraction works. YouTube changes often; when it breaks, updating yt-dlp is the
+first thing to try.
+
+The video must **allow embedding** (YouTube Studio → the video → Show more →
+Allow embedding) for the dashboard to play it. If it doesn't, the page says so.
+
 ## Workspace layout
 
-Each VOD gets a directory under `work/`, named from the channel and video ID.
-Stages communicate only through these files, never by calling each other:
+Each VOD gets a directory under `work/`: `<channel>-<video-id>` for Kick,
+`yt-<video-id>` for YouTube. Stages communicate only through these files, never
+by calling each other:
 
 ```
 work/<channel>-<video-id>/
-  state.json        what's done so far, source URL, title, duration
-  video.mp4         the VOD (deleted by stage 6)
+  state.json        what's done so far, platform, source URL, title, duration
+  video.mp4         the VOD (deleted by stage 6). YouTube workspaces have none
+  source_audio.m4a  YouTube only: the audio download, deleted once audio.wav exists
   audio.wav         16 kHz mono PCM (kept)
   transcript.json   segment-level timestamps (kept)
   candidates.json   Claude's clip picks (kept)

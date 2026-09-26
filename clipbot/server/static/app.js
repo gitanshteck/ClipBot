@@ -39,6 +39,40 @@ function fmtDur(sec) {
            : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/* --- library cards ---
+ * Shared by the Kick and YouTube library pages (library.html,
+ * library_youtube.html) so a workspace looks the same on either tab. `w` is
+ * one entry of GET /api/workspaces. */
+
+function stageDots(stages) {
+  return stages.map(s => `<span class="dot ${s.done ? 'done' : (s.ready ? 'ready' : 'blocked')}" title="${esc(s.label)}${s.blocked ? ' — ' + esc(s.blocked) : ''}"></span>`).join('');
+}
+
+function workspaceCardHtml(w) {
+  // A YouTube workspace normally has no video on disk: the dashboard plays the
+  // embedded YouTube player instead, so say so rather than showing a blank size.
+  const embed = w.source_mode === 'embed';
+  return `
+    <article class="card">
+      <h2><a href="/w/${w.slug}">${esc(w.title)}</a></h2>
+      <div class="meta">
+        ${w.duration ? fmtDur(w.duration) : '—'} ·
+        ${w.disk_human}
+        ${w.video_height ? ` · ${w.video_width}×${w.video_height}` : ''}
+        ${embed ? '<span class="badge" title="No video on disk — review plays it from YouTube">audio only</span>' : ''}
+        ${w.low_res ? '<span class="badge warn" title="Too low to review clips visually">low-res</span>' : ''}
+        ${w.video_deleted ? '<span class="badge">VOD deleted</span>' : ''}
+      </div>
+      <div class="dots">${stageDots(w.stages)}</div>
+      ${w.counts ? `<div class="meta">${w.counts.total} candidates · ${w.counts.approved} approved · ${w.counts.cut} cut</div>` : ''}
+      ${w.active_job ? `<div class="meta running">▶ ${w.active_job.kind} ${w.active_job.status}</div>` : ''}
+      <div class="row">
+        <a class="btn" href="/w/${w.slug}">Open</a>
+        ${w.counts && w.counts.total ? `<a class="btn" href="/w/${w.slug}/review">Review clips</a>` : ''}
+      </div>
+    </article>`;
+}
+
 /* --- byte/rate formatting --- (job panel: download speed + remaining size) */
 function fmtBytes(n) {
   if (n == null) return '—';
@@ -221,9 +255,30 @@ if (doctorBtn) {
       const { checks } = await api('/api/doctor');
       body.innerHTML = '<table class="doctor">' + checks.map(c =>
         `<tr><td>${c.ok ? '✅' : '❌'}</td><td><b>${esc(c.name)}</b></td>
-         <td class="meta">${esc(c.detail)}</td></tr>`).join('') + '</table>';
+         <td class="meta">${esc(c.detail)}</td></tr>`).join('') + '</table>' +
+        // The YouTube checks above are offline (version, JS runtime). Only this
+        // proves extraction actually works, and it asks YouTube, so it's on request.
+        '<div class="row" style="margin-top:10px">' +
+        '<button id="doctor-yt-test" title="Asks YouTube for a public video\'s format list">Test YouTube</button>' +
+        '<span class="meta" id="doctor-yt-result"></span></div>';
+      document.getElementById('doctor-yt-test').addEventListener('click', testYoutube);
     } catch (e) { body.textContent = e.message; }
   });
+}
+
+async function testYoutube() {
+  const btn = document.getElementById('doctor-yt-test');
+  const out = document.getElementById('doctor-yt-result');
+  btn.disabled = true;
+  out.textContent = 'Asking YouTube… (a few seconds)';
+  try {
+    const r = await api('/api/doctor/youtube', 'POST', {});
+    out.innerHTML = `${r.ok ? '✅' : '❌'} ${esc(r.detail)}`;
+  } catch (e) {
+    out.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 api('/api/jobs').then(({ jobs: list }) => {

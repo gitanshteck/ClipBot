@@ -21,7 +21,12 @@
   <!-- ---------- main editing surface ---------- -->
   <div>
     <div id="stage" class="stage-wrap">
+      {% if source.kind == 'youtube' %}
+      {# No video on disk: static/player.js fills this with the embedded YouTube player. #}
+      <div id="c-player" class="yt-frame"></div>
+      {% else %}
       <video id="c-player" preload="metadata" src="/media/{{ slug }}/video"></video>
+      {% endif %}
     </div>
 
     <div class="transport">
@@ -31,6 +36,12 @@
       <span class="time">
         <span id="c-t-now">0:00.0</span><span class="sep"> / </span><span id="c-t-dur">—</span>
       </span>
+      {% if source.kind == 'youtube' %}
+      <a class="btn" target="_blank" rel="noopener"
+         href="https://www.youtube.com/watch?v={{ source.video_id }}"
+         onclick="this.href = player.watchUrl(player.currentTime)"
+         title="Open the video on YouTube at the playhead">↗ YouTube</a>
+      {% endif %}
     </div>
 
     <!-- whole-VOD overview, marked with the open compilation's segments -->
@@ -144,7 +155,7 @@
 
         <div class="row" style="margin-top:10px">
           <button onclick="cSaveCompilation()" id="c-save-btn">Save</button>
-          <button onclick="cRenderCompilation()" id="c-render-btn">▶ Render</button>
+          <button onclick="cRenderCompilation()" id="c-render-btn"{% if source.kind == 'youtube' %} title="Fetches just these segments from YouTube (the video itself is never downloaded), re-encodes them, and joins them"{% endif %}>▶ Render</button>
           <button onclick="cDeleteCompilation()" title="Deletes the rendered file too" style="margin-left:auto">Delete</button>
         </div>
 
@@ -180,9 +191,10 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/player.js?v={{ ASSET_V }}"></script>
 <script src="/static/compile.js?v={{ ASSET_V }}"></script>
 <script>
   document.body.classList.add('compile-page');
-  initCompile({{ slug|tojson }}, {{ pad_start }}, {{ pad_end }});
+  initCompile({{ slug|tojson }}, {{ pad_start }}, {{ pad_end }}, {{ source|tojson }});
 </script>
 {% endblock %}

@@ -1,7 +1,8 @@
 {% extends "base.html" %}
+{% block title %}Kick — ClipBot{% endblock %}
 {% block content %}
 <section class="panel">
-  <h1>Library</h1>
+  <h1>Kick</h1>
   <form id="new-vod" class="row">
     <input type="url" id="vod-url" placeholder="https://kick.com/&lt;channel&gt;/videos/&lt;uuid&gt;" required>
     <span id="quality-picker-slot"></span>
@@ -36,34 +37,17 @@ qualityPicker.value = localStorage.getItem('clipbot.downloadQuality') || '';
 qualityPicker.addEventListener('change', () =>
   localStorage.setItem('clipbot.downloadQuality', qualityPicker.value));
 
-function stageDots(stages) {
-  return stages.map(s => `<span class="dot ${s.done ? 'done' : (s.ready ? 'ready' : 'blocked')}" title="${s.label}${s.blocked ? ' — ' + s.blocked : ''}"></span>`).join('');
-}
-
+// Card markup (and stageDots) live in app.js, shared with the YouTube tab.
 async function loadWorkspaces() {
-  const { workspaces } = await api('/api/workspaces');
+  const { workspaces: all } = await api('/api/workspaces');
+  // This tab is Kick only; YouTube workspaces live on /youtube. A workspace
+  // with no `platform` is Kick (the API defaults it), so nothing existing moves.
+  const workspaces = all.filter(w => w.platform === 'kick');
   if (!workspaces.length) {
-    grid.innerHTML = '<p class="empty">No VODs yet. Paste a Kick URL above to start.</p>';
+    grid.innerHTML = '<p class="empty">No Kick VODs yet. Paste a Kick URL above to start.</p>';
     return;
   }
-  grid.innerHTML = workspaces.map(w => `
-    <article class="card">
-      <h2><a href="/w/${w.slug}">${esc(w.title)}</a></h2>
-      <div class="meta">
-        ${w.duration ? fmtDur(w.duration) : '—'} ·
-        ${w.disk_human}
-        ${w.video_height ? ` · ${w.video_width}×${w.video_height}` : ''}
-        ${w.low_res ? '<span class="badge warn" title="Too low to review clips visually">low-res</span>' : ''}
-        ${w.video_deleted ? '<span class="badge">VOD deleted</span>' : ''}
-      </div>
-      <div class="dots">${stageDots(w.stages)}</div>
-      ${w.counts ? `<div class="meta">${w.counts.total} candidates · ${w.counts.approved} approved · ${w.counts.cut} cut</div>` : ''}
-      ${w.active_job ? `<div class="meta running">▶ ${w.active_job.kind} ${w.active_job.status}</div>` : ''}
-      <div class="row">
-        <a class="btn" href="/w/${w.slug}">Open</a>
-        ${w.counts && w.counts.total ? `<a class="btn" href="/w/${w.slug}/review">Review clips</a>` : ''}
-      </div>
-    </article>`).join('');
+  grid.innerHTML = workspaces.map(workspaceCardHtml).join('');
 }
 
 document.getElementById('new-vod').addEventListener('submit', async (e) => {

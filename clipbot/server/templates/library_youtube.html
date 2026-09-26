@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}YouTube — ClipBot{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>YouTube</h1>
+  <form id="new-vod" class="row">
+    <input type="text" id="vod-url" placeholder="YouTube video link, e.g. https://www.youtube.com/watch?v=… (or just the video id)" required>
+    <button type="submit">Add &amp; run pipeline</button>
+  </form>
+  <p class="hint">
+    Fetches the <b>audio only</b> (roughly 0.3&nbsp;GB for a 4-hour stream), transcribes it and finds clips.
+    The video itself is never downloaded &mdash; review and compilations play it straight from YouTube.
+  </p>
+</section>
+
+<section class="panel">
+  <h1>Browse a channel</h1>
+  <form id="browse-channel" class="row">
+    <input type="text" id="channel-name" placeholder="YouTube handle, e.g. @gitanshteck" required>
+    <button type="submit">Fetch streams</button>
+  </form>
+  <p class="hint" id="browse-hint"></p>
+  <div id="channel-vods" class="grid"></div>
+</section>
+
+<section id="workspaces" class="grid"></section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const grid = document.getElementById('workspaces');
+
+// Card markup (and stageDots) live in app.js, shared with the Kick tab.
+async function loadWorkspaces() {
+  const { workspaces: all } = await api('/api/workspaces');
+  const workspaces = all.filter(w => w.platform === 'youtube');
+  if (!workspaces.length) {
+    grid.innerHTML = '<p class="empty">No YouTube streams yet. Paste a video link above, or browse a channel.</p>';
+    return;
+  }
+  grid.innerHTML = workspaces.map(workspaceCardHtml).join('');
+}
+
+async function addStream(url, button) {
+  if (button) { button.disabled = true; button.textContent = 'Starting…'; }
+  try {
+    // `platform` tells the server this came from the YouTube tab, which is what
+    // lets it accept a bare 11-character video id.
+    const res = await api('/api/workspaces', 'POST', { url, platform: 'youtube' });
+    location.href = '/w/' + res.slug;
+  } catch (err) {
+    alert(err.message);
+    if (button) { button.disabled = false; button.textContent = 'Add'; }
+  }
+}
+
+document.getElementById('new-vod').addEventListener('submit', (e) => {
+  e.preventDefault();
+  addStream(document.getElementById('vod-url').value.trim(), null);
+});
+
+/* ---- browse a channel ---- */
+
+const channelInput = document.getElementById('channel-name');
+const vodGrid = document.getElementById('channel-vods');
+const browseHint = document.getElementById('browse-hint');
+
+function liveBadge(v) {
+  if (v.live_status === 'is_live') return '<span class="badge warn">live now</span>';
+  if (v.live_status === 'is_upcoming') return '<span class="badge">upcoming</span>';
+  if (v.live_status === 'post_live') return '<span class="badge warn" title="YouTube is still processing the archive">processing</span>';
+  return '';
+}
+
+// `refresh` bypasses the server's short cache. Page loads use the cache (a
+// listing spawns yt-dlp and asks YouTube, so it shouldn't happen on every
+// visit); the Fetch button always asks for fresh data.
+async function loadChannelStreams(handle, refresh) {
+  vodGrid.innerHTML = '';
+  browseHint.textContent = 'Fetching… (this asks YouTube, so it can take several seconds)';
+  try {
+    const res = await api('/api/youtube/' + encodeURIComponent(handle) + '/streams' +
+      (refresh ? '?refresh=1' : ''));
+    if (!res.streams.length) {
+      browseHint.textContent = 'No streams found for @' + res.channel + '.';
+      return;
+    }
+    browseHint.textContent = res.streams.length + ' most recent streams on @' + res.channel + ':';
+    vodGrid.innerHTML = res.streams.map(v => {
+      const notReady = v.live_status === 'is_live' || v.live_status === 'is_upcoming';
+      const action = v.workspace_exists
+        ? `<a class="btn" href="/w/${esc(v.slug)}">Open</a>`
+        : `<button class="btn add-stream" data-url="${esc(v.url)}" ${notReady ? 'disabled title="Available once the stream has ended"' : ''}>${notReady ? 'Not ended yet' : 'Add'}</button>`;
+      return `
+      <article class="card">
+        <img src="${esc(v.thumbnail)}" alt="" class="thumb">
+        <h2>${esc(v.title || '(untitled)')}</h2>
+        <div class="meta">
+          ${v.duration_seconds ? fmtDur(v.duration_seconds) : '—'} ${liveBadge(v)}
+        </div>
+        <div class="row">${action}</div>
+      </article>`;
+    }).join('');
+  } catch (err) {
+    // Not an alert(): a broken yt-dlp is the likeliest failure here and its
+    // message says how to fix it, which deserves to stay on screen.
+    browseHint.textContent = err.message;
+  }
+}
+
+document.getElementById('browse-channel').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const handle = channelInput.value.trim().replace(/^@/, '');
+  if (!handle) return;
+  localStorage.setItem('clipbot.lastYoutubeChannel', handle);
+  loadChannelStreams(handle, true);
+});
+
+vodGrid.addEventListener('click', (e) => {
+  const btn = e.target.closest('.add-stream');
+  if (btn) addStream(btn.dataset.url, btn);
+});
+
+const lastHandle = localStorage.getItem('clipbot.lastYoutubeChannel');
+if (lastHandle) {
+  channelInput.value = '@' + lastHandle;
+  loadChannelStreams(lastHandle);
+}
+
+onEvent('workspace', loadWorkspaces);
+onEvent('job', loadWorkspaces);
+loadWorkspaces();
+</script>
+{% endblock %}

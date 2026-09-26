@@ -14,7 +14,7 @@
     </div>
     <div class="row">
       <button onclick="showKeys()" title="Keyboard shortcuts">⌨ Keys</button>
-      <button id="cut-btn" onclick="cutApproved()">Cut approved</button>
+      <button id="cut-btn" onclick="cutApproved()"{% if source.kind == 'youtube' %} title="Fetches just these clips from YouTube (the video itself is never downloaded) and re-encodes them"{% endif %}>Cut approved</button>
     </div>
   </div>
 </section>
@@ -23,8 +23,15 @@
   <!-- ---------- main editing surface ---------- -->
   <div>
     <div id="stage" class="stage-wrap">
+      {% if source.kind == 'youtube' %}
+      {# No video on disk: static/player.js fills this with the embedded YouTube
+         player. No crop layer - that only exists for the reel editor, which needs
+         frames a cross-origin iframe can't give. #}
+      <div id="player" class="yt-frame"></div>
+      {% else %}
       <video id="player" preload="metadata" src="/media/{{ slug }}/video"></video>
       <div id="crop-layer" class="crop-layer"></div>
+      {% endif %}
     </div>
 
     <div class="transport">
@@ -37,6 +44,13 @@
       <span class="time">
         <span id="t-now">0:00.0</span><span class="sep"> / </span><span id="t-dur">—</span>
       </span>
+
+      {% if source.kind == 'youtube' %}
+      <a class="btn" target="_blank" rel="noopener"
+         href="https://www.youtube.com/watch?v={{ source.video_id }}"
+         onclick="this.href = player.watchUrl(player.currentTime)"
+         title="Open the video on YouTube at the playhead">↗ YouTube</a>
+      {% endif %}
 
       <span class="spacer"></span>
 
@@ -90,6 +104,7 @@
       </div>
     </div>
 
+    {% if source.kind != 'youtube' %}{# reels/effects aren't offered for YouTube workspaces #}
     <!-- effects lane: shares the zoom strip's window, so it needs no time
          conversion of its own - effect times are absolute VOD seconds -->
     <div class="tl-block" id="fx-lane-block" hidden>
@@ -104,6 +119,7 @@
       </div>
       <div id="fx-warnings"></div>
     </div>
+    {% endif %}
 
     <!-- in / out editor -->
     <div class="editor2" id="editor" hidden>
@@ -140,6 +156,7 @@
       </div>
     </div>
 
+    {% if source.kind != 'youtube' %}{# the reel editor paints video frames into a canvas #}
     <!-- vertical reel authoring -->
     <div class="editor2 reel-panel" id="reel-panel">
       <h3>
@@ -369,6 +386,7 @@
         </div>
       </div>
     </div>
+    {% endif %}
 
     <!-- transcript -->
     <div class="tx-wrap">
@@ -438,6 +456,7 @@
 
 <div class="toast" id="toast"></div>
 
+{% if source.kind != 'youtube' %}
 <dialog id="fx-library">
   <div class="row" style="align-items:center">
     <h2 style="margin:0">Editing library</h2>
@@ -461,6 +480,7 @@
     starter pack; <span class="mono">library licenses</span> prints where everything came from.
   </div>
 </dialog>
+{% endif %}
 
 <dialog id="comp-picker">
   <h2 style="margin-top:0">Add to compilation</h2>
@@ -529,13 +549,18 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/player.js?v={{ ASSET_V }}"></script>
 <script src="/static/review.js?v={{ ASSET_V }}"></script>
+{% if source.kind != 'youtube' %}
 <script src="/static/reel.js?v={{ ASSET_V }}"></script>
 <script src="/static/fx.js?v={{ ASSET_V }}"></script>
+{% endif %}
 <script>
   document.body.classList.add('review-page');
-  initReview({{ slug|tojson }}, {{ pad_start }}, {{ pad_end }});
+  initReview({{ slug|tojson }}, {{ pad_start }}, {{ pad_end }}, {{ source|tojson }});
+  {% if source.kind != 'youtube' %}
   initReel();
   initFx();
+  {% endif %}
 </script>
 {% endblock %}

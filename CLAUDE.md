@@ -11,14 +11,15 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-08-20.
+> 2026-09-26.
 
 ## What this actually is, right now
 
-ClipBot turns a Kick livestream VOD into reviewed, cut, vertical-ready clips.
-**The README's top banner ("stages 1–2 built... transcription/analysis/cutting
-scaffolded but not implemented") is stale and wrong** — it was never updated
-after the rest of the system was built. The real state:
+ClipBot turns a Kick or YouTube livestream VOD into reviewed, cut clips
+(vertical-ready reels are Kick-only). The README's old top banner ("stages 1–2
+built... transcription/analysis/cutting scaffolded but not implemented") has
+since been corrected, but its pipeline table still lists only the main path.
+The real state:
 
 - All 6 pipeline stages (download, audio, transcribe, analyze, cut, cleanup)
   are fully implemented, plus a chat-harvest stage (1b), an opt-in speaker
@@ -31,11 +32,27 @@ after the rest of the system was built. The real state:
   effect-decorated, and re-rendered as 9:16 reels.
 - There's a cross-stream asset library (`clipbot/library.py`) for sound
   effects, music, stickers, fonts, and saved effect presets.
-- Everything below reflects the code as it stands, not the README banner.
+- **YouTube is a second platform**, built so a stream never has to be
+  downloaded: a YouTube workspace fetches **audio only** (`stages/youtube.py`)
+  and the dashboard plays the **embedded YouTube player** (`static/player.js`)
+  instead of a local `<video>`. Built: the platform model
+  (`clipbot/platforms.py`), audio-only ingest, the Kick | YouTube dashboard
+  tabs, the embedded player on the review and compile pages, and cutting
+  clips / compilation segments **straight from YouTube**
+  (`clipbot/ytsegments.py`: only the requested seconds are fetched, always
+  re-encoded). **Not built**: YouTube chat replay, a full-video download for
+  YouTube, and a stream-copy ("fast") cut/compile mode - measured and
+  deliberately not offered, see the ytsegments.py section. **Reels are a
+  deliberate non-goal for YouTube**:
+  the reel editor paints video frames into a canvas
+  (`static/reel.js`'s `drawReelPreview`), which a cross-origin iframe can never
+  provide, so embed mode doesn't render the reel panel, crop layer or effects
+  lane at all.
+- Everything below reflects the code as it stands, not the README's table.
 
-Rest of the README (setup instructions, the "Transcription", "Analysis",
-"Editing library" sections) **is** accurate and up to date — only the opening
-status line/table is stale.
+The README (setup instructions, the "YouTube", "Transcription", "Analysis",
+"Editing library" sections) is accurate and up to date; only its opening
+pipeline table is incomplete.
 
 ## Core architecture
 
@@ -52,7 +69,13 @@ Dashboard (server/*)  ─┘         ^
 ```
 
 - **`Workspace`** (`clipbot/workspace.py`): one per VOD, rooted at
-  `work/<channel>-<video-id>/`. Owns path properties (`audio_path`,
+  `work/<slug>/` - `<channel>-<video-id>` for Kick, `yt-<lowercased video id>`
+  for YouTube (`platforms.slug_for`). Knows its own `platform` (`state.json`
+  key; absent means Kick, since every workspace that predates YouTube is one),
+  `video_id`, and `source_mode()` - `local` (a video file is on disk),
+  `embed` (YouTube workspace with none), or `none` - **derived from what is on
+  disk, never stored**, the same rule the dashboard's stage list follows. Owns
+  path properties (`audio_path`,
   `transcript_path`, `candidates_path`, `clips_path`, `chat_path`, ...),
   atomic JSON read/write (`write_json`/`read_json`, write-tmp-then-`.replace()`),
   and `state.json` helpers (`read_state`/`update_state`/`mark_stage`/
@@ -88,7 +111,20 @@ clipbot/
                      library {scan,list,presets,licenses,hash,fetch,path})
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
-  workspace.py        Workspace, slug_for_url(), the Kick URL regex
+  workspace.py        Workspace (platform / video_id / source_mode() /
+                     source_audio_path()), slug_for_url() (delegates to platforms.py)
+  platforms.py       parse_url() / slug_for() / platform_of(): recognises Kick and
+                     YouTube video URLs, derives the workspace slug + canonical URL.
+                     The Kick regex lives here verbatim - Kick slugs are directory
+                     names and must never change (tests/test_platforms.py pins them
+                     against a copy of the pre-YouTube implementation)
+  ytdlp.py           run_yt_dlp() / parse_progress_line(): the shared yt-dlp
+                     subprocess runner (byte progress + cancellation), used by
+                     stages/download.py (Kick) and stages/youtube.py
+  ytsegments.py      cutting a time range straight out of a YouTube video:
+                     resolve_streams() / StreamResolver / fetch_segment() -
+                     what cut.py and compile.py use when a workspace has no
+                     video on disk. Read its section below before touching it
   utils.py           logging setup, run_command() subprocess wrapper, slugify(),
                      format_timestamp(), StageError/ToolMissingError
   specerror.py       SpecError(ValueError) — shared by reelspec.py and fxspec.py
@@ -130,7 +166,10 @@ clipbot/
   progress.py        Progress / NULL_PROGRESS — CLI-safe, dashboard-aware progress
                      reporting with cancellation and ETA
   stages/
-    download.py       stage 1  (yt-dlp; kick-dl fallback currently disabled)
+    download.py       stage 1  (Kick: yt-dlp; kick-dl fallback currently disabled)
+                       + acquire(), the platform dispatcher the CLI and jobs call
+    youtube.py        stage 1 for a YouTube workspace: audio-only download,
+                       metadata, channel listing, Doctor health checks
     chat.py            stage 1b (Kick chat REST API harvest)
     audio.py          stage 2  (ffmpeg -vn to 16kHz mono PCM)
     diarize.py         stage 2b (opt-in: pyannote speaker diarization)
@@ -146,9 +185,12 @@ clipbot/
     jobs.py           JobRunner (2 worker lanes) + EventBus (SSE)
     media.py          hand-rolled HTTP Range file serving
     __main__.py       `python -m clipbot.server` entry point (uvicorn)
-    templates/        Jinja2: base.html, library.html, workspace.html, review.html,
-                       compile.html
-    static/           vanilla JS/CSS: app.js, fx.js, reel.js, review.js, compile.js, *.css
+    templates/        Jinja2: base.html (topbar with the Kick | YouTube tabs),
+                       library.html (the Kick tab), library_youtube.html (the
+                       YouTube tab), workspace.html, review.html, compile.html
+    static/           vanilla JS/CSS: app.js, player.js (player adapter: a native
+                       <video> or the embedded YouTube player), fx.js, reel.js,
+                       review.js, compile.js, *.css
                        (ignore the *.bak files sitting alongside — stale, unused)
 
 config/
@@ -170,6 +212,19 @@ tests/
                                 fingerprinting, ffconcat list shape, and
                                 skip-unchanged/force behavior (ffmpeg calls
                                 stubbed - see the stage-by-stage section)
+  test_platforms.py             URL parsing/slugs (Kick slugs pinned against the
+                                pre-YouTube implementation), Workspace platform
+                                + source_mode + source_audio_path
+  test_youtube.py               stages/youtube.py + ytdlp.py + the audio-stage
+                                handoff + acquire() (yt-dlp itself never run,
+                                except a real-subprocess test of the runner)
+  test_youtube_segments.py      ytsegments.py + its use by cut.py/compile.py
+                                (yt-dlp and ffmpeg stubbed): the bounded-request
+                                argv, retry, fingerprints, mixed-source rules
+  test_utils.py                 resolve_tool() incl. values that can't be paths
+  test_player_js.py             runs tests/js/player_adapter.test.js under Node
+                                (skipped without Node); no browser test
+                                infrastructure exists in this repo
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
@@ -195,34 +250,44 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 
 | # | Stage | Module | Produces | Notes |
 |---|-------|--------|----------|-------|
-| 1 | download | `stages/download.py` | `video.<ext>` | yt-dlp + `--impersonate chrome`; kick-dl fallback wired but disabled (non-functional TUI) |
-| 1b | chat | `stages/chat.py` | `chat.json` | Kick REST API, cursor pagination; best-effort, never blocks the rest of `run` |
-| 2 | audio | `stages/audio.py` | `audio.wav` | ffmpeg `-vn`, 16kHz mono PCM |
+| 1 | download (Kick) | `stages/download.py` | `video.<ext>` | yt-dlp + `--impersonate chrome`; kick-dl fallback wired but disabled (non-functional TUI). Reached through `download.acquire()` |
+| 1 | download (YouTube) | `stages/youtube.py` | `source_audio.<ext>` (+ `video.info.json`) | **audio only** - no video is downloaded; the file is deleted once `audio.wav` exists. Needs a current yt-dlp + a JS runtime (see the youtube.py section) |
+| 1b | chat | `stages/chat.py` | `chat.json` | **Kick only** (YouTube has no chat stage yet); Kick REST API, cursor pagination; best-effort, never blocks the rest of `run` |
+| 2 | audio | `stages/audio.py` | `audio.wav` | ffmpeg `-vn`, 16kHz mono PCM; reads `source_audio.*` first (YouTube), then the VOD |
 | 2b | diarize | `stages/diarize.py` | `diarization.json` | pyannote, CPU-only here; opt-in, needs `requirements-diarize.txt` + an HF token, never part of `run` |
 | 3 | transcribe | `stages/transcribe.py` (dispatcher) → `stages/transcribe_openai.py` (default) or local faster-whisper | `transcript.json` | `transcribe.backend` picks OpenAI whisper-1 (default, chunked+parallel, ~$0.36/hour) or local faster-whisper `large-v3`; flags but never drops low-confidence segments either way |
 | 3c | transliterate | `stages/transliterate.py` | `captions.json` | Claude API, batched; Devanagari transcript -> Hinglish (Latin script) for caption overlays; opt-in, never part of `run` |
 | 4 | analyze | `stages/analyze.py` | `candidates.json` | Claude API against the rubric; structural validation only |
-| 5 | cut | `stages/cut.py` | `clips/*.mp4` | ffmpeg copy (default) or re-encode; writes into `clips.json[*].output` |
+| 5 | cut | `stages/cut.py` | `clips/*.mp4` | ffmpeg copy (default) or re-encode; writes into `clips.json[*].output`. A YouTube workspace (no video on disk) is cut straight from YouTube via `ytsegments.py`, always re-encoded |
 | 5b | reel | `stages/reel.py` | `clips/reels/*.mp4` | vertical 9:16 re-encode through the fx/chat/captions/speakers filter graph |
-| 5c | compile | `stages/compile.py` | `clips/compilations/<name>.mp4` | cuts + concatenates a named list of non-contiguous VOD ranges into one landscape supercut; opt-in, never part of `run` |
+| 5c | compile | `stages/compile.py` | `clips/compilations/<name>.mp4` | cuts + concatenates a named list of non-contiguous VOD ranges into one landscape supercut; opt-in, never part of `run`. YouTube segments are fetched straight from YouTube (`ytsegments.py`) |
 | 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel/compilation isn't rendered yet, unless `--force` |
 
 ### download.py
 
+- `acquire(url, ws, settings, force=False, quality=None,
+  progress=NULL_PROGRESS) -> Path` is what `cmd_download`, `cmd_run` and the
+  dashboard's `download`/`pipeline` jobs actually call: a YouTube workspace
+  (`ws.platform == "youtube"`) goes to `stages/youtube.py:fetch_audio`,
+  everything else to `download_vod`. It returns the file
+  `audio.extract_audio(video=...)` should read (`quality` means nothing for
+  YouTube - no video is fetched). The one place the platforms branch, so a
+  third one is one more branch here rather than four scattered ones.
 - `download_vod(url, ws, settings, force=False, quality=None,
   progress=NULL_PROGRESS) -> Path`. Skips if `ws.video_path()` already
   resolves to a file.
 - yt-dlp invocation: `--no-playlist --newline --write-info-json -f
   <resolved format> --progress-template <template> [--http-chunk-size
   <size>] -o <root>/video.%(ext)s --impersonate chrome <url>`, run via
-  `_run_yt_dlp` — a `Popen`-based runner mirroring `ffrun.run_ffmpeg`'s
+  `ytdlp.run_yt_dlp` (lifted out of this module so `stages/youtube.py`
+  shares it) — a `Popen`-based runner mirroring `ffrun.run_ffmpeg`'s
   shape (not `run_command`, which has neither progress nor cancellation).
 - **Real progress + cancellation**, previously missing entirely for this
-  stage (every other stage already had it). `_run_yt_dlp` drives yt-dlp with
+  stage (every other stage already had it). `run_yt_dlp` drives yt-dlp with
   `--progress-template "download:CLIPBOT_PROGRESS
   %(progress.downloaded_bytes)s|%(progress.total_bytes)s|
   %(progress.total_bytes_estimate)s|%(progress.speed)s"` — a private marker
-  prefix so `_parse_progress_line` can pick out machine-readable lines by a
+  prefix so `ytdlp.parse_progress_line` can pick out machine-readable lines by a
   plain `startswith` check rather than regexing yt-dlp's human-readable bar
   (same reasoning `ffrun.py` gives for keying off ffmpeg's `-progress
   pipe:1` output instead of its normal log). Each parsed line calls
@@ -274,9 +339,11 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   per-workspace download-stage quality `<select>`
   (`server/templates/workspace.html`, id `download-quality`, also read by
   the "Run all remaining" pipeline button and forced to `"720"` by the
-  low-res banner's "Re-download at 720p" action) and the library page's
+  low-res banner's "Re-download at 720p" action) and the Kick tab's
   quality picker (`server/templates/library.html`, shared by the "paste a
-  URL" form and every channel-browser "Download" button) — both pickers are
+  URL" form and every channel-browser "Download" button; the YouTube tab and
+  a YouTube workspace's download stage have none, since they fetch audio only)
+  — both pickers are
   rendered by the one shared `qualityPickerHtml()` helper in
   `server/static/app.js`, whose option list is hand-mirrored from
   `QUALITY_CHOICES` (no route exposes that list). Dashboard job options key
@@ -310,6 +377,65 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   `limit=5`) and the dashboard's `GET /api/kick/{channel}/vods` (the
   "browse channel" VOD picker on the library page, so a stream can be
   downloaded by clicking instead of pasting its URL).
+
+### youtube.py (stage 1 for a YouTube workspace)
+
+- A YouTube workspace never needs the video on disk to find clips:
+  transcription and analysis only read `audio.wav`, and the dashboard plays
+  the embedded player. So this stage fetches **audio only** (~0.27 GB for a
+  4.6 h stream, against ~15 GB of 1080p) and the existing
+  `audio.extract_audio(video=<that file>)` turns it into `audio.wav`, which
+  then deletes the source (`drop_source_audio` - only ever the workspace's own
+  `source_audio.*`, never a file a caller passed in;
+  `download.youtube.keep_source_audio` keeps it).
+- `fetch_audio(url, ws, settings, force=False, progress=NULL_PROGRESS) ->
+  Path`. Skips if `source_audio.*` exists. If `audio.wav` already exists (its
+  source since deleted) it returns `audio.wav` itself - safe **only because
+  `force` bypasses that early return**, so a forced re-extract never reads
+  `audio.wav` as its own input (tested). Order: `fetch_metadata` → refuse a
+  stream that is live or scheduled (`LIVE_NOW` = `is_live`/`is_upcoming`;
+  `post_live` only warns that the archive may be incomplete) → `yt-dlp -f
+  <download.youtube.audio_format> -o source_audio.%(ext)s`, then
+  `mark_stage("download", audio_only=True, source_audio=..., bytes=...)`.
+- `fetch_metadata` runs `--skip-download --write-info-json`, which writes
+  `video.info.json` - the name Kick's download also writes, so the dashboard's
+  title fallback works for both - and records `title`, `uploader` (channel
+  beats uploader), `upload_date`, `stream_started_at` (release_timestamp beats
+  timestamp), `youtube_duration`, `youtube_channel_id`, `youtube_live_status`.
+  `youtube_duration` only *seeds* `duration` when it is absent; the audio
+  probe stays the owner (the same rule as Kick's `kick_duration`). A cached
+  info.json is reused only if it doesn't describe a live/post-live stream, or
+  a stale `is_live` would block the audio fetch forever.
+- yt-dlp flags: **none of Kick's** - `--impersonate` and `--http-chunk-size`
+  are Cloudflare/throttle workarounds that don't apply, and a test pins their
+  absence even when `download.impersonate` is configured. Only when
+  configured: `--js-runtimes`, `--cookies-from-browser`, `--extractor-args
+  youtube:player_client=` (`_common_flags`). Progress and Cancel come from the
+  shared `ytdlp.run_yt_dlp`.
+- **Environment (measured 2026-09-26)**: the yt-dlp on this machine's PATH
+  was 2025.10.14 under Python 3.9, and it fails at format selection ("The page
+  needs to be reloaded", plus a "YouTube is forcing SABR streaming" warning)
+  while metadata and channel listing still work. Current yt-dlp (2026.08.19)
+  needs Python 3.10+ and an external JavaScript runtime - Deno 2.3+ by default,
+  or Node 22+ via `download.youtube.js_runtime` (this machine has Node 20.19
+  and no Deno). ClipBot only shells out to the yt-dlp binary, so the fix is a
+  separate install pointed at via `CLIPBOT_YT_DLP`, not a project Python
+  upgrade. `explain_failure(text)` turns the recognisable failures (bot check,
+  missing formats / JS runtime, private or members-only, unavailable) into what
+  to do, and `_run` appends it to the `StageError`.
+- `list_channel_streams(handle, settings, limit=20, timeout=120)`: `yt-dlp
+  --flat-playlist -J https://www.youtube.com/@<handle>/streams` (no API key,
+  no quota; handle validated against `^[A-Za-z0-9._-]{1,60}$`).
+  **Measured**: the flat listing returns only id/title/url/thumbnails -
+  `duration`, `live_status` and `view_count` come back null - so the channel
+  browser shows a dash for length and cannot badge a live stream; a live
+  stream is refused at fetch time instead. Thumbnails are built from
+  `i.ytimg.com/vi/<id>/mqdefault.jpg` rather than taken from the listing.
+- Doctor: `health_checks(settings)` is offline (yt-dlp version + age, stale
+  past `STALE_YT_DLP_DAYS = 90`; JS runtime version against `MIN_DENO` /
+  `MIN_NODE`), and `probe_youtube(settings)` runs `yt-dlp -F` on
+  `download.youtube.probe_url` - the one check that proves extraction works end
+  to end, so it runs on request only (`POST /api/doctor/youtube`).
 
 ### chat.py (stage 1b)
 
@@ -350,6 +476,14 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 - `extract_audio(ws, settings, force=False, video=None) -> Path`. ffmpeg
   `-vn -sn -dn -ac 1 -ar 16000 -c:a pcm_s16le` → `audio.wav`. 16kHz mono PCM
   is chosen because that's what Whisper resamples to internally anyway.
+  The source is, in order: an explicit `video`, `ws.source_audio_path()` (a
+  YouTube workspace's audio-only download), then `ws.video_path()`; a Kick
+  workspace has no `source_audio.*`, so for it this resolves exactly as it
+  always did. After a successful extraction it calls
+  `youtube.drop_source_audio`, so the audio download is deleted once
+  `audio.wav` exists (never a caller-supplied file). A YouTube workspace with
+  neither source raises a "run Fetch audio" `StageError` rather than the Kick
+  cleanup-stage message.
 - `probe_duration()` (ffprobe) sets `state.duration` — **the only duration
   value ever trusted downstream** for clip range clamping.
 - `trim_audio(source, out_path, seconds, settings, start=0.0)` — stream-copy
@@ -709,7 +843,22 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   encode-or-copy`) — **known limitation**: it does not include `crf`, so
   changing `cut.crf` alone will not trigger a re-cut of existing clips.
   (Contrast with `reel.py`, which fingerprints the actual built argv — see
-  below.)
+  below.) For a YouTube cut a `source_tag` (`StreamResolver.tag()`, i.e.
+  `yt:<video id>:<format ids>`) is appended as a fifth field **only when
+  given**, so a Kick clip's fingerprint stays byte-identical (pinned in
+  `test_youtube_segments.py`) and a YouTube clip is re-cut when the best
+  format changes (HD finishing processing).
+- **YouTube workspaces** (no video on disk, `ws.source_mode() == MODE_EMBED`):
+  instead of raising the "No video" error, `cut_clips` builds a
+  `ytsegments.StreamResolver` and fetches each clip's padded range with
+  `ytsegments.fetch_segment` - only those seconds cross the network. **Always
+  re-encoded**, whatever `cut.re_encode` says (a stream copy from two separate
+  remote inputs has no clean start, see the ytsegments.py section), with
+  `cut.encoder`/`cut.preset`/`cut.crf`; `output.re_encode` is recorded `true`.
+  Per-clip ffmpeg log: `logs/cut-<clip id>.log`. A Kick workspace whose video
+  was deleted still gets the original error. Reached from `clipbot cut`,
+  `clipbot run --cut-all`, and the dashboard's `cut` job (review page "Cut
+  approved", workspace page "Fetch approved clips").
 - On a per-clip ffmpeg failure, sets that clip's `status = "failed"` and
   `notes` (truncated to 500 chars) rather than aborting the whole run.
 - Output written to `clips.json[*].output`: `{file, bytes, duration, cut_at,
@@ -880,6 +1029,28 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   every resolved segment range + the encode/padding settings
   (`_compilation_fingerprint`) — self-maintaining the same way reel.py's
   argv hash is, rather than a hand-listed field tuple like cut.py's.
+- **YouTube segments** (a source workspace with no video on disk,
+  `source_mode() == MODE_EMBED`): `render_compilation` resolves each segment
+  to either a local video `Path` (the code path and fingerprints above,
+  unchanged) or a per-workspace `ytsegments.StreamResolver` (one per YouTube
+  workspace named, created lazily), and fetches the remote ones with
+  `ytsegments.fetch_segment` into the **same scratch directory** with the same
+  `compile.encoder`/`preset`/`crf` - so the concat join, the skip-unchanged
+  cache and the output record are shared with the local path. Re-render
+  behaviour matches local: an unchanged compilation fetches nothing, adding a
+  segment fetches only the new one. Both fingerprints take a YouTube tag
+  (`_segment_fingerprint(..., source_tag)` / `_compilation_fingerprint(...,
+  source_tags)`, appended **only when non-empty** - the golden values
+  `c6d4e66d6c86` / `451ae5be992115f2` in `test_youtube_segments.py` pin that
+  local ones did not move), so a better resolution of the same video (HD
+  finishing processing) redoes the affected segments.
+  `_check_youtube_sources(resolved, resolvers)` runs before anything is
+  fetched and refuses **(a)** a compilation mixing YouTube and local segments
+  and **(b)** YouTube segments whose videos differ in width/height/fps - the
+  join is a stream copy of independently encoded pieces and this stage has no
+  scale/fps normalisation. Several YouTube videos with identical shape are
+  allowed. Per-segment ffmpeg logs, as for local segments:
+  `logs/compile-<name>-<NNN>.log`.
 - Output recorded via `compilations.set_output`: `{file, bytes, duration
   (sum of padded segment spans — exact, since the join is a lossless
   stream copy), rendered_at, fingerprint}`, at
@@ -925,6 +1096,84 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   differs from the page's own gets a "from `<slug>`" badge in the segment
   list and its ✎ edit button disabled (tooltip points at the CLI) — ✕
   remove, Save, and Render all still work on the full mixed list.
+
+### ytsegments.py (cutting straight from YouTube, used by stages 5 and 5c)
+
+- `fetch_segment(resolver, start, end, out_path, settings, encoder, preset,
+  crf, progress=NULL_PROGRESS, base=0.0, span=1.0, log_path=None, label=None)
+  -> None` cuts `[start, end]` (seconds on the video's own clock) out of a
+  YouTube video into `out_path`, **re-encoded**. Only the requested seconds
+  cross the network. Raises `StageError` on failure without leaving a partial
+  file; `JobCancelled` propagates untouched (the caller unlinks, as cut and
+  compile already do for local cuts). `base`/`span` place this segment's 0..1
+  encode progress inside the caller's phase total, the same arguments
+  `ffrun.run_ffmpeg` takes.
+- **Why not `yt-dlp --download-sections`** (measured 2026-09-26, yt-dlp
+  2026.08.19, ffmpeg 8.1.2): it sat at 0 % CPU for over five minutes on a
+  30-second section. yt-dlp hands ffmpeg a googlevideo URL, and ffmpeg's http
+  protocol opens ONE unbounded range (`Range: bytes=0-`) by default; to seek it
+  "soft-seeks" by draining the rest of that response, and googlevideo throttles
+  unbounded ranges to ~31 KB/s (bounded requests ran at 4-12 MB/s, even 15 MB
+  into the file). `-request_size N -multiple_requests 1` on every input makes
+  each request bounded: the same seeks then took 0.4 s (audio) and 1.2 s (video,
+  1000 s in). yt-dlp's section download passes neither, so this module uses
+  yt-dlp only to resolve the URLs and drives ffmpeg itself.
+- `resolve_streams(url, settings, timeout=180) -> Streams`: one `yt-dlp -J -f
+  <segment format> <url>` (through `youtube_stage.base_argv`, so the configured
+  JS runtime / cookies / player client apply) returning `Streams(video_url,
+  audio_url, headers, width, height, fps, expires_at, format_ids)` - a
+  video-only and an audio-only URL, or `audio_url=None` when yt-dlp picked one
+  muxed format. `DEFAULT_SEGMENT_FORMAT` (override `download.youtube.
+  segment_format`) is **progressive-https only** - HLS/DASH-manifest formats
+  can't be range-read this way - preferring H.264 + AAC up to 1080p; a
+  non-http protocol raises a `StageError` explaining that a stream that has
+  only just ended is still being processed. Measured: the 2026.08.19 `visionos`
+  client returns exactly such progressive https formats.
+- `StreamResolver(ws, settings)`: one per cut/compile job (and per YouTube
+  workspace a compile names). Reads `url`/`video_id` from `state.json`.
+  `get(refresh=False)` resolves lazily, caches, and re-resolves when the URLs
+  have under `REFRESH_MARGIN_SECONDS` (600) left or on `refresh=True` -
+  googlevideo URLs carry `expire=` (~6 h) and are bound to the requester's IP.
+  `tag()` = `yt:<video_id>:<format_ids>`, the fingerprint tag cut.py and
+  compile.py append.
+- `segment_argv(binary, streams, start, end, out_path, encoder, preset, crf,
+  size, audio_bitrate="160k")`: per input `-request_size N -multiple_requests 1
+  [-user_agent ..] [-headers ..] -ss <start> -i <url>` (each input seeked
+  independently, `-ss` before its own `-i` so it is a range seek), `-map 0:v:0
+  -map 1:a:0` (`0:a:0` for a muxed URL), `-t <span>`, encoder/preset/crf,
+  `-pix_fmt yuv420p` (a 10-bit VP9/AV1 source would otherwise come out as High10
+  H.264, which browsers and Instagram won't play), aac 160k, `+faststart`. All
+  `-i` come before `-t`.
+- `request_size(settings)`: `download.youtube.request_size` (default 1 MiB)
+  **clamped to [64 KiB, 8 MiB]** - 16 MiB requests were measured throttled to a
+  crawl again and 1 MiB was fastest, so a mistyped setting can't recreate the
+  hang.
+- `fetch_segment` retries **once**, with freshly resolved URLs, when ffmpeg's
+  error looks like a rejected or expired URL (`_REJECTED_MARKERS`: 403,
+  forbidden, 404 not found, 410 gone, "server returned 4"); anything else is
+  not retried. `-request_size` **first shipped in ffmpeg 8.1** - absent from
+  7.0, 7.1 and 8.0 (checked against `libavformat/http.c` and
+  `doc/protocols.texi` at each tag, and against the 8.1.2 binary here), where
+  FFmpeg's own docs describe it as for servers that "throttle unbounded range
+  requests" - so an older build fails at once on the unknown option and
+  `_explain` turns that into an explicit "too old" message.
+  `ffmpeg_supports_request_size(settings) -> Optional[bool]` (`ffmpeg -h
+  protocol=https`; `None` if ffmpeg can't be run) feeds the Doctor's "ffmpeg
+  -request_size (YouTube clips)" row.
+- **Always re-encoded: a stream-copy ("fast") mode was measured and
+  deliberately not built.** On the real 720p30 test video keyframes were 3.7-7 s
+  apart, a copy carried hidden pre-roll frames and edit lists that surfaced as
+  dts collisions at concat seams, video and audio (separate inputs seeked
+  independently) gave a silent lead-in, and ffmpeg backs `-ss` off ~0.13 s on
+  B-frame streams. Re-encoding is frame-exact, needs nothing special for two
+  inputs, and joined cleanly (monotonic DTS at the seams, exact durations).
+  Measured speed: ~9-10x realtime with x264 `slow` crf 18 - eight 62.5 s
+  segments compiled in 45.8 s. **That was a 720p30 talking-head video; 1080p60
+  game footage will be slower**, so don't quote those numbers for it without
+  measuring.
+- If YouTube ever stops serving progressive-https formats to yt-dlp,
+  `resolve_streams` fails and there is no fallback: the full-video download
+  escape hatch the original plan sketched was not built.
 
 ## Spec modules (pure math, no IO)
 
@@ -1182,14 +1431,27 @@ error message instead of a silent no-op or a 500.
 - `get_workspace(slug)` validates against `SLUG_RE = ^[a-z0-9._-]{1,120}$`,
   rejects slugs starting with `_` (reserved for `_cache`/`_library`), and
   confirms the resolved path doesn't escape `work_root` (path traversal guard).
-- Route groups (see `app.py` for the full list): pages (`/`, `/w/{slug}`,
-  `/w/{slug}/review`, `/w/{slug}/compile`); channel browsing (`GET
+- Route groups (see `app.py` for the full list): pages (`/` - a redirect to
+  the platform tab you used last, via the `clipbot_platform` cookie the two
+  library pages set, YouTube on a first visit; `/kick`; `/youtube`;
+  `/w/{slug}`, `/w/{slug}/review`, `/w/{slug}/compile`); channel browsing (`GET
   /api/kick/{channel}/vods` — wraps `download_stage.list_channel_vods`,
   stamping each result with `slug`/`workspace_exists` via `slug_for_url` so
   the library page's "Browse a channel" picker can show "Open" instead of
   "Download" for a VOD already pulled down; backs clicking a listed VOD
   straight into a `POST /api/workspaces` instead of requiring its URL to be
-  pasted in); workspaces (`GET/POST /api/workspaces`); clips (`GET/POST
+  pasted in; and `GET /api/youtube/{handle}/streams` — wraps
+  `youtube_stage.list_channel_streams` in a worker thread, stamps the same
+  `slug`/`workspace_exists`, caches per `(handle, limit)` for 10 minutes unless
+  `refresh=1` (a listing spawns yt-dlp and asks YouTube, and repeated automated
+  requests are what bot checks look for), and answers 502 with the actionable
+  message when yt-dlp fails); workspaces (`GET/POST /api/workspaces` — `POST`
+  takes a Kick or YouTube URL through `platforms.parse_url` (400 with a useful
+  message for a YouTube channel/playlist/Short; a bare 11-character video id is
+  accepted only when the body says `platform: "youtube"`, since it is otherwise
+  ambiguous), stores the canonical URL and submits a `pipeline` job; a kick.com
+  URL the slug regex doesn't recognise keeps the route's old leniency; `GET`
+  entries carry `platform`, `source_mode` and `video_id`); clips (`GET/POST
   /api/workspaces/{slug}/clips`,
   **`PATCH .../clips/{clip_id}`**
   — this is the route `specerror.py` references: it catches `KeyError` →
@@ -1223,7 +1485,13 @@ error message instead of a silent no-op or a 500.
   (`POST .../jobs`, `GET /api/jobs`, cancel — `kind: "compile"` takes a
   `name`, same shape as `kind: "reel"` taking `clip_ids`); `GET /api/doctor`
   (diagnostics: tool resolvability, API key presence, CUDA device count,
-  free disk, Python version); media (video/clip/reel/**compilation**
+  free disk, Python version, plus `youtube_stage.health_checks` - yt-dlp
+  version/age and the JS runtime - run in a worker thread since they shell
+  out; `POST /api/doctor/youtube` is the on-request network probe, and the
+  Doctor dialog's "Test YouTube" button calls it; an "ffmpeg -request_size
+  (YouTube clips)" row from `ytsegments.ffmpeg_supports_request_size` fails on
+  an ffmpeg older than 8.1, and is omitted when ffmpeg can't be run at all);
+  media (video/clip/reel/**compilation**
   serving with `?download=1`, manifest CSV download — a compilation's file
   is always `<name>.mp4`, so the name doubles as the lookup key, no
   `compilations.json` read needed on the media route); and `GET
@@ -1233,9 +1501,67 @@ error message instead of a silent no-op or a 500.
 - `external_activity(ws)` detects a **CLI-driven** job the dashboard didn't
   start itself: partial download files (`.part`/`.ytdl`), or (Windows-only)
   a `wmic process ... get commandline` scan matching `clipbot` + the
-  workspace's video id/slug for one of `transcribe`/`analyze`/`cut`/
+  workspace's video id/slug (case-insensitively - YouTube ids are
+  case-sensitive but slugs are lowercased - using `state.video_id` when
+  recorded) for one of `transcribe`/`analyze`/`cut`/
   `audio`/`download`/`compile`/`run` — needed for stages like transcribe
   (and compile) that write no partial file to detect otherwise.
+- **Platform tabs**: `base.html`'s topbar carries a Kick | YouTube tab strip;
+  every page passes `platform` so the tab you're inside stays lit (the library
+  pages from their route, workspace pages from `ws.platform`). `library.html`
+  is the Kick tab and `library_youtube.html` the YouTube tab (paste a link or
+  id, browse a channel by handle, a grid of that platform's workspaces); each
+  filters `GET /api/workspaces` by `platform` and both render cards through the
+  shared `workspaceCardHtml()`/`stageDots()` in `app.js`. A workspace with no
+  `platform` is Kick, so nothing existing moves tabs.
+- **`stage_states(ws)` is platform-aware**: a YouTube workspace gets Fetch
+  audio → Extract audio → Transcribe → Find clips → (Hinglish captions,
+  Speaker diarization) → "Fetch approved clips" (the `cut` job, ready once at
+  least one clip is approved, done when the `cut` stage is marked) and *no*
+  chat/reel/cleanup rows - nothing gates on `has_video`. Kick's ten-stage list
+  is unchanged. `workspace.html` hides the Kick-only quality picker for
+  YouTube, says the video plays from YouTube, and words the empty clip list as
+  "No clips fetched yet...".
+- **Player source**: `page_review`/`page_compile` pass `_player_source(ws)`
+  into the template - `{"kind": "youtube", "video_id", "duration"}` when
+  `ws.source_mode() == "embed"`, else `{"kind": "local"}` (which is also a Kick
+  workspace whose VOD was deleted, so it keeps its old "no video" message). In
+  embed mode the templates render a `div.yt-frame` instead of the `<video>`,
+  skip the reel panel / crop layer / effects lane / FX-library dialog, don't
+  load `reel.js`/`fx.js` at all (review.js already guards its two calls into
+  them with `window.X` checks), and add a "↗ YouTube" link that opens the
+  video at the playhead. "Cut approved" and the compile page's Render stay
+  enabled - they run the same `cut`/`compile` jobs, which fetch just those
+  seconds from YouTube (`ytsegments.py`); only a tooltip says so.
+- **`static/player.js`** is the adapter behind that: `createPlayer(el,
+  source)` returns the native `<video>` untouched for `local` (so Kick pages
+  are unchanged and never load any third-party script), and a `YouTubePlayer`
+  for `youtube` with the same surface review.js/compile.js already use
+  (`currentTime` get/set, `duration`, `paused`, `playbackRate`, `hidden`,
+  `play()`, `pause()`, `addEventListener` for `loadedmetadata`/`timeupdate`/
+  `play`/`pause`/`error`, plus `errorMessage` and `watchUrl(t)`). Behaviours
+  worth knowing, each measured against the real player: there is no
+  `timeupdate` event, so it polls `getCurrentTime()` every 200 ms; a
+  transparent **click shield** over the iframe keeps keyboard focus in the
+  page (a cross-origin iframe would swallow space/I/O/[ ] the moment you
+  clicked the video) and toggles play/pause; **until the first play YouTube
+  remembers only the latest `seekTo` and `getCurrentTime()` stays stale**, so
+  seeks made before the first play are held in `_pendingSeek` and applied by
+  `play()`; `seekTo` from an **ended** video restarts playback, so a seek while
+  not playing is followed by `pauseVideo()` (from plain paused it does not
+  restart); a just-issued seek is trusted over the polled time for 500 ms; the
+  iframe carries an explicit `referrerpolicy="strict-origin-when-cross-origin"`
+  (an embed with no Referer answers error 153); `duration` is the workspace's
+  audio-probed length (the clock the transcript lives on) with YouTube's own
+  figure only as a fallback, and `loadedmetadata` fires straight away from it
+  so the timelines and transcript still work when the player itself is broken.
+  API errors 101/150 (embedding disabled) and 153 map to messages saying what
+  to change. The API script (`youtube.com/iframe_api`) is loaded only when a
+  `youtube` player is created - a third-party script in an unauthenticated
+  dashboard origin never runs on a Kick/local page. A frame-step
+  (`step(1/30)`) turned out to be frame-accurate on the test video.
+  `tests/js/player_adapter.test.js` pins all of this against a fake
+  `YT.Player`.
 
 ### jobs.py — JobRunner / EventBus
 
@@ -1308,12 +1634,34 @@ Sections and the values worth knowing without opening the file:
 
 - **`tools`** — `ffmpeg`/`ffprobe` point at the **vendored** local build
   (`ffmpeg-2026-07-30-git-.../bin/`) because ffmpeg isn't on this machine's
-  PATH; relative paths resolve against the project root.
+  PATH; relative paths resolve against the project root. (The vendored build is
+  gitignored, so a fresh git worktree doesn't have it - set `CLIPBOT_FFMPEG`
+  there.) `yt_dlp` is a bare `yt-dlp`; the one on this machine's PATH can't do
+  YouTube, so YouTube work needs `CLIPBOT_YT_DLP` pointed at a current install
+  (see the youtube.py section).
 - **`download`** — `format` pins `height<=720` explicitly ("best" once
   silently returned 160p); `fallback_to_kick_dl: false` (see above);
   `http_chunk_size: "10M"` (yt-dlp bandwidth-throttling-bypass flag,
   sequential only in the installed yt-dlp version — see download.py's
-  section for what's actually been measured; `null` omits the flag).
+  section for what's actually been measured; `null` omits the flag). All of
+  this - `format`, `impersonate`, `http_chunk_size`, `min_height_warn` - is
+  Kick-only; nothing in it is applied to YouTube. Nested **`youtube.*`**
+  (`stages/youtube.py`, all optional): `audio_format` (`"bestaudio/best"`),
+  `keep_source_audio` (`false`: `audio.wav` is the artifact everything reads, so
+  the audio download is deleted after extraction), `cookies_from_browser`
+  (`null`; set to a browser name if YouTube demands a bot check - Firefox avoids
+  Chrome's locked cookie database), `player_client` (`null`; a yt-dlp
+  `youtube:player_client` override for when one client breaks), `js_runtime`
+  (`null` = yt-dlp's default, deno; `"node"` or `"node:<path>"` selects Node
+  22+), `probe_url` (the public video the Doctor's "Test YouTube" asks about),
+  `segment_format` (`null` = `ytsegments.DEFAULT_SEGMENT_FORMAT`, the
+  progressive-https H.264+AAC selector up to 1080p that cutting clips straight
+  from YouTube resolves - override only with another progressive-https
+  selector), `request_size` (`1048576`: the bounded HTTP request size ffmpeg
+  uses against googlevideo, clamped to 64 KiB-8 MiB in code because a larger
+  value was measured to throttle to a crawl). The re-encode quality of those
+  clips/segments comes from `cut.encoder`/`preset`/`crf` and `compile.*`, not
+  from this block.
 - **`chat`** — bot list matched on `sender.slug`, lowercase; full
   `chatrender` style block (fonts, sizes, colors) lives here too.
 - **`transcribe`** — `backend: "openai"` (default; `"local"` selects
@@ -1407,8 +1755,57 @@ Sections and the values worth knowing without opening the file:
   and raising a clear error for a segment naming a workspace with no video,
   and `unrendered_compilations_elsewhere` blocking one workspace's cleanup
   on an unrendered compilation homed in another.
+- `tests/test_platforms.py` — the **Kick-slug oracle**: `slug_for_url` must
+  agree with a verbatim copy of the pre-YouTube implementation on every
+  non-YouTube input (Kick URL shapes plus generic fall-through URLs), plus
+  literal golden slugs so a drifting oracle can't hide a drifting slug; every
+  YouTube URL shape yielding one id, case preserved in `video_id` but lowercase
+  in the slug (and hyphen runs kept, which `slugify` would collapse),
+  channel/playlist/Short URLs raising a useful `ValueError`, the bare-id opt-in
+  (an 11-character Kick channel name must never parse as a video id),
+  `Workspace.for_url` recording platform/video id/canonical URL,
+  `source_mode()`, and `source_audio_path()` ignoring yt-dlp scratch files.
+- `tests/test_youtube.py` — yt-dlp is never run except in `TestRunYtDlp`,
+  which drives a real subprocess (this Python) to prove progress parsing, the
+  new-phase-on-reset behaviour and cancellation. Everything else stubs
+  `run_yt_dlp` to write the files a real run would: argv shape (no Kick flags,
+  optional flags only when configured), the skip/force rules (including
+  "`force` never hands back `audio.wav`"), the live-stream refusal, failure
+  hints, `drop_source_audio` never deleting a caller's file, the audio-stage
+  handoff and `acquire()` routing, channel-listing parsing/validation, and the
+  Doctor's version/JS-runtime checks. Mutation-checked: dropping the early
+  return, the ownership check, or leaking `--impersonate` each fail a test.
+- `tests/test_youtube_segments.py` — neither yt-dlp nor ffmpeg is run: both are
+  stubbed. `_streams_from_info` (video+audio, muxed, segmented/missing streams
+  refused), `request_size` clamping, the `segment_argv` shape (bounded requests
+  and `-ss` before **each** input, maps, all `-i` before `-t`, CRLF-joined
+  `-headers` with the user agent passed separately),
+  `resolve_streams`, `StreamResolver` (lazy, one resolution, re-resolve near
+  expiry, tag), `fetch_segment` (one retry on a rejected URL and no more,
+  cancel propagation without a retry, old-ffmpeg message), then the real
+  `cut_clips`/`render_compilation` against a YouTube workspace with only
+  `fetch_segment` stubbed (records the clip, skip-unchanged vs `force`, a
+  better resolution re-cuts, a failed clip is marked while the rest still cut,
+  cancel removes the partial file, mixed YouTube/local and differently shaped
+  videos refused). The **fingerprint invariants** live here: a Kick clip's cut
+  fingerprint string and the local compile fingerprints (against a verbatim copy
+  of the old implementation plus golden values) must not move, and a Kick
+  workspace without a video keeps the original "No video" error. The existing
+  `test_compile.py` passes unmodified alongside it.
+- `tests/test_utils.py` — `resolve_tool`: a value that can't be a path (stray
+  quote or control character in `CLIPBOT_YT_DLP`, which raises `OSError` from
+  `Path.is_file()` on Windows) reads as "not found" with its hint, never a
+  traceback or a dashboard 500; wrapping quotes/whitespace are stripped.
+- `tests/test_player_js.py` + `tests/js/player_adapter.test.js` — the only JS
+  tests in the repo: a dependency-free Node script drives `static/player.js`
+  against a fake `YT.Player` that models the measured YouTube behaviours
+  (stale time before first play, seek-from-ended restarts, no timeupdate).
+  Skipped without Node. Mutation-checked for the pending-seek path, the stale
+  tick guard, the pause-after-seek, and the referrer policy.
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
+  `tests/` is not a package, so `python -m unittest tests.test_x` fails; pass
+  `-p test_x.py` to `discover` to run one file.
 
 ## Cross-cutting invariants worth knowing before you touch things
 
@@ -1430,8 +1827,37 @@ Sections and the values worth knowing without opening the file:
 - **`-ss` goes before `-i` for stream-copy cuts**; an output seek silently
   decodes everything before the cut point.
 - **Never read `state.duration` from anything but the audio-stage probe.**
-  `kick_duration` from yt-dlp metadata is informational only and is never
-  allowed to overwrite it.
+  `kick_duration` (and, for YouTube, `youtube_duration`) from yt-dlp metadata
+  is informational only and is never allowed to overwrite it - it may only
+  seed `duration` while none has been probed yet.
+- **Kick slugs are directory names and must never change.**
+  `platforms.slug_for` reproduces the pre-YouTube `slug_for_url` byte for byte
+  for Kick, and `tests/test_platforms.py` compares it to a copy of the old
+  code. A YouTube slug is `yt-<lowercased id>`, but the id is case-sensitive:
+  the true one lives in `state.json` (`video_id`) and must never be re-derived
+  from the slug.
+- **A workspace's platform is `state["platform"]`, and absent means Kick.**
+  `Workspace.source_mode()` (`local`/`embed`/`none`) is derived from what is on
+  disk, never stored, so it can't drift from reality.
+- **Kick's yt-dlp workarounds (`--impersonate`, `--http-chunk-size`) are never
+  applied to YouTube**, and YouTube's are never applied to Kick.
+- **Local fingerprints must stay byte-identical when YouTube support is
+  involved.** `cut._fingerprint`, `compile._segment_fingerprint` and
+  `compile._compilation_fingerprint` append a YouTube tag only when one is
+  given; a Kick/local clip's or segment's fingerprint (and every scratch file
+  cached under it) is unchanged, so no existing render is redone. Pinned by
+  golden values plus a verbatim copy of the old code in
+  `test_youtube_segments.py` - the same discipline as the reel filter graph.
+- **Segments cut from YouTube are always re-encoded, and ffmpeg always gets
+  bounded requests** (`-request_size N -multiple_requests 1`, N clamped to
+  64 KiB-8 MiB). Without them googlevideo throttles the read to ~31 KB/s and a
+  cut appears to hang; a stream-copy mode was measured and rejected (see the
+  ytsegments.py section) - don't add one without re-measuring keyframe spacing,
+  audio lead-in and dts at the concat seams.
+- **The YouTube IFrame API script only ever loads on an embed-mode page.** The
+  dashboard has no auth and a third-party script in its origin can call every
+  mutating route, so it must never run on a Kick/local page (`createPlayer`
+  returns the native `<video>` untouched for those).
 - **`ANTHROPIC_API_KEY` must be set** for `analyze` and `transliterate`;
   there's no fallback path for either.
 - **`diarize` needs both `requirements-diarize.txt` installed and an HF
@@ -1450,6 +1876,9 @@ Sections and the values worth knowing without opening the file:
   change, not a routine one.
 - **Python 3.9 is the floor** (`requirements-server.txt`'s version ceilings
   exist solely to stay 3.9-compatible); 3.10+ is recommended but not required.
+  (Current yt-dlp itself needs 3.10+ for YouTube, but ClipBot only shells out
+  to its binary, so that never raises this project's floor - see the
+  youtube.py section.)
 
 ## Quick index — "I want to..."
 
@@ -1483,6 +1912,30 @@ Sections and the values worth knowing without opening the file:
   workspace data, compute the fingerprint-relevant signature if the layer
   isn't self-maintaining via the argv hash (see `speakerfx`'s docstring for
   when it is), and pass the resolved plan through `build_argv`.
+- ...add support for another streaming platform → `clipbot/platforms.py`
+  (URL parsing + slug) + a branch in `download.acquire` + a stage module like
+  `stages/youtube.py` + a platform branch in `server/app.py`'s `stage_states`
+  and `_player_source` + a library tab (`base.html`, a `library_*.html`) +
+  whatever player `static/player.js`'s `createPlayer` should return. Pin the new
+  slug shape in `tests/test_platforms.py`.
+- ...work on the embedded YouTube player → `clipbot/server/static/player.js`
+  and its Node tests (`tests/js/player_adapter.test.js`, run via
+  `tests/test_player_js.py`); check any new YouTube behaviour against the real
+  player first, as the file's header does - several things it handles were
+  not what the docs suggest.
+- ...cut clips or compile segments from a YouTube video without downloading
+  it → already wired: `cut_clips`/`render_compilation` call
+  `ytsegments.fetch_segment` for a workspace with no video on disk. Change how
+  a range is fetched in `clipbot/ytsegments.py` (read its section first: the
+  bounded-request options are the difference between ~1 s and a hang), and keep
+  the local fingerprints byte-identical.
+- ...diagnose "YouTube doesn't work" → the dashboard's Doctor dialog
+  (`youtube_stage.health_checks` + the "Test YouTube" button →
+  `probe_youtube`, plus the "ffmpeg -request_size" row for clip fetching), then
+  `explain_failure()`'s hints; the raw yt-dlp output is in
+  `work/<slug>/logs/youtube-metadata.log` and `download.log`, and a clip or
+  segment fetch's ffmpeg output in `logs/cut-<clip id>.log` /
+  `logs/compile-<name>-<NNN>.log`.
 - ...understand a workspace's on-disk state → `clipbot/workspace.py`'s path
   properties are the authoritative list; `state.json`'s `stages` dict says
   what's been completed.

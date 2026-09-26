@@ -10,8 +10,15 @@
 <body class="{% block bodyclass %}{% endblock %}">
   <header class="topbar">
     <a class="brand" href="/">✂️ ClipBot</a>
+    {# One library per platform. `platform` is passed by every page (the
+       library pages from their route, workspace pages from the workspace) so
+       the tab you're "inside" stays lit. #}
+    {% set active_platform = platform|default('') %}
+    <div class="tabs">
+      <a href="/kick" class="{{ 'active' if active_platform == 'kick' else '' }}"{% if active_platform == 'kick' %} aria-current="page"{% endif %}>Kick</a>
+      <a href="/youtube" class="{{ 'active' if active_platform == 'youtube' else '' }}"{% if active_platform == 'youtube' %} aria-current="page"{% endif %}>YouTube</a>
+    </div>
     <nav>
-      <a href="/">Library</a>
       <button id="doctor-btn" class="link">Doctor</button>
     </nav>
     <span id="conn" class="conn" title="event stream">●</span>

@@ -37,12 +37,28 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def resolve_tool(command: str, hint: str = "") -> str:
-    """Return an executable path for `command`, or raise with an install hint."""
-    candidate = Path(command)
-    if candidate.is_file():
-        return str(candidate)
+    """Return an executable path for `command`, or raise with an install hint.
 
-    found = shutil.which(command)
+    Tolerates a value that can't be a path at all: a `CLIPBOT_YT_DLP` (or any
+    tool) set with stray quotes or a control character makes `Path.is_file()`
+    raise `OSError` on Windows (WinError 123), which used to surface as an
+    unhandled traceback - or a 500 from the dashboard - instead of the
+    "not found" message with its install hint. Wrapping quotes, which a shell
+    or `setx` easily leaves in an environment variable, are stripped.
+    """
+    command = str(command).strip()
+    if len(command) >= 2 and command[0] == command[-1] == '"':
+        command = command[1:-1]
+    try:
+        if Path(command).is_file():
+            return str(Path(command))
+    except (OSError, ValueError):
+        pass
+
+    try:
+        found = shutil.which(command)
+    except (OSError, ValueError):
+        found = None
     if found:
         return found
 

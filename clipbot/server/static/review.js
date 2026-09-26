@@ -32,11 +32,14 @@ let expandedWhy = new Set();
 
 /* ---------------- init ---------------- */
 
-function initReview(slug, padStart, padEnd) {
+function initReview(slug, padStart, padEnd, source) {
   SLUG = slug;
   PAD_START = padStart != null ? padStart : 1.0;
   PAD_END = padEnd != null ? padEnd : 1.5;
-  player = document.getElementById('player');
+  // static/player.js: the page's own <video> for a workspace with a local
+  // video (returned untouched), an embedded YouTube player otherwise. Both
+  // present the same surface, so nothing below cares which it got.
+  player = createPlayer(document.getElementById('player'), source || { kind: 'local' });
 
   player.addEventListener('loadedmetadata', () => {
     duration = player.duration || 0;
@@ -53,9 +56,15 @@ function initReview(slug, padStart, padEnd) {
     const layer = document.getElementById('crop-layer');
     if (layer) layer.innerHTML = '';
     if (!document.getElementById('no-video-msg')) {
+      // An embedded YouTube player says why it failed (embedding disabled,
+      // private video, ...); a local <video> only ever fails because the file
+      // is gone.
+      const why = player.errorMessage
+        ? esc(player.errorMessage)
+        : 'No video available — it may have been deleted by the cleanup stage.' +
+          '<br>Re-run the download stage to review clips visually.';
       document.getElementById('stage').insertAdjacentHTML('beforeend',
-        '<div class="no-video" id="no-video-msg">No video available — it may have been ' +
-        'deleted by the cleanup stage.<br>Re-run the download stage to review clips visually.</div>');
+        '<div class="no-video" id="no-video-msg">' + why + '</div>');
     }
   });
 

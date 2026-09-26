@@ -38,6 +38,14 @@ body.review-page main { max-width: none; padding: 0; }
 .stage-wrap { background: #000; border-radius: var(--radius); overflow: hidden; position: relative; }
 .stage-wrap video { width: 100%; display: block; max-height: 52vh; background: #000; }
 
+/* Embedded YouTube player (static/player.js). The iframe letterboxes its own
+   video, so a plain 16:9 box is enough; the shield is a transparent layer over
+   it that keeps keyboard focus in the page (a cross-origin iframe would
+   otherwise swallow space / I / O / [ ] the moment you clicked the video). */
+.yt-frame { position: relative; width: 100%; aspect-ratio: 16 / 9; max-height: 52vh; background: #000; }
+.yt-frame .yt-iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.yt-frame .yt-shield { position: absolute; inset: 0; cursor: pointer; }
+
 .no-video {
   padding: 40px 20px; text-align: center; color: var(--dim);
   background: var(--panel); border: 1px dashed var(--line); border-radius: var(--radius);

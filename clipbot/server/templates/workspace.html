@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="panel">
-  <a class="back" href="/">&larr; Library</a>
+  <a class="back" href="/{{ platform }}">&larr; {{ 'YouTube' if platform == 'youtube' else 'Kick' }}</a>
   <h1 id="ws-title">…</h1>
   <div id="ws-meta" class="meta"></div>
   <div id="external" class="banner" hidden></div>
@@ -35,6 +35,7 @@ async function load() {
   document.getElementById('ws-meta').innerHTML =
     `${w.duration ? fmtDur(w.duration) : '—'} · ${w.disk_human}` +
     (w.video_height ? ` · ${w.video_width}×${w.video_height}` : '') +
+    (w.source_mode === 'embed' ? ' · audio only — the video plays from YouTube' : '') +
     (w.url ? ` · <a href="${esc(w.url)}" target="_blank" rel="noreferrer">source</a>` : '');
 
   // A job started from the CLI isn't in this server's job runner, so surface it
@@ -67,7 +68,9 @@ async function load() {
       ? Object.entries(s.detail).filter(([k]) => k !== 'completed_at').map(([k,v]) => `${k}: ${v}`).join(' · ')
       : (s.blocked || '');
     const isTranscribe = s.key === 'transcribe';
-    const isDownload = s.key === 'download';
+    // The quality picker is a Kick thing: a YouTube workspace's download stage
+    // fetches audio only, so there is no resolution to choose.
+    const isDownload = s.key === 'download' && w.platform !== 'youtube';
     const backendPicker = isTranscribe
       ? `<select id="transcribe-backend" title="Transcription backend">
            <option value="openai">OpenAI API (fast, paid)</option>
@@ -113,7 +116,9 @@ async function load() {
         <div><b>${esc(c.title || c.description.slice(0,60))}</b>
         <div class="meta">${fmtDur(c.start)}–${fmtDur(c.end)} · ${(c.output.bytes/1048576).toFixed(1)} MB</div></div>
       </div>`).join('')
-    : '<p class="empty">Nothing cut yet. Approve candidates in Review, then run Cut clips.</p>';
+    : (w.platform === 'youtube'
+        ? '<p class="empty">No clips fetched yet. Approve candidates in Review, then run Fetch approved clips: only those seconds are downloaded from YouTube, never the whole video.</p>'
+        : '<p class="empty">Nothing cut yet. Approve candidates in Review, then run Cut clips.</p>');
 }
 
 async function submitJob(kind, opts) {
