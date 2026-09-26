@@ -5,7 +5,11 @@ how any other stage found its inputs. Layout:
 
     work/<slug>/
         state.json        pipeline state / metadata (what's done, source URL, ...)
-        video.<ext>       downloaded VOD (deleted by stage 6)
+        video.<ext>       downloaded VOD (deleted by stage 6). Kick always has
+                          one; a YouTube workspace normally has none - the
+                          dashboard plays the embedded YouTube video instead
+        source_audio.<ext>  YouTube's audio-only download, deleted once
+                          audio.wav has been extracted from it
         audio.wav         extracted audio (kept)
         transcript.json   segment-level transcript (kept)
         candidates.json   Claude's clip candidates (kept)
@@ -16,13 +20,13 @@ how any other stage found its inputs. Layout:
 """
 
 import json
-import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .utils import find_largest_file, get_logger, slugify
+from . import platforms
+from .utils import StageError, find_largest_file, get_logger, slugify
 
 log = get_logger(__name__)
 
@@ -45,20 +49,31 @@ def _lock_for(root: Path) -> threading.RLock:
 STATE_FILE = "state.json"
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".ts", ".webm", ".mov", ".flv"]
 
-# https://kick.com/<channel>/videos/<uuid>  |  https://kick.com/video/<uuid>
-_KICK_VIDEO_RE = re.compile(
-    r"kick\.com/(?:video/|(?P<channel>[^/]+)/videos?/)(?P<video_id>[0-9a-zA-Z-]+)",
-    re.IGNORECASE,
-)
+# YouTube's audio-only download. Matched by exact stem so yt-dlp's scratch
+# files (source_audio.webm.part, source_audio.info.json, ...) never count.
+SOURCE_AUDIO_STEM = "source_audio"
+SOURCE_AUDIO_EXTENSIONS = (".m4a", ".webm", ".opus", ".ogg", ".mp3", ".aac", ".mka", ".mp4", ".wav")
+
+# source_mode() values
+MODE_LOCAL = "local"   # a video file is on disk; the page plays that
+MODE_EMBED = "embed"   # YouTube workspace with no local video: embedded player
+MODE_NONE = "none"     # nothing to play (yet, or deleted by cleanup)
 
 
 def slug_for_url(url: str) -> str:
-    """Stable, filesystem-safe workspace name derived from the VOD URL."""
-    match = _KICK_VIDEO_RE.search(url)
-    if match:
-        channel = match.group("channel") or "kick"
-        video_id = match.group("video_id")
-        return slugify("{0}-{1}".format(channel, video_id))
+    """Stable, filesystem-safe workspace name derived from the VOD URL.
+
+    Kick slugs are unchanged from before YouTube support (they are directory
+    names); see clipbot/platforms.py. Never raises: a YouTube-looking URL that
+    isn't a video falls through to the generic fallback like any other
+    unrecognised URL - `Workspace.for_url` is what rejects those.
+    """
+    try:
+        parsed = platforms.parse_url(url)
+    except ValueError:
+        parsed = None
+    if parsed:
+        return platforms.slug_for(parsed)
     return slugify(url.rstrip("/").split("/")[-1] or "vod")
 
 
@@ -70,12 +85,22 @@ class Workspace:
 
     @classmethod
     def for_url(cls, work_root: Path, url: str) -> "Workspace":
+        try:
+            parsed = platforms.parse_url(url)
+        except ValueError as exc:
+            # A YouTube channel/playlist link: refuse rather than create a
+            # workspace under a meaningless generic slug.
+            raise StageError(str(exc))
         ws = cls(Path(work_root) / slug_for_url(url))
         ws.ensure()
         state = ws.read_state()
-        state.setdefault("url", url)
+        state.setdefault("url", parsed.canonical_url if parsed else url)
         state.setdefault("slug", ws.slug)
         state.setdefault("created_at", time.time())
+        if parsed:
+            state.setdefault("platform", parsed.platform)
+            if parsed.platform == platforms.YOUTUBE:
+                state.setdefault("video_id", parsed.video_id)
         ws.write_state(state)
         return ws
 
@@ -242,6 +267,47 @@ class Workspace:
             if candidate.exists():
                 return candidate
         return find_largest_file(self.root, VIDEO_EXTENSIONS)
+
+    def source_audio_path(self) -> Optional[Path]:
+        """YouTube's audio-only download, if it is still on disk."""
+        if not self.root.is_dir():
+            return None
+        found = [
+            p
+            for p in self.root.iterdir()
+            if p.is_file()
+            and p.stem == SOURCE_AUDIO_STEM
+            and p.suffix.lower() in SOURCE_AUDIO_EXTENSIONS
+        ]
+        return max(found, key=lambda p: p.stat().st_size) if found else None
+
+    # ---- platform / source ------------------------------------------------
+
+    @property
+    def platform(self) -> str:
+        """`kick` or `youtube`. Absent in state.json means Kick: every
+        workspace that predates YouTube support is one."""
+        return platforms.platform_of(self.read_state())
+
+    @property
+    def video_id(self) -> Optional[str]:
+        """The platform's own video id (YouTube: case-sensitive, 11 chars).
+        Only recorded for YouTube; Kick workspaces don't need one."""
+        return self.read_state().get("video_id")
+
+    def source_mode(self) -> str:
+        """How the picture reaches the reviewer. Derived from what is on disk,
+        never stored, so it can't drift from reality (same rule the dashboard's
+        stage list follows): a video file -> `local`; otherwise a YouTube
+        workspace -> `embed`; otherwise `none`."""
+        if self.root.is_dir():
+            video = self.video_path()
+            if video and video.exists():
+                return MODE_LOCAL
+        state = self.read_state()
+        if platforms.platform_of(state) == platforms.YOUTUBE and state.get("video_id"):
+            return MODE_EMBED
+        return MODE_NONE
 
     # ---- state ------------------------------------------------------------
 

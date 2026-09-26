@@ -12,6 +12,12 @@ Two things here are easy to get wrong and expensive if you do:
 * Stream copy snaps the start to the nearest keyframe, so a copy-mode cut can
   begin up to a few seconds earlier than asked. That is the right default
   (it's instant and lossless); `cut.re_encode` trades speed for frame accuracy.
+
+A YouTube workspace has no video on disk, so its clips are cut straight from
+YouTube instead (clipbot/ytsegments.py): only the requested seconds are fetched,
+and they are always re-encoded - a stream-copy cut from two separate remote
+inputs has no clean start (see that module) - using the same `cut.encoder` /
+`cut.preset` / `cut.crf` a re-encoding Kick cut would.
 """
 
 import time
@@ -19,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .. import review
+from .. import ytsegments
 from ..config import Settings
 from ..progress import NULL_PROGRESS, JobCancelled, Progress
 from ..utils import (
@@ -30,7 +37,7 @@ from ..utils import (
     run_command,
     slugify,
 )
-from ..workspace import Workspace
+from ..workspace import MODE_EMBED, Workspace
 
 log = get_logger(__name__)
 
@@ -42,19 +49,26 @@ FFMPEG_HINT = (
 )
 
 
-def _fingerprint(start: float, end: float, settings: Settings, re_encode: bool) -> str:
+def _fingerprint(
+    start: float, end: float, settings: Settings, re_encode: bool, source_tag: str = ""
+) -> str:
     """Identifies the exact cut that produced a file.
 
     Changing the in/out points or the padding changes this, so an edited clip is
-    re-cut automatically without needing --force.
+    re-cut automatically without needing --force. `source_tag` (YouTube only:
+    the video and the formats it resolved to) is appended only when given, so a
+    local cut's fingerprint is byte-identical to what it always was.
     """
-    return "{0:.3f}|{1:.3f}|{2}|{3}|{4}".format(
+    fingerprint = "{0:.3f}|{1:.3f}|{2}|{3}|{4}".format(
         start,
         end,
         settings.get("cut.pad_start", 1.0),
         settings.get("cut.pad_end", 1.5),
         "encode" if re_encode else "copy",
     )
+    if source_tag:
+        fingerprint += "|" + source_tag
+    return fingerprint
 
 
 def _clip_label(clip: Dict[str, Any], index: int) -> str:
@@ -161,11 +175,16 @@ def cut_clips(
 ) -> Path:
     """Cut each selected clip out of the VOD. Returns the clips directory."""
     source = ws.video_path()
+    # A YouTube workspace has no video on disk: cut straight from YouTube.
+    resolver = None  # type: Optional[ytsegments.StreamResolver]
     if not source or not source.exists():
-        raise StageError(
-            "No video in {0}. The VOD may have been deleted by the cleanup stage - "
-            "re-run the download stage to cut more clips.".format(ws.root)
-        )
+        if ws.source_mode() == MODE_EMBED:
+            resolver = ytsegments.StreamResolver(ws, settings)
+        else:
+            raise StageError(
+                "No video in {0}. The VOD may have been deleted by the cleanup stage - "
+                "re-run the download stage to cut more clips.".format(ws.root)
+            )
 
     doc, clips, using_review = _load_clips(ws, clip_ids)
     if not clips:
@@ -176,14 +195,18 @@ def cut_clips(
         return ws.clips_dir
 
     binary = resolve_tool(settings.tool("ffmpeg"), FFMPEG_HINT)
-    re_encode = bool(settings.get("cut.re_encode", False))
+    # Always re-encoded when cutting from YouTube (see the module docstring).
+    re_encode = True if resolver is not None else bool(settings.get("cut.re_encode", False))
     duration = ws.read_state().get("duration")
     ws.clips_dir.mkdir(parents=True, exist_ok=True)
+    # Naming what a cached clip was cut from lets a later, better-quality
+    # resolution of the same video (HD finishing processing) redo it.
+    source_tag = resolver.tag() if resolver is not None else ""
 
     log.info(
         "Cutting %d clip(s) from %s (%s mode)",
         len(clips),
-        source.name,
+        "YouTube ({0})".format(resolver.video_id) if resolver is not None else source.name,
         "re-encode" if re_encode else "stream copy",
     )
     progress.phase("cut", total=len(clips), unit="clips")
@@ -201,7 +224,7 @@ def cut_clips(
             continue
 
         out_path = ws.clips_dir / "{0}.mp4".format(_clip_label(clip, index))
-        fingerprint = _fingerprint(start, end, settings, re_encode)
+        fingerprint = _fingerprint(start, end, settings, re_encode, source_tag)
         existing = clip.get("output") or {}
 
         if (
@@ -214,9 +237,26 @@ def cut_clips(
             progress.update(index, label=out_path.name)
             continue
 
-        argv = _build_argv(binary, source, out_path, start, end, settings, re_encode)
         try:
-            run_command(argv, log=log, capture=True)
+            if resolver is not None:
+                ytsegments.fetch_segment(
+                    resolver,
+                    start,
+                    end,
+                    out_path,
+                    settings,
+                    encoder=str(settings.get("cut.encoder", "libx264")),
+                    preset=str(settings.get("cut.preset", "veryfast")),
+                    crf=int(settings.get("cut.crf", 20)),
+                    progress=progress,
+                    base=index - 1,
+                    span=1.0,
+                    log_path=ws.logs_dir / "cut-{0}.log".format(clip["id"]),
+                    label=out_path.name,
+                )
+            else:
+                argv = _build_argv(binary, source, out_path, start, end, settings, re_encode)
+                run_command(argv, log=log, capture=True)
         except JobCancelled:
             if out_path.exists():
                 out_path.unlink()

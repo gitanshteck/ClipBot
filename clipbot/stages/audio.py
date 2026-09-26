@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from .. import platforms
 from ..config import Settings
 from ..utils import (
     StageError,
@@ -18,6 +19,7 @@ from ..utils import (
     run_command,
 )
 from ..workspace import Workspace
+from . import youtube as youtube_stage
 
 log = get_logger(__name__)
 
@@ -111,7 +113,13 @@ def extract_audio(
     force: bool = False,
     video: Optional[Path] = None,
 ) -> Path:
-    """Extract audio from the workspace's VOD. Returns the audio file path."""
+    """Extract audio from the workspace's VOD. Returns the audio file path.
+
+    The source is, in order: an explicit `video`, the workspace's YouTube
+    audio-only download (`source_audio.*`, deleted again once audio.wav
+    exists - see stages/youtube.py), then the downloaded VOD. A Kick workspace
+    has no `source_audio.*`, so for it this resolves exactly as it always did.
+    """
     out_path = ws.audio_path
     if out_path.exists() and not force:
         log.info(
@@ -121,8 +129,14 @@ def extract_audio(
         )
         return out_path
 
-    source = video or ws.video_path()
+    source = video or ws.source_audio_path() or ws.video_path()
     if not source or not source.exists():
+        if ws.platform == platforms.YOUTUBE:
+            raise StageError(
+                "No source audio in {0}. Run the 'Fetch audio' (download) stage "
+                "first - the audio download is deleted once audio.wav has been "
+                "extracted from it, so re-extracting means fetching it again.".format(ws.root)
+            )
         raise StageError(
             "No video file in {0}. Run the download stage first "
             "(the VOD may have been deleted by the cleanup stage).".format(ws.root)
@@ -171,4 +185,5 @@ def extract_audio(
         **({"duration": duration} if duration else {})
     )
     ws.mark_stage(STAGE, audio_file=out_path.name, bytes=size, duration=duration)
+    youtube_stage.drop_source_audio(ws, source, settings)
     return out_path

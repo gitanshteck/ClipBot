@@ -21,7 +21,25 @@
     "_comment_http_chunk_size": "yt-dlp's own documented flag for 'bypassing bandwidth throttling imposed by a webserver' - measured on this network: a VOD download capped at ~100Mbps over a 300Mbps line despite ~8ms latency to Kick's Cloudflare edge (rules out a TCP-window/BDP explanation), pointing at a per-connection throttle. This flag is sequential chunking only in the installed yt-dlp version (no parallel connections - checked yt_dlp/downloader/http.py directly), so it's a free, zero-dependency thing to try, not a guaranteed fix. Genuine parallel connections would need yt-dlp's aria2c external-downloader integration, not set up here. Set to null to omit the flag entirely.",
     "http_chunk_size": "10M",
     "_comment_fallback": "Disabled deliberately. kick-dl 2.0.0 exposes only an interactive TUI ('kick-dl start', no arguments) - there is no scriptable download command, so as a fallback it can only fail, and from a dashboard job it would hang a worker on an interactive prompt. Re-enable only if a future release adds non-interactive flags.",
-    "fallback_to_kick_dl": false
+    "fallback_to_kick_dl": false,
+
+    "youtube": {
+      "_comment": "YouTube ingest (clipbot/stages/youtube.py). Fetches AUDIO ONLY - the video is never downloaded, the dashboard plays the embedded YouTube player instead. Needs a current yt-dlp (Python 3.10+; if the one on PATH is older, install a new one and point CLIPBOT_YT_DLP at it) and a JavaScript runtime it can use to solve YouTube's challenges: Deno 2.3+ is yt-dlp's default (winget install DenoLand.Deno), or Node 22+ with js_runtime set to \"node\". The Doctor dialog checks all of this. The Kick-only workarounds above (download.impersonate, http_chunk_size) are deliberately not applied to YouTube.",
+      "audio_format": "bestaudio/best",
+      "_comment_keep": "audio.wav (16 kHz mono) is the artifact every later stage reads, so the audio download is deleted once it has been extracted. Set true to keep it.",
+      "keep_source_audio": false,
+      "_comment_cookies": "Set to a browser name (\"firefox\", \"chrome\", \"edge\", ...) if YouTube asks you to sign in to prove you're not a bot. Chrome locks its cookie database while it is running; Firefox does not.",
+      "cookies_from_browser": null,
+      "_comment_client": "Leave null unless one yt-dlp player client breaks and another still works, e.g. \"tv\" or \"web_embedded\". Passed as --extractor-args youtube:player_client=<value>.",
+      "player_client": null,
+      "_comment_runtime": "Leave null to use yt-dlp's default (deno). \"node\" or \"node:C:/path/to/node.exe\" selects Node 22+ instead.",
+      "js_runtime": null,
+      "_comment_probe": "The public video the Doctor's 'Test YouTube' button asks yt-dlp to list formats for.",
+      "probe_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "_comment_segments": "Cutting a clip or compilation segment straight from YouTube (clipbot/ytsegments.py). segment_format is the yt-dlp selector for the stream ffmpeg reads: progressive https only, since HLS/DASH manifests can't be range-read - leave null unless you need a different height cap. request_size is the bounded HTTP range size in bytes (ffmpeg's -request_size): ffmpeg's default of one unbounded request is throttled by googlevideo to ~31 KB/s (a 30 s cut hung for 5+ minutes), while bounded ranges run at MB/s; 1 MiB measured fastest, and it is clamped to 64 KiB..8 MiB because 16 MiB was throttled again. Needs ffmpeg 8.1+, where -request_size first appeared (the Doctor checks).",
+      "segment_format": null,
+      "request_size": 1048576
+    }
   },
 
   "chat": {

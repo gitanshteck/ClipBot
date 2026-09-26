@@ -36,11 +36,13 @@ function isSingleSource(list) {
   return new Set(list.map(segSlug)).size <= 1;
 }
 
-function initCompile(slug, padStart, padEnd) {
+function initCompile(slug, padStart, padEnd, source) {
   SLUG = slug;
   PAD_START = padStart != null ? padStart : 1.0;
   PAD_END = padEnd != null ? padEnd : 1.5;
-  player = document.getElementById('c-player');
+  // static/player.js: the page's own <video> for a workspace with a local
+  // video (returned untouched), an embedded YouTube player otherwise.
+  player = createPlayer(document.getElementById('c-player'), source || { kind: 'local' });
 
   player.addEventListener('loadedmetadata', () => {
     duration = player.duration || 0;
@@ -53,9 +55,14 @@ function initCompile(slug, padStart, padEnd) {
   player.addEventListener('error', () => {
     player.hidden = true;
     if (!document.getElementById('c-no-video-msg')) {
+      // An embedded YouTube player says why it failed; a local <video> only
+      // ever fails because the file is gone.
+      const why = player.errorMessage
+        ? esc(player.errorMessage)
+        : 'No video available — it may have been deleted by the cleanup stage.' +
+          '<br>Re-run the download stage to build compilations.';
       document.getElementById('stage').insertAdjacentHTML('beforeend',
-        '<div class="no-video" id="c-no-video-msg">No video available — it may have been ' +
-        'deleted by the cleanup stage.<br>Re-run the download stage to build compilations.</div>');
+        '<div class="no-video" id="c-no-video-msg">' + why + '</div>');
     }
   });
 

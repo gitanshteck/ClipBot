@@ -1,6 +1,6 @@
 """ClipBot CLI.
 
-Full pipeline:      python -m clipbot run <kick-vod-url>
+Full pipeline:      python -m clipbot run <kick-or-youtube-vod-url>
 Individual stages:  python -m clipbot download <url>
                     python -m clipbot audio --workspace <slug>
                     ...
@@ -19,6 +19,7 @@ from typing import Optional
 from . import chatsync
 from . import compilations
 from . import manifest as manifest_module
+from . import platforms
 from . import review
 from .config import Settings, load_settings
 from .stages import analyze as analyze_stage
@@ -65,10 +66,11 @@ def resolve_workspace(args: argparse.Namespace, settings: Settings) -> Workspace
 
 def cmd_download(args: argparse.Namespace, settings: Settings) -> int:
     ws = Workspace.for_url(settings.work_root, args.url)
-    video = download_stage.download_vod(
+    # Kick: the full VOD. YouTube: audio only (the path printed is the audio file).
+    media = download_stage.acquire(
         args.url, ws, settings, force=args.force, quality=args.quality
     )
-    print(video)
+    print(media)
     return 0
 
 
@@ -302,8 +304,8 @@ def cmd_cleanup(args: argparse.Namespace, settings: Settings) -> int:
     # Not a refusal: the chat fetch needs only the channel id and start time
     # from state.json, never the video file. But this is the last natural
     # prompt before the workspace looks "finished", and Kick's retention clock
-    # is still running.
-    if not ws.chat_path.exists():
+    # is still running. (Kick-only: there is no YouTube chat stage yet.)
+    if ws.platform == platforms.KICK and not ws.chat_path.exists():
         log.warning(
             "No chat.json in this workspace. Chat can still be fetched without "
             "the VOD file, but only until Kick expires it - run `clipbot chat "
@@ -318,23 +320,28 @@ def cmd_cleanup(args: argparse.Namespace, settings: Settings) -> int:
 def cmd_run(args: argparse.Namespace, settings: Settings) -> int:
     ws = Workspace.for_url(settings.work_root, args.url)
     log.info("Workspace: %s", ws.root)
+    is_kick = ws.platform == platforms.KICK
 
-    video = download_stage.download_vod(
+    media = download_stage.acquire(
         args.url, ws, settings, force=args.force, quality=args.quality
     )
     # Chat first, and best-effort: Kick discards it with the VOD after 7 days
     # (30 if verified), so a later run may find nothing left to fetch. A stream
-    # with no chat must not stop the rest of the pipeline.
-    try:
-        chat_stage.fetch_chat(ws, settings, force=args.force)
-    except StageError as exc:
-        log.warning("Chat unavailable, continuing without it: %s", exc)
-    audio_stage.extract_audio(ws, settings, force=args.force, video=video)
+    # with no chat must not stop the rest of the pipeline. Kick-only: YouTube
+    # has no chat stage yet.
+    if is_kick:
+        try:
+            chat_stage.fetch_chat(ws, settings, force=args.force)
+        except StageError as exc:
+            log.warning("Chat unavailable, continuing without it: %s", exc)
+    audio_stage.extract_audio(ws, settings, force=args.force, video=media)
     transcribe_stage.transcribe_audio(ws, settings, force=args.force)
     analyze_stage.analyze_transcript(ws, settings, force=args.force)
     review.ensure_imported(ws)
 
     if args.cut_all:
+        # A YouTube workspace has no video on disk, so this fetches just each
+        # clip's seconds from YouTube instead (see clipbot/ytsegments.py).
         cut_stage.cut_clips(ws, settings, force=args.force)
         manifest_module.write_manifest(ws, settings)
         log.info("Clips are in %s", ws.clips_dir)
@@ -347,10 +354,16 @@ def cmd_run(args: argparse.Namespace, settings: Settings) -> int:
             ws.slug,
         )
 
-    log.info(
-        "The VOD was kept at %s - run `clipbot cleanup` once you're happy with the clips.",
-        video.name,
-    )
+    if is_kick:
+        log.info(
+            "The VOD was kept at %s - run `clipbot cleanup` once you're happy with the clips.",
+            media.name,
+        )
+    else:
+        log.info(
+            "No video was downloaded: the dashboard plays the embedded YouTube video. "
+            "Open it with `python -m clipbot.server`."
+        )
     return 0
 
 
@@ -359,6 +372,7 @@ def cmd_info(args: argparse.Namespace, settings: Settings) -> int:
     state = ws.read_state()
 
     print("workspace : {0}".format(ws.root))
+    print("platform  : {0}".format(ws.platform))
     print("url       : {0}".format(state.get("url", "-")))
     print("title     : {0}".format(state.get("title", "-")))
     duration = state.get("duration")
@@ -370,6 +384,8 @@ def cmd_info(args: argparse.Namespace, settings: Settings) -> int:
         print("video     : {0} ({1})".format(video.name, human_size(video.stat().st_size)))
     elif state.get("video_deleted"):
         print("video     : deleted (cleanup stage)")
+    elif ws.source_mode() == "embed":
+        print("video     : not downloaded (played from YouTube in the dashboard)")
     else:
         print("video     : -")
 
@@ -546,14 +562,14 @@ def cmd_library(args: argparse.Namespace, settings: Settings) -> int:
 
 def add_workspace_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--url", help="Kick VOD URL (derives the workspace name)")
+    group.add_argument("--url", help="Kick or YouTube VOD URL (derives the workspace name)")
     group.add_argument("--workspace", help="Existing workspace slug or path")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clipbot",
-        description="Turn Kick livestream VODs into candidate clips.",
+        description="Turn Kick and YouTube livestream VODs into candidate clips.",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument(
@@ -577,7 +593,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.set_defaults(func=cmd_run)
 
-    p_dl = sub.add_parser("download", help="stage 1: download a VOD")
+    p_dl = sub.add_parser(
+        "download",
+        help="stage 1: download a VOD (Kick: the video; YouTube: audio only)",
+    )
     p_dl.add_argument("url")
     p_dl.add_argument("--force", action="store_true", help="re-download if present")
     p_dl.add_argument(

@@ -24,6 +24,14 @@ workspace instead. `_resolve_source` opens each referenced workspace once
 (cached per render) to pull its own video file and its own probed
 `state.duration` - padding must clamp against the *source's* duration, not
 the home workspace's.
+
+**YouTube**: a workspace with no video on disk (`source_mode() == "embed"`)
+supplies its segments straight from YouTube (clipbot/ytsegments.py) - only the
+requested seconds are fetched, re-encoded exactly like a local segment, into
+the same scratch directory, so the concat join is unchanged. A compilation may
+not mix YouTube and local sources, and every YouTube segment must come from a
+stream with the same resolution and frame rate: the join is a stream copy, and
+this stage has no scale/fps normalisation.
 """
 
 import hashlib
@@ -32,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .. import compilations
+from .. import ytsegments
 from ..config import Settings
 from ..ffrun import run_ffmpeg
 from ..progress import NULL_PROGRESS, JobCancelled, Progress
@@ -42,7 +51,7 @@ from ..utils import (
     human_size,
     resolve_tool,
 )
-from ..workspace import Workspace
+from ..workspace import MODE_EMBED, Workspace
 from . import cut as cut_stage
 
 log = get_logger(__name__)
@@ -69,23 +78,35 @@ def _encode_settings(settings: Settings) -> Tuple[str, str, int]:
     )
 
 
-def _segment_fingerprint(start: float, end: float, slug: str, settings: Settings) -> str:
+def _segment_fingerprint(
+    start: float, end: float, slug: str, settings: Settings, source_tag: str = ""
+) -> str:
     # `slug` is included so two segments from different source workspaces
     # that happen to resolve to an identical numeric range can't collide in
-    # the scratch cache.
+    # the scratch cache. `source_tag` (YouTube only: the video and the formats
+    # it resolved to) is appended only when given, so a local segment's
+    # fingerprint - and every scratch file already cached under it - is
+    # byte-identical to what it always was.
     encoder, preset, crf = _encode_settings(settings)
     blob = "{0}|{1:.3f}|{2:.3f}|{3}|{4}|{5}".format(slug, start, end, encoder, preset, crf)
+    if source_tag:
+        blob += "|" + source_tag
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def _compilation_fingerprint(
-    name: str, resolved: List[Tuple[str, float, float]], settings: Settings
+    name: str,
+    resolved: List[Tuple[str, float, float]],
+    settings: Settings,
+    source_tags: str = "",
 ) -> str:
     """Hash of everything that determines the joined output.
 
     Self-maintaining the same way reel.py's argv hash is: any change to a
     segment's resolved (slug, range) or the encode settings invalidates
     automatically, without a hand-listed field tuple to keep in sync.
+    `source_tags` is the YouTube counterpart of `_segment_fingerprint`'s tag:
+    appended only when non-empty, so local compilations are unchanged.
     """
     encoder, preset, crf = _encode_settings(settings)
     parts = [name] + [
@@ -98,6 +119,8 @@ def _compilation_fingerprint(
         str(settings.get("cut.pad_start", 1.0)),
         str(settings.get("cut.pad_end", 1.5)),
     ]
+    if source_tags:
+        parts.append(source_tags)
     blob = "\x1f".join(parts)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -119,6 +142,40 @@ def _resolve_source(
     if slug not in cache:
         cache[slug] = Workspace(Path(settings.work_root) / slug)
     return cache[slug]
+
+
+def _check_youtube_sources(
+    resolved: List[Tuple[str, float, float, Any]],
+    resolvers: Dict[str, "ytsegments.StreamResolver"],
+) -> None:
+    """A YouTube compilation's constraints (see the module docstring).
+
+    The join is a stream copy of independently encoded segments, so every
+    segment must share resolution and frame rate, and this stage has no
+    scale/fps normalisation to reconcile them.
+    """
+    if any(not isinstance(source, ytsegments.StreamResolver) for _, _, _, source in resolved):
+        raise StageError(
+            "This compilation mixes YouTube segments with segments cut from a local "
+            "video, which isn't supported yet: the join can't reconcile their "
+            "different resolutions and frame rates. Keep a compilation to one kind "
+            "of source."
+        )
+    shapes = {}
+    for slug, resolver in resolvers.items():
+        streams = resolver.get()
+        shapes[slug] = (streams.width, streams.height, streams.fps)
+    if len(set(shapes.values())) > 1:
+        raise StageError(
+            "These segments come from YouTube videos with different resolution or "
+            "frame rate ({0}), which the join can't reconcile yet. Use segments from "
+            "videos with the same settings.".format(
+                "; ".join(
+                    "{0}: {1}x{2} @ {3} fps".format(slug, w, h, fps)
+                    for slug, (w, h, fps) in sorted(shapes.items())
+                )
+            )
+        )
 
 
 def _segment_argv(
@@ -190,8 +247,12 @@ def render_compilation(
     binary = resolve_tool(settings.tool("ffmpeg"), FFMPEG_HINT)
     min_duration = float(settings.get("compile.min_duration", 0.5))
     source_cache: Dict[str, Workspace] = {}
+    # One per YouTube workspace a segment names (there is normally just one).
+    resolvers: Dict[str, ytsegments.StreamResolver] = {}
 
-    resolved: List[Tuple[str, float, float, Path]] = []
+    # The 4th element is a local video's Path, or a StreamResolver for a
+    # YouTube segment (fetched straight from YouTube, see the module docstring).
+    resolved: List[Tuple[str, float, float, Any]] = []
     for index, seg in enumerate(segments, start=1):
         slug = seg.get("slug") or ws.slug
         source_ws = _resolve_source(ws, settings, slug, source_cache)
@@ -202,20 +263,32 @@ def render_compilation(
         # already guaranteed exists.
         source = source_ws.video_path() if source_ws.root.is_dir() else None
         if not source or not source.exists():
-            raise StageError(
-                "Segment {0} references workspace {1!r}, which has no video - "
-                "was it deleted by cleanup? Re-run download there first.".format(
-                    index, slug
+            if source_ws.root.is_dir() and source_ws.source_mode() == MODE_EMBED:
+                if slug not in resolvers:
+                    resolvers[slug] = ytsegments.StreamResolver(source_ws, settings)
+                source = resolvers[slug]
+            else:
+                raise StageError(
+                    "Segment {0} references workspace {1!r}, which has no video - "
+                    "was it deleted by cleanup? Re-run download there first.".format(
+                        index, slug
+                    )
                 )
-            )
         duration = source_ws.read_state().get("duration")
         start, end = cut_stage._padded_range(
             {"start": seg["start"], "end": seg["end"]}, settings, duration
         )
         resolved.append((slug, start, end, source))
 
+    source_tags = ""
+    if resolvers:
+        _check_youtube_sources(resolved, resolvers)
+        # Naming what the cache was cut from lets a better resolution of the
+        # same video (HD finishing processing) redo the compilation.
+        source_tags = "|".join(sorted(r.tag() for r in resolvers.values()))
+
     fingerprint = _compilation_fingerprint(
-        name, [(slug, start, end) for slug, start, end, _ in resolved], settings
+        name, [(slug, start, end) for slug, start, end, _ in resolved], settings, source_tags
     )
     out_path = ws.compilations_dir / "{0}.mp4".format(name)
     existing_output = comp.get("output") or {}
@@ -245,12 +318,14 @@ def render_compilation(
         # job panel - use the segment's own label, same thing the compile page's
         # segment list already displays, so the two match up.
         seg_label = segments[index - 1].get("label") or "segment {0}".format(index)
-        seg_fp = _segment_fingerprint(start, end, slug, settings)
+        remote = isinstance(source, ytsegments.StreamResolver)
+        seg_fp = _segment_fingerprint(
+            start, end, slug, settings, source.tag() if remote else ""
+        )
         seg_name = "{0:03d}-{1}.mp4".format(index, seg_fp)
         seg_path = scratch_dir / seg_name
 
         if not seg_path.exists():
-            argv = _segment_argv(binary, source, seg_path, start, end, settings)
             seg_log = ws.logs_dir / "compile-{0}-{1:03d}.log".format(name, index)
             try:
                 # base=index-1, span=1.0: this segment's own encode progress
@@ -259,10 +334,19 @@ def render_compilation(
                 # line - unlike run_command, a cancel now lands within the
                 # segment currently encoding instead of waiting for it to
                 # finish on its own.
-                _run_ffmpeg(
-                    argv, end - start, progress, index - 1, 1.0, seg_log, seg_path,
-                    label=seg_label,
-                )
+                if remote:
+                    encoder, preset, crf = _encode_settings(settings)
+                    ytsegments.fetch_segment(
+                        source, start, end, seg_path, settings, encoder, preset, crf,
+                        progress=progress, base=index - 1, span=1.0,
+                        log_path=seg_log, label=seg_label,
+                    )
+                else:
+                    argv = _segment_argv(binary, source, seg_path, start, end, settings)
+                    _run_ffmpeg(
+                        argv, end - start, progress, index - 1, 1.0, seg_log, seg_path,
+                        label=seg_label,
+                    )
             except JobCancelled:
                 if seg_path.exists():
                     seg_path.unlink()
