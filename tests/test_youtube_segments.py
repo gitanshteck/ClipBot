@@ -9,6 +9,7 @@ byte-identical to what they were before YouTube segments existed.
 """
 
 import hashlib
+import json
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,7 @@ def _settings(overrides=None, work_root=None):
     data = {
         # sys.executable stands in for every external binary: it is a real
         # file, so resolve_tool() accepts it without touching PATH.
-        "tools": {"ffmpeg": sys.executable, "yt_dlp": sys.executable},
+        "tools": {"ffmpeg": sys.executable, "ffprobe": sys.executable, "yt_dlp": sys.executable},
         "cut": {
             "pad_start": 1.0, "pad_end": 1.5, "min_duration": 0.5,
             "encoder": "libx264", "preset": "veryfast", "crf": 20,
@@ -118,6 +119,30 @@ class TestStreamsFromInfo(unittest.TestCase):
         soon = ytsegments._expiry("https://x/y?a=1")
         self.assertAlmostEqual(soon, time.time() + ytsegments.FALLBACK_LIFETIME_SECONDS, delta=5)
 
+    def test_each_tracks_length_comes_from_its_url(self):
+        # googlevideo URLs carry the track's own length as dur= (seen on a real
+        # stream: video 12502.466, audio 12502.528).
+        info = {"requested_formats": [
+            _info_format(format_id="299", vcodec="avc1", url="https://gv/v?dur=12502.466&expire=2000000000"),
+            _info_format(format_id="140", acodec="mp4a", url="https://gv/a?expire=2000000000&dur=12502.528"),
+        ]}
+        s = ytsegments._streams_from_info(info)
+        self.assertEqual(s.video_duration, 12502.466)
+        self.assertEqual(s.audio_duration, 12502.528)
+
+    def test_a_muxed_url_gives_both_tracks_the_same_length(self):
+        info = _info_format(vcodec="avc1", acodec="mp4a", url="https://gv/m?dur=600.5&expire=2000000000")
+        s = ytsegments._streams_from_info(info)
+        self.assertEqual((s.video_duration, s.audio_duration), (600.5, 600.5))
+
+    def test_a_missing_or_junk_dur_is_unknown_not_an_error(self):
+        self.assertIsNone(ytsegments._url_duration("https://gv/v?expire=1"))
+        self.assertIsNone(ytsegments._url_duration("https://gv/v?dur=abc"))
+        self.assertIsNone(ytsegments._url_duration(None))
+        s = ytsegments._streams_from_info({"requested_formats": [
+            _info_format(vcodec="avc1"), _info_format(acodec="mp4a")]})
+        self.assertEqual((s.video_duration, s.audio_duration), (None, None))
+
 
 class TestRequestSize(unittest.TestCase):
     def test_default_and_clamping(self):
@@ -151,17 +176,42 @@ class TestSegmentArgv(unittest.TestCase):
             "ffmpeg", streams or _streams(), kw.pop("start", 100.5), kw.pop("end", 130.0),
             Path("out.mp4"), "libx264", "slow", 18, **kw)
 
+    @staticmethod
+    def _input_options(argv):
+        """The options that belong to each input: everything after the previous
+        `-i <url>` (or the start) up to this `-i`."""
+        inputs = [i for i, a in enumerate(argv) if a == "-i"]
+        starts = [0] + [i + 2 for i in inputs[:-1]]
+        return [(s, i, argv[s:i]) for s, i in zip(starts, inputs)]
+
     def test_every_input_uses_bounded_requests_and_seeks_before_its_input(self):
         argv = self._argv(size=2097152)
-        inputs = [i for i, a in enumerate(argv) if a == "-i"]
-        self.assertEqual(len(inputs), 2)
-        for i in inputs:
-            window = argv[max(0, i - 8):i]
+        per_input = self._input_options(argv)
+        self.assertEqual(len(per_input), 2)
+        for _, i, window in per_input:
             self.assertIn("-request_size", window)
             self.assertEqual(window[window.index("-request_size") + 1], "2097152")
             self.assertIn("-multiple_requests", window)
             self.assertEqual(argv[i - 2], "-ss")  # input seek: -ss immediately before -i
             self.assertEqual(argv[i - 1], "00:01:40.500")
+
+    def test_every_input_survives_a_dropped_or_stalled_connection(self):
+        # Measured: without -reconnect a response cut short ends the input early
+        # and ffmpeg still exits 0 with a truncated video; -rw_timeout alone only
+        # turns a hang into that same silent truncation. The pair recovers.
+        for _, _, window in self._input_options(self._argv()):
+            self.assertEqual(window[window.index("-reconnect") + 1], "1")
+            self.assertEqual(window[window.index("-reconnect_streamed") + 1], "1")
+            self.assertEqual(
+                window[window.index("-reconnect_delay_max") + 1],
+                str(ytsegments.RECONNECT_DELAY_MAX))
+            self.assertEqual(
+                window[window.index("-rw_timeout") + 1], str(ytsegments.READ_TIMEOUT_US))
+
+    def test_the_read_timeout_is_long_enough_for_a_cold_cdn_and_short_enough_to_matter(self):
+        # 20 s: a cold first read measured ~1 s per MiB, a dead connection would
+        # otherwise hang the job (and its Cancel button) indefinitely.
+        self.assertEqual(ytsegments.READ_TIMEOUT_US, 20_000_000)
 
     def test_maps_and_encoder(self):
         argv = self._argv()
@@ -278,12 +328,19 @@ class TestFetchSegment(unittest.TestCase):
         self.ws = Workspace.for_url(Path(self._tmp.name), YT_URL)
         self.out = self.ws.root / "seg.mp4"
         self.settings = _settings()
+        # What ffprobe finds in the fetched file, one entry per attempt (the last
+        # repeats): by default a complete 30 s segment (100 s -> 130 s below).
+        self.tracks = [{"video": 30.0, "audio": 30.0}]
 
     def tearDown(self):
         self._tmp.cleanup()
 
+    def _probe(self, path, settings):
+        return self.tracks.pop(0) if len(self.tracks) > 1 else self.tracks[0]
+
     def _fetch(self, resolver, run):
-        with mock.patch.object(ytsegments, "run_ffmpeg", side_effect=run):
+        with mock.patch.object(ytsegments, "run_ffmpeg", side_effect=run), \
+                mock.patch.object(ytsegments, "probe_output", side_effect=self._probe):
             ytsegments.fetch_segment(resolver, 100.0, 130.0, self.out, self.settings,
                                      "libx264", "slow", 18, base=2, span=1.0, label="seg")
 
@@ -364,6 +421,159 @@ class TestFetchSegment(unittest.TestCase):
         self.settings = _settings({"tools.ffmpeg": "no-such-ffmpeg-binary"})
         with self.assertRaises(ToolMissingError):
             self._fetch(self._resolver(_streams()), lambda *a, **k: None)
+
+    def test_an_incomplete_result_is_discarded_and_fetched_again(self):
+        # ffmpeg exits 0 after a connection drops mid-read and writes what it had:
+        # here a video that stops after 1.4 s under a 30 s audio track.
+        attempts = []
+
+        def run(argv, total, progress, base, span, log_path, out_path, label=None):
+            attempts.append(argv)
+            Path(out_path).write_bytes(b"truncated" if len(attempts) == 1 else b"whole")
+
+        self.tracks = [{"video": 1.4, "audio": 30.0}, {"video": 30.0, "audio": 30.0}]
+        self._fetch(self._resolver(_streams("136+140"), _streams("137+140")), run)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.resolve.call_count, 2)          # fresh URLs for the second try
+        self.assertEqual(self.out.read_bytes(), b"whole")      # the truncated file was cleared
+        self.assertNotEqual(attempts[0], attempts[1])
+
+    def test_it_gives_up_after_one_more_try_and_leaves_no_file(self):
+        runs = []
+
+        def run(argv, total, progress, base, span, log_path, out_path, label=None):
+            runs.append(1)
+            Path(out_path).write_bytes(b"audio only")
+
+        self.tracks = [{"audio": 30.0}]                        # never a video track
+        with self.assertRaises(StageError) as ctx:
+            self._fetch(self._resolver(_streams(), _streams(), _streams()), run)
+        message = str(ctx.exception)
+        self.assertIn("incomplete", message)
+        self.assertIn("no video track", message)               # says what was wrong
+        self.assertEqual(len(runs), 2)                         # not an endless loop
+        self.assertFalse(self.out.exists())                    # and no broken clip left behind
+
+    def test_a_complete_segment_is_not_fetched_twice(self):
+        runs = []
+
+        def run(argv, total, progress, base, span, log_path, out_path, label=None):
+            runs.append(1)
+            Path(out_path).write_bytes(b"whole")
+
+        self._fetch(self._resolver(_streams()), run)
+        self.assertEqual(len(runs), 1)
+
+    def test_a_clip_that_runs_off_the_end_of_the_stream_is_complete(self):
+        # 100 s -> 130 s requested but the source only has 120 s: 20 s is all
+        # there is, and that must not read as a truncated download.
+        def run(argv, total, progress, base, span, log_path, out_path, label=None):
+            Path(out_path).write_bytes(b"whole")
+
+        streams = _streams()._replace(video_duration=120.0, audio_duration=120.0)
+        self.tracks = [{"video": 20.0, "audio": 20.0}]
+        self._fetch(self._resolver(streams), run)
+        self.assertEqual(self.resolve.call_count, 1)
+        self.assertTrue(self.out.exists())
+
+
+class TestProbeOutput(unittest.TestCase):
+    def _probe(self, stdout, returncode=0):
+        proc = subprocess.CompletedProcess([], returncode, stdout, "")
+        with mock.patch.object(ytsegments.subprocess, "run", return_value=proc) as run:
+            return ytsegments.probe_output(Path("seg.mp4"), _settings()), run
+
+    def test_reads_each_tracks_own_length(self):
+        tracks, run = self._probe(json.dumps({"streams": [
+            {"codec_type": "video", "duration": "1.366667"},
+            {"codec_type": "audio", "duration": "10.000000"},
+        ]}))
+        self.assertEqual(tracks, {"video": 1.366667, "audio": 10.0})
+        # per track: the container's duration is the longest track, which is
+        # exactly what hides a truncated video under a whole audio track
+        self.assertIn("stream=codec_type,duration", run.call_args[0][0])
+        self.assertNotIn("format=duration", " ".join(run.call_args[0][0]))
+
+    def test_a_track_with_no_length_is_present_but_unknown(self):
+        tracks, _ = self._probe(json.dumps({"streams": [
+            {"codec_type": "video", "duration": "N/A"}, {"codec_type": "audio"}]}))
+        self.assertEqual(tracks, {"video": None, "audio": None})
+
+    def test_no_streams_means_no_tracks(self):
+        self.assertEqual(self._probe(json.dumps({"streams": []}))[0], {})
+        self.assertEqual(self._probe("{}")[0], {})
+
+    def test_only_the_first_track_of_each_kind_counts(self):
+        tracks, _ = self._probe(json.dumps({"streams": [
+            {"codec_type": "video", "duration": "5"}, {"codec_type": "video", "duration": "9"},
+            {"codec_type": "subtitle", "duration": "7"}]}))
+        self.assertEqual(tracks, {"video": 5.0})
+
+    def test_an_unreadable_file_is_none_not_a_crash(self):
+        self.assertIsNone(self._probe("", returncode=1)[0])
+        self.assertIsNone(self._probe("not json")[0])
+        with mock.patch.object(ytsegments.subprocess, "run", side_effect=OSError("gone")):
+            self.assertIsNone(ytsegments.probe_output(Path("x.mp4"), _settings()))
+        with mock.patch.object(ytsegments.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("ffprobe", 60)):
+            self.assertIsNone(ytsegments.probe_output(Path("x.mp4"), _settings()))
+
+    def test_a_missing_ffprobe_is_reported(self):
+        with self.assertRaises(ToolMissingError):
+            ytsegments.probe_output(Path("x.mp4"), _settings({"tools.ffprobe": "no-such-ffprobe"}))
+
+
+class TestSegmentProblem(unittest.TestCase):
+    def _problem(self, tracks, start=100.0, end=130.0, streams=None):
+        with mock.patch.object(ytsegments, "probe_output", return_value=tracks):
+            return ytsegments.segment_problem(
+                Path("seg.mp4"), start, end, streams or _streams(), _settings())
+
+    def test_a_complete_segment_has_no_problem(self):
+        self.assertEqual(self._problem({"video": 30.0, "audio": 30.0}), "")
+
+    def test_an_unreadable_file(self):
+        self.assertIn("could not be read", self._problem(None))
+
+    def test_a_missing_track(self):
+        self.assertIn("no video track", self._problem({"audio": 30.0}))
+        self.assertIn("no audio track", self._problem({"video": 30.0}))
+        self.assertIn("no video track", self._problem({}))
+
+    def test_a_truncated_video_is_caught_even_though_the_audio_is_whole(self):
+        # The measured failure: the container says 30 s (the audio), the video
+        # stopped after 1.4 s.
+        problem = self._problem({"video": 1.4, "audio": 30.0})
+        self.assertIn("video", problem)
+        self.assertIn("1.4", problem)
+        self.assertIn("30.0", problem)
+
+    def test_a_truncated_audio_track_is_caught_too(self):
+        self.assertIn("audio", self._problem({"video": 30.0, "audio": 4.0}))
+
+    def test_encoder_rounding_is_tolerated_but_a_real_shortfall_is_not(self):
+        self.assertEqual(self._problem({"video": 29.6, "audio": 29.95}), "")
+        self.assertEqual(self._problem({"video": 28.6, "audio": 30.0}), "")   # slack is 5 %
+        self.assertNotEqual(self._problem({"video": 28.4, "audio": 30.0}), "")
+
+    def test_a_clip_past_the_end_of_the_stream_is_judged_against_what_the_source_has(self):
+        # 100 s -> 130 s asked, but the tracks end at 120 s / 120.5 s.
+        streams = _streams()._replace(video_duration=120.0, audio_duration=120.5)
+        self.assertEqual(self._problem({"video": 20.0, "audio": 20.5}, streams=streams), "")
+        self.assertIn("video", self._problem({"video": 5.0, "audio": 20.5}, streams=streams))
+
+    def test_unknown_source_lengths_fall_back_to_the_request(self):
+        streams = _streams()                                      # no dur= known
+        self.assertEqual((streams.video_duration, streams.audio_duration), (None, None))
+        self.assertNotEqual(self._problem({"video": 20.0, "audio": 30.0}, streams=streams), "")
+
+    def test_a_track_whose_length_ffprobe_could_not_read_is_not_held_against_it(self):
+        self.assertEqual(self._problem({"video": None, "audio": 30.0}), "")
+
+    def test_a_very_short_clip_still_needs_some_video(self):
+        # 0.5 s asked: slack is capped at half the clip, so an empty track fails.
+        self.assertNotEqual(self._problem({"video": 0.0, "audio": 0.5}, start=10.0, end=10.5), "")
+        self.assertEqual(self._problem({"video": 0.4, "audio": 0.5}, start=10.0, end=10.5), "")
 
 
 class TestFfmpegSupport(unittest.TestCase):
