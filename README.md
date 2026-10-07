@@ -125,11 +125,22 @@ Two things to know about those cuts. They are **always re-encoded** (with `cut.*
 for clips and `compile.*` for compilations), never stream-copied: YouTube serves
 audio and video as separate streams, and a copy of them measured badly (clips
 start seconds early with silence at the front, and joined segments had timestamp
-collisions at the seams). Re-encoding is frame-exact and joins cleanly. On the
-720p30 test video it ran at roughly 9 to 10 times realtime; **1080p60 game
-footage will be slower**. And all the segments of one compilation must come from
-videos with the same resolution and frame rate, and can't be mixed with segments
-cut from a downloaded Kick VOD.
+collisions at the seams). Re-encoding is frame-exact and joins cleanly.
+
+How long it takes depends mostly on the video. On a 720p30 test video it ran at
+roughly 9 to 10 times realtime. On a real 3.5-hour 1080p60 stream, a 10-second
+clip took 2 to 6 seconds to fetch and encode, but a compilation segment at the
+default `compile.preset` (`slow`) ran at only about half of realtime (a 45-second
+segment took about 100 seconds), so a long 1080p60 compilation is limited by
+encoding, not by the download. If that is too slow, try `compile.preset`
+`medium`: a 30-second segment at `medium` (with `crf` 20 rather than 18) ran at
+about 1.7 times realtime in the same test.
+
+A dropped or stalled connection is retried automatically, and a segment that
+still comes back incomplete is fetched once more and then reported as an error.
+It is never saved as a broken clip. And all the segments of one compilation must
+come from videos with the same resolution and frame rate, and can't be mixed with
+segments cut from a downloaded Kick VOD.
 
 **What doesn't yet:** chat overlays (YouTube chat isn't harvested), and a
 full-video download for YouTube: nothing is kept locally, so if YouTube ever

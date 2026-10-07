@@ -37,6 +37,19 @@ How it works, and why it is not simply `yt-dlp --download-sections`
 * Stream URLs expire (~6 h, `expire=` in the URL) and are bound to the
   requester's IP. `StreamResolver` re-resolves shortly before expiry, and
   `fetch_segment` retries once with fresh URLs if ffmpeg reports a 4xx.
+* A dropped or stalled connection must not become a broken clip. ffmpeg treats
+  a response that ends early as the end of that input: against a local server
+  that cuts one range short it logs "Stream ends prematurely ... Error during
+  demuxing: I/O error", **exits 0**, and writes a file whose video track is a
+  fraction of the audio's (1.4 s of 10 s). The container still reports 10 s, so
+  only the per-track durations show it. On a real 3.5 h 1080p60 stream one
+  segment came back with no video track at all and was reported as a success.
+  So every input carries `-reconnect` (recovers from drops; measured clean
+  through four in a row) plus `-rw_timeout` (a stalled read gives up after 20 s
+  instead of hanging; alone that only truncates silently, together with
+  -reconnect it recovers), and `fetch_segment` then checks the output's own
+  tracks against the source's (googlevideo URLs carry each track's length as
+  `dur=`) and fetches once more if anything is missing or short.
 """
 
 import json
@@ -73,6 +86,13 @@ DEFAULT_REQUEST_SIZE = 1024 * 1024
 MIN_REQUEST_SIZE = 64 * 1024
 MAX_REQUEST_SIZE = 8 * 1024 * 1024
 
+# ffmpeg gives up on a network read that has produced nothing for this long
+# (microseconds) and, with -reconnect, tries again. Without it a dead connection
+# hangs the job - and its Cancel button, which is only checked when ffmpeg
+# prints a progress line - until the OS gives up.
+READ_TIMEOUT_US = 20 * 1000 * 1000
+RECONNECT_DELAY_MAX = 5
+
 # Re-resolve when the URLs have less than this long to live.
 REFRESH_MARGIN_SECONDS = 600
 # Used when a URL carries no `expire=` (never seen, but don't trust it).
@@ -92,6 +112,11 @@ class Streams(NamedTuple):
     fps: Optional[float]
     expires_at: float
     format_ids: str
+    # Each track's own length in seconds, from the `dur=` in its googlevideo
+    # URL. A complete segment can't be longer than what the track has left, so a
+    # clip at the very end of the stream isn't mistaken for a truncated one.
+    video_duration: Optional[float] = None
+    audio_duration: Optional[float] = None
 
 
 def _expiry(url: str) -> float:
@@ -99,6 +124,16 @@ def _expiry(url: str) -> float:
         return float(parse_qs(urlparse(url).query)["expire"][0])
     except (KeyError, IndexError, ValueError):
         return time.time() + FALLBACK_LIFETIME_SECONDS
+
+
+def _url_duration(url: Optional[str]) -> Optional[float]:
+    """A googlevideo URL's `dur=`: how long that track is, in seconds."""
+    if not url:
+        return None
+    try:
+        return float(parse_qs(urlparse(url).query)["dur"][0])
+    except (KeyError, IndexError, ValueError):
+        return None
 
 
 def segment_format(settings: Settings) -> str:
@@ -183,6 +218,9 @@ def _streams_from_info(info: Dict[str, Any]) -> Streams:
         fps=video.get("fps"),
         expires_at=min(_expiry(video["url"]), _expiry(audio["url"]) if audio else float("inf")),
         format_ids=ids,
+        video_duration=_url_duration(video["url"]),
+        # One muxed URL carries both tracks, so its `dur=` is the audio's too.
+        audio_duration=_url_duration(audio["url"] if audio else video["url"]),
     )
 
 
@@ -224,7 +262,15 @@ class StreamResolver(object):
 
 
 def _input_args(url: str, headers: Dict[str, str], size: int, start: float):
-    args = ["-request_size", str(size), "-multiple_requests", "1"]
+    args = [
+        "-request_size", str(size), "-multiple_requests", "1",
+        # Without these a dropped connection ends the input early and ffmpeg
+        # still exits 0 (see the module docstring); with them it reconnects, and
+        # a stalled read gives up after READ_TIMEOUT_US and reconnects too.
+        "-reconnect", "1", "-reconnect_streamed", "1",
+        "-reconnect_delay_max", str(RECONNECT_DELAY_MAX),
+        "-rw_timeout", str(READ_TIMEOUT_US),
+    ]
     agent = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
     if agent:
         args += ["-user_agent", agent]
@@ -288,6 +334,77 @@ def _explain(text: str) -> str:
     return ""
 
 
+def probe_output(path: Path, settings: Settings) -> Optional[Dict[str, Optional[float]]]:
+    """The tracks in a fetched segment: `{"video": seconds, "audio": seconds}`,
+    a key per track that exists (the value None when ffprobe can't tell its
+    length), or None when the file can't be read at all.
+
+    Per track, never the container's duration: that is the longest track, so a
+    file whose video stopped after 1.4 s while its audio ran on for 10 s still
+    reports 10 s.
+    """
+    ffprobe = resolve_tool(settings.tool("ffprobe"), FFMPEG_HINT)
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "stream=codec_type,duration",
+             "-of", "json", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        data = json.loads(proc.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    tracks = {}  # type: Dict[str, Optional[float]]
+    for stream in data.get("streams") or []:
+        kind = stream.get("codec_type")
+        if kind in ("video", "audio") and kind not in tracks:
+            try:
+                tracks[kind] = float(stream["duration"])
+            except (KeyError, TypeError, ValueError):
+                tracks[kind] = None
+    return tracks
+
+
+def segment_problem(
+    path: Path, start: float, end: float, streams: Streams, settings: Settings
+) -> str:
+    """Why `path` isn't the complete segment `[start, end]`, or "" if it is.
+
+    ffmpeg exits 0 after a connection drops mid-read and writes whatever it had
+    (see the module docstring), so success from ffmpeg proves nothing: look at
+    what came out. Each track must exist and reach roughly as far as the source
+    allows - `dur=` in the stream URL says how far that is, so a clip running
+    off the very end of the stream isn't taken for a truncated one.
+    """
+    tracks = probe_output(path, settings)
+    if tracks is None:
+        return "the file could not be read"
+    for kind, source_length in (
+        ("video", streams.video_duration),
+        ("audio", streams.audio_duration),
+    ):
+        if kind not in tracks:
+            return "it has no {0} track".format(kind)
+        want = (min(end, source_length) if source_length else end) - start
+        got = tracks[kind]
+        if got is None or want <= 0:
+            continue
+        # Encoders land within a frame or two of the request; allow 5 % (at
+        # least half a second) but never more than half of a very short clip.
+        slack = min(max(0.5, 0.05 * want), 0.5 * want)
+        if got < want - slack:
+            return "its {0} track is {1:.1f}s long, expected about {2:.1f}s".format(
+                kind, got, want
+            )
+    return ""
+
+
 def fetch_segment(
     resolver: StreamResolver,
     start: float,
@@ -305,16 +422,17 @@ def fetch_segment(
 ) -> None:
     """Cut `[start, end]` (seconds on the video's own clock) out of the YouTube
     video into `out_path`, re-encoded. Raises StageError on failure, leaving no
-    partial file behind; `JobCancelled` propagates untouched (the caller cleans
-    up, as compile/cut already do for local cuts)."""
+    partial file behind - including when the result comes back incomplete twice
+    in a row; `JobCancelled` propagates untouched (the caller cleans up, as
+    compile/cut already do for local cuts)."""
     binary = resolve_tool(settings.tool("ffmpeg"), FFMPEG_HINT)
     size = request_size(settings)
+    problem = ""
     for attempt in (1, 2):
         streams = resolver.get(refresh=(attempt == 2))
         argv = segment_argv(binary, streams, start, end, out_path, encoder, preset, crf, size)
         try:
             run_ffmpeg(argv, end - start, progress, base, span, log_path, out_path, label=label)
-            return
         except StageError as exc:
             if out_path.exists():
                 out_path.unlink()
@@ -323,6 +441,22 @@ def fetch_segment(
                 continue
             hint = _explain(str(exc))
             raise StageError("{0}\n\n{1}".format(exc, hint) if hint else str(exc))
+        problem = segment_problem(out_path, start, end, streams, settings)
+        if not problem:
+            return
+        if out_path.exists():
+            out_path.unlink()
+        if attempt == 1:
+            log.warning(
+                "Segment %s - %s came back incomplete (%s); fetching it again",
+                format_timestamp(start),
+                format_timestamp(end),
+                problem,
+            )
+    raise StageError(
+        "YouTube gave back an incomplete segment ({0}) twice in a row, so nothing was "
+        "written. This is usually a network hiccup - try again in a minute.".format(problem)
+    )
 
 
 def ffmpeg_supports_request_size(settings: Settings) -> Optional[bool]:

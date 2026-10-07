@@ -1121,9 +1121,12 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 - `resolve_streams(url, settings, timeout=180) -> Streams`: one `yt-dlp -J -f
   <segment format> <url>` (through `youtube_stage.base_argv`, so the configured
   JS runtime / cookies / player client apply) returning `Streams(video_url,
-  audio_url, headers, width, height, fps, expires_at, format_ids)` - a
-  video-only and an audio-only URL, or `audio_url=None` when yt-dlp picked one
-  muxed format. `DEFAULT_SEGMENT_FORMAT` (override `download.youtube.
+  audio_url, headers, width, height, fps, expires_at, format_ids,
+  video_duration, audio_duration)` - a video-only and an audio-only URL, or
+  `audio_url=None` when yt-dlp picked one muxed format; the two durations are
+  each track's own length from the `dur=` in its URL (12502.466 / 12502.528 on a
+  real stream whose `info.duration` said 12503), `None` if a URL lacks it.
+  `DEFAULT_SEGMENT_FORMAT` (override `download.youtube.
   segment_format`) is **progressive-https only** - HLS/DASH-manifest formats
   can't be range-read this way - preferring H.264 + AAC up to 1080p; a
   non-http protocol raises a `StageError` explaining that a stream that has
@@ -1138,8 +1141,9 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   compile.py append.
 - `segment_argv(binary, streams, start, end, out_path, encoder, preset, crf,
   size, audio_bitrate="160k")`: per input `-request_size N -multiple_requests 1
-  [-user_agent ..] [-headers ..] -ss <start> -i <url>` (each input seeked
-  independently, `-ss` before its own `-i` so it is a range seek), `-map 0:v:0
+  -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -rw_timeout
+  20000000 [-user_agent ..] [-headers ..] -ss <start> -i <url>` (each input
+  seeked independently, `-ss` before its own `-i` so it is a range seek), `-map 0:v:0
   -map 1:a:0` (`0:a:0` for a muxed URL), `-t <span>`, encoder/preset/crf,
   `-pix_fmt yuv420p` (a 10-bit VP9/AV1 source would otherwise come out as High10
   H.264, which browsers and Instagram won't play), aac 160k, `+faststart`. All
@@ -1160,6 +1164,31 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   `ffmpeg_supports_request_size(settings) -> Optional[bool]` (`ffmpeg -h
   protocol=https`; `None` if ffmpeg can't be run) feeds the Doctor's "ffmpeg
   -request_size (YouTube clips)" row.
+- **ffmpeg exiting 0 proves nothing about a fetched segment.** When a response
+  ends early (connection dropped) ffmpeg treats it as the end of that input, logs
+  `Stream ends prematurely ... Error during demuxing: I/O error`, **exits 0**, and
+  writes a file whose video is a fraction of the audio (1.4 s of 10 s), which
+  the container's own duration (the longest track) hides. Found when one 10 s
+  segment on a real 3.5 h 1080p60 stream came back with no video track and
+  `fetch_segment` called it a success; reproduced deterministically with a local
+  range server that cuts responses short. Three layers, each measured against
+  that server with the real ffmpeg: **(1)** `-reconnect 1 -reconnect_streamed 1
+  -reconnect_delay_max 5` on every input recovers from drops - clean through 8
+  cut responses in a row, because every reconnect resumes from where it got to;
+  **(2)** `-rw_timeout 20000000` (`READ_TIMEOUT_US`) turns a stalled read into an
+  error after 20 s instead of a hang (and Cancel, only checked when ffmpeg prints
+  a progress line, into something that works) - but *alone* it just truncates
+  silently, and with reconnect it recovers in about the timeout; **(3)**
+  `probe_output(path, settings)` (ffprobe per-track durations, `None` if
+  unreadable) and `segment_problem(path, start, end, streams, settings)` check
+  the result: each track must exist and reach `min(end, dur) - start` within
+  `min(max(0.5, 5 %), half)` of the clip, where `dur` is that track's length from
+  the URL - so a clip running past the end of the stream (asked 9 s, 8.0 s exist)
+  is not taken for a truncated one. An incomplete result is deleted and fetched
+  once more with fresh URLs, then `fetch_segment` raises "YouTube gave back an
+  incomplete segment (...) twice in a row" and leaves no file. Faults reconnect
+  can't repair (a server that answers with no body, or a source shorter than
+  its header promises) exercised layer 3 end to end.
 - **Always re-encoded: a stream-copy ("fast") mode was measured and
   deliberately not built.** On the real 720p30 test video keyframes were 3.7-7 s
   apart, a copy carried hidden pre-roll frames and edit lists that surfaced as
@@ -1167,10 +1196,16 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   independently) gave a silent lead-in, and ffmpeg backs `-ss` off ~0.13 s on
   B-frame streams. Re-encoding is frame-exact, needs nothing special for two
   inputs, and joined cleanly (monotonic DTS at the seams, exact durations).
-  Measured speed: ~9-10x realtime with x264 `slow` crf 18 - eight 62.5 s
-  segments compiled in 45.8 s. **That was a 720p30 talking-head video; 1080p60
-  game footage will be slower**, so don't quote those numbers for it without
-  measuring.
+  Measured speed: on a 720p30 talking-head test video ~9-10x realtime with
+  x264 `slow` crf 18 (eight 62.5 s segments compiled in 45.8 s). On the user's
+  real 3.47 h **1080p60** stream (H.264 299+140, a 5.3 GB video track) a 10 s
+  cut at the `cut.*` defaults (veryfast/crf 20) took 1.5-6 s including the
+  network (cold vs warm CDN; 2.5-21 MB output), a 30 s segment at `medium`/crf
+  20 took 17.6 s (~1.7x realtime), and a 45 s segment at the compile defaults
+  (`slow`/crf 18) took 98 s (~0.5x realtime): **at 1080p60 a compilation is
+  encode-bound**, so `compile.preset` is the knob. The first two fetches ever
+  made on that stream took 44 s and 36 s and the second came back broken (the
+  file above); none of the ~16 later ones did.
 - If YouTube ever stops serving progressive-https formats to yt-dlp,
   `resolve_streams` fails and there is no fallback: the full-video download
   escape hatch the original plan sketched was not built.
@@ -1777,11 +1812,16 @@ Sections and the values worth knowing without opening the file:
   return, the ownership check, or leaking `--impersonate` each fail a test.
 - `tests/test_youtube_segments.py` — neither yt-dlp nor ffmpeg is run: both are
   stubbed. `_streams_from_info` (video+audio, muxed, segmented/missing streams
-  refused), `request_size` clamping, the `segment_argv` shape (bounded requests
-  and `-ss` before **each** input, maps, all `-i` before `-t`, CRLF-joined
-  `-headers` with the user agent passed separately),
+  refused; each track's `dur=`), `request_size` clamping, the `segment_argv`
+  shape (bounded requests, reconnect and read timeout on **each** input, `-ss`
+  before each, maps, all `-i` before `-t`, CRLF-joined `-headers` with the user
+  agent passed separately), `probe_output` (per-track durations, never the
+  container's; unreadable -> `None`), `segment_problem` (a truncated video under
+  a whole audio track, missing tracks, encoder-rounding slack, a clip past the
+  end of the stream judged against `dur=`),
   `resolve_streams`, `StreamResolver` (lazy, one resolution, re-resolve near
-  expiry, tag), `fetch_segment` (one retry on a rejected URL and no more,
+  expiry, tag), `fetch_segment` (one retry on a rejected URL and no more, an
+  incomplete result deleted and fetched again then an error with no file left,
   cancel propagation without a retry, old-ffmpeg message), then the real
   `cut_clips`/`render_compilation` against a YouTube workspace with only
   `fetch_segment` stubbed (records the clip, skip-unchanged vs `force`, a
@@ -1853,7 +1893,10 @@ Sections and the values worth knowing without opening the file:
   64 KiB-8 MiB). Without them googlevideo throttles the read to ~31 KB/s and a
   cut appears to hang; a stream-copy mode was measured and rejected (see the
   ytsegments.py section) - don't add one without re-measuring keyframe spacing,
-  audio lead-in and dts at the concat seams.
+  audio lead-in and dts at the concat seams. **A fetched segment is only
+  accepted after its own tracks are checked** (`segment_problem`): ffmpeg exits 0
+  after a dropped connection with a truncated video, so never treat its exit
+  code as the verdict.
 - **The YouTube IFrame API script only ever loads on an embed-mode page.** The
   dashboard has no auth and a third-party script in its origin can call every
   mutating route, so it must never run on a Kick/local page (`createPlayer`
