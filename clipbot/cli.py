@@ -21,6 +21,8 @@ from . import compilations
 from . import manifest as manifest_module
 from . import platforms
 from . import review
+from . import youtube_auth
+from . import ytupload
 from .config import Settings, load_settings
 from .stages import analyze as analyze_stage
 from .stages import audio as audio_stage
@@ -32,6 +34,7 @@ from .stages import diarize as diarize_stage
 from .stages import reel as reel_stage
 from .stages import transcribe as transcribe_stage
 from .stages import transliterate as transliterate_stage
+from .stages import upload as upload_stage
 from .utils import (
     StageError,
     ToolMissingError,
@@ -245,6 +248,39 @@ def cmd_manifest(args: argparse.Namespace, settings: Settings) -> int:
     json_path, csv_path = manifest_module.write_manifest(ws, settings)
     print(json_path)
     print(csv_path)
+    return 0
+
+
+def cmd_youtube_auth(args: argparse.Namespace, settings: Settings) -> int:
+    """One-time Google login for `clipbot upload` (or just report its state)."""
+    if args.status:
+        state = youtube_auth.status(settings)
+        print("{0}: {1}".format(state["state"], state["detail"]))
+        return 0 if state["authorized"] else 1
+    youtube_auth.authorize(settings, open_browser=not args.no_browser)
+    print("Authorised. You can now run: python -m clipbot upload --url <kick VOD url>")
+    return 0
+
+
+def cmd_upload(args: argparse.Namespace, settings: Settings) -> int:
+    ws = resolve_workspace(args, settings)
+    record = upload_stage.upload_vod(
+        ws,
+        settings,
+        force=args.force,
+        privacy=args.privacy,
+        title=args.title,
+        description=args.description,
+        mode=args.mode,
+        quality=args.quality,
+    )
+    print(record.get("url", ""))
+    if record.get("privacy") == "private":
+        print(
+            "Uploaded as PRIVATE. Change visibility in YouTube Studio: {0}".format(
+                record.get("studio_url", "")
+            )
+        )
     return 0
 
 
@@ -736,6 +772,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_man = sub.add_parser("manifest", help="write manifest.json + manifest.csv")
     add_workspace_args(p_man)
     p_man.set_defaults(func=cmd_manifest)
+
+    p_yta = sub.add_parser(
+        "youtube-auth",
+        help="one-time Google login that lets `upload` publish to your channel",
+    )
+    p_yta.add_argument(
+        "--status", action="store_true", help="report whether upload is set up (no network)"
+    )
+    p_yta.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the authorisation address instead of opening a browser",
+    )
+    p_yta.set_defaults(func=cmd_youtube_auth)
+
+    p_up = sub.add_parser(
+        "upload",
+        help="stage 6a: upload a Kick VOD to YouTube (from disk, or straight from Kick)",
+    )
+    add_workspace_args(p_up)
+    p_up.add_argument(
+        "--privacy",
+        choices=ytupload.PRIVACY_CHOICES,
+        default=None,
+        help="default: config upload.youtube.privacy (private)",
+    )
+    p_up.add_argument("--title", help="default: the stream title (upload.youtube.title_template)")
+    p_up.add_argument("--description", help="default: upload.youtube.description_template")
+    p_up.add_argument(
+        "--mode",
+        choices=upload_stage.MODES,
+        default=None,
+        help="auto: use the downloaded VOD if there is one, else relay it from Kick "
+        "without downloading. file: always from disk (downloads first if needed). "
+        "stream: never touch disk",
+    )
+    p_up.add_argument(
+        "--quality",
+        choices=download_stage.QUALITY_CHOICES,
+        default=None,
+        help="cap resolution when relaying/downloading (default: download.format)",
+    )
+    p_up.add_argument(
+        "--force", action="store_true", help="upload again even if already uploaded"
+    )
+    p_up.set_defaults(func=cmd_upload)
 
     p_clean = sub.add_parser("cleanup", help="stage 6: delete the downloaded VOD")
     add_workspace_args(p_clean)

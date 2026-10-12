@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-09-26.
+> 2026-10-12.
 
 ## What this actually is, right now
 
@@ -48,6 +48,13 @@ The real state:
   (`static/reel.js`'s `drawReelPreview`), which a cross-origin iframe can never
   provide, so embed mode doesn't render the reel panel, crop layer or effects
   lane at all.
+- **Publishing a Kick VOD to YouTube** (`clipbot upload`, stage 6a): the VOD is
+  uploaded to the user's channel from disk, or relayed straight from Kick with
+  **no download** (`stages/upload.py`, `ytupload.py`, `youtube_auth.py`).
+  Opt-in - never part of `run`/`pipeline` - and it needs an OAuth client the
+  user creates in Google Cloud; nothing ships with the repo. **Not built**:
+  uploading clips, reels or compilations (the resumable client is generic, only
+  the VOD source selection exists), editing metadata after upload, scheduling.
 - Everything below reflects the code as it stands, not the README's table.
 
 The README (setup instructions, the "YouTube", "Transcription", "Analysis",
@@ -107,7 +114,7 @@ clipbot/
   cli.py            argparse CLI — every subcommand, the single source of truth
                      for what commands exist (run, download, chat, chat-sync,
                      audio, transcribe, analyze, transliterate, cut, reel,
-                     compile, manifest, cleanup, info, list,
+                     compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path})
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
@@ -125,6 +132,13 @@ clipbot/
                      resolve_streams() / StreamResolver / fetch_segment() -
                      what cut.py and compile.py use when a workspace has no
                      video on disk. Read its section below before touching it
+  youtube_auth.py    OAuth for uploading (loopback + PKCE, stdlib only):
+                     load_client() / authorize() / TokenSource / status().
+                     The client JSON is user-supplied and gitignored
+  ytupload.py        YouTube resumable-upload client over http.client:
+                     ResumableUpload (upload_file / upload_stream),
+                     ChunkReader, build_metadata(). Knows nothing of Kick,
+                     ffmpeg or workspaces. Read its section below first
   utils.py           logging setup, run_command() subprocess wrapper, slugify(),
                      format_timestamp(), StageError/ToolMissingError
   specerror.py       SpecError(ValueError) — shared by reelspec.py and fxspec.py
@@ -180,9 +194,11 @@ clipbot/
     cut.py             stage 5  (ffmpeg cut, copy or re-encode)
     reel.py            stage 5b (vertical 9:16 re-encode through fx filter graph)
     compile.py         stage 5c (landscape supercut: cut + concat named ranges)
+    upload.py          stage 6a (Kick VOD -> YouTube: from disk, or relayed
+                       from Kick with no download)
   server/
     app.py            FastAPI app, all HTTP routes, security guard()
-    jobs.py           JobRunner (2 worker lanes) + EventBus (SSE)
+    jobs.py           JobRunner (3 worker lanes) + EventBus (SSE)
     media.py          hand-rolled HTTP Range file serving
     __main__.py       `python -m clipbot.server` entry point (uvicorn)
     templates/        Jinja2: base.html (topbar with the Kick | YouTube tabs),
@@ -221,6 +237,15 @@ tests/
   test_youtube_segments.py      ytsegments.py + its use by cut.py/compile.py
                                 (yt-dlp and ffmpeg stubbed): the bounded-request
                                 argv, retry, fingerprints, mixed-source rules
+  test_youtube_upload.py        ytupload.py + stages/upload.py against an
+                                in-process fake of YouTube's resumable protocol
+                                (fault injection), plus a real-ffmpeg HLS relay
+                                test (skipped without ffmpeg; CLIPBOT_FFMPEG)
+  test_youtube_auth.py          youtube_auth.py: PKCE, the loopback flow against
+                                a fake token endpoint, refresh, status
+  test_upload_server.py         the upload job lane, stage row, Doctor row and
+                                "To YouTube" create-workspace path (FastAPI
+                                TestClient, no startup hooks)
   test_utils.py                 resolve_tool() incl. values that can't be paths
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
@@ -261,6 +286,7 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 | 5 | cut | `stages/cut.py` | `clips/*.mp4` | ffmpeg copy (default) or re-encode; writes into `clips.json[*].output`. A YouTube workspace (no video on disk) is cut straight from YouTube via `ytsegments.py`, always re-encoded |
 | 5b | reel | `stages/reel.py` | `clips/reels/*.mp4` | vertical 9:16 re-encode through the fx/chat/captions/speakers filter graph |
 | 5c | compile | `stages/compile.py` | `clips/compilations/<name>.mp4` | cuts + concatenates a named list of non-contiguous VOD ranges into one landscape supercut; opt-in, never part of `run`. YouTube segments are fetched straight from YouTube (`ytsegments.py`) |
+| 6a | upload | `stages/upload.py` | a YouTube video (id in `state.json`) | **Kick-only.** From the downloaded file (resumable; session saved in state.json) or relayed straight from Kick with no disk. Opt-in, never part of `run`; default privacy `private` |
 | 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel/compilation isn't rendered yet, unless `--force` |
 
 ### download.py
@@ -1097,6 +1123,124 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   list and its ✎ edit button disabled (tooltip points at the CLI) — ✕
   remove, Save, and Render all still work on the full mixed list.
 
+### upload.py (stage 6a: a Kick VOD -> YouTube)
+
+- `upload_vod(ws, settings, force=False, privacy=None, title=None,
+  description=None, mode=None, quality=None, progress=NULL_PROGRESS) -> dict`.
+  Returns, and records with `mark_stage("upload", ...)`, `{video_id, url,
+  studio_url, privacy, mode, title, uploaded_at[, bytes]}`; also writes
+  `youtube_video_id`/`youtube_url` to state.json. **Idempotent**: a workspace
+  with the `upload` stage marked returns that record with no network traffic
+  unless `force` - every upload makes a new video. Refuses a YouTube
+  workspace. `youtube_auth.TokenSource` is built before anything is resolved or
+  downloaded, so missing setup fails first and cheaply.
+- **Never part of `run`/`pipeline`**: it publishes to an external service, so
+  it only runs when asked (CLI `upload`; the dashboard's "Upload to YouTube"
+  row and "To YouTube" button, both of which confirm first). Default
+  visibility is `private` (`upload.youtube.privacy`).
+- **Modes** (`upload.youtube.mode`, `--mode`; `MODES = auto, stream, file`).
+  `auto`: file if `ws.video_path()` or a complete spool exists, else stream.
+  `file`: upload the file, running `download.acquire` first if there is none.
+  `stream`: never touch disk.
+- **File path** (`_upload_file`): the session URI is kept in
+  `state.json["upload_session"]` as `{uri, size, mtime, file, started_at}`. A
+  re-run `probe()`s it (`bytes */size`) and resumes at the server's offset when
+  size, mtime and name still match. A dead session (404) starts a new one, once.
+- **Stream path** (`_upload_stream`): `resolve_vod_stream()` runs `yt-dlp -J -f
+  <download.format or --quality> --impersonate chrome` (the download's own
+  selector and impersonation); `vod_stream_from_info()` picks one muxed URL, or
+  video + audio; `stream_argv()` stream-copies it (`-c copy`, no re-encode) to
+  **stdout** in a container writable without seeking - fragmented MP4
+  (`+frag_keyframe+empty_moov+default_base_moof`, the default), or Matroska /
+  MPEG-TS via `upload.youtube.stream_container`. `-progress` goes to stderr
+  (`pipe:2`) because stdout carries the media. `FfmpegRelay` is the file-like
+  source and `ytupload.ChunkReader` reads it ahead on a thread, so the read from
+  Kick and the write to YouTube overlap. Memory is about three chunks
+  (`upload.youtube.chunk_mb`).
+- **ffmpeg 8 needs `-bsf:a aac_adtstoasc`** to stream-copy HLS's ADTS AAC into
+  MP4/Matroska: older builds inserted it themselves, ffmpeg 8's muxer fails with
+  "Malformed AAC bitstream". `stream_argv` adds it only when the input is HLS
+  (`_is_hls`: a `.m3u8` URL or an `m3u8*` protocol), because the filter errors on
+  AAC that is already raw, and never for MPEG-TS. Found by the real-ffmpeg test,
+  not by the mocked ones.
+- **A truncated VOD is never confirmed.** `FfmpegRelay.read` checks at EOF - a
+  non-zero ffmpeg exit, or `media_seconds` short of `info.duration` by more than
+  `max(SHORTFALL_SLACK_SECONDS=120, 3%)` (Kick's own duration runs ~30s long,
+  see the download.py section) - and raises *before* the uploader sees the end
+  of input. `upload_stream` reads one chunk ahead for exactly this reason: the
+  final chunk is the one that declares the total and completes the upload, and
+  it is not sent until the source has been verified.
+- **Unknown-length fallback.** YouTube's guide documents declared sizes only. If
+  `start_session(size=None)` or the first `bytes 0-N/*` chunk is refused
+  (`UnknownLengthUnsupported`, carrying the unsent chunks in `.pending`), the
+  stage spools `pending` plus the rest of the source to `_upload/spool.mp4`
+  (written as `.part`, renamed once whole) and uploads that with a known size;
+  the record's `mode` is then `stream+spool`. The spool is in a subdirectory
+  because `Workspace.video_path()` scans the workspace root for video extensions
+  and must never mistake it for the VOD. Removed after a successful upload.
+- A stream-only workspace has no `video.info.json`; `_adopt_metadata` records the
+  keys a download would (`download.metadata_from_info`, split out of
+  `_read_metadata` for this) but never overwrites an existing value - `duration`
+  belongs to the audio probe.
+- Title/description come from `upload.youtube.title_template` /
+  `description_template` with `{title} {channel} {date} {slug} {url}` (unknown
+  keys render empty; a malformed template falls back to the title).
+  `ytupload.clean_title` replaces `<`/`>` (YouTube rejects them) and cuts to 100
+  characters; `clean_description` cuts to 5000 *bytes* on a character edge.
+- **Unverified against live YouTube.** Everything above is tested against an
+  in-process fake of the protocol and a real ffmpeg, not Google. Two facts only
+  a real upload settles: whether YouTube accepts an upload of unknown length
+  (the spool fallback exists because it may not), and whether an unverified API
+  project's uploads are forced private (Google's reference now says they are
+  not; its July 2020 revision note said they were).
+
+### ytupload.py (the resumable protocol)
+
+- Speaks HTTP through `http.client` directly - not Google's client library
+  (which wants a seekable stream and re-reads it on retry, which a relayed VOD is
+  not) and not `urllib` (which treats the protocol's `308 Resume Incomplete` as a
+  redirect).
+- Protocol: `POST ...?uploadType=resumable` -> `Location` session URI; `PUT
+  session` with `Content-Range: bytes S-E/TOTAL` (or `/*`); `308` + `Range:
+  bytes=0-N` means N+1 bytes are held; `200/201` is done and the body is the
+  video resource; an empty `PUT` with `bytes */TOTAL` is a status query. Chunks
+  are multiples of `CHUNK_UNIT` (256 KiB) except the last; `chunk_bytes` is
+  rounded down to one.
+- `_transmit(session, data, start, total)` is the core. A transient failure
+  (network error, 408/429/5xx, a 403 rate-limit reason) backs off, asks the
+  server what it holds, and carries on; a **partial** acknowledgement resends
+  only the remainder; a server offset *behind* what was already sent raises (a
+  live stream can't be rewound and skipping bytes would corrupt the video). The
+  retry count resets whenever the committed offset advances. A `401` refreshes
+  the token once. Cancellation is checked between chunks and during backoff.
+- `upload_stream` holds `cur` until it is acknowledged and reads `nxt` first, so
+  the last chunk (`nxt == b""`) carries `/TOTAL`; a source that is an exact
+  multiple of the chunk size therefore finishes without an empty finalising PUT.
+- `explain_api_error` maps `quotaExceeded`, `uploadLimitExceeded`,
+  `youtubeSignupRequired`, `videoTooLong`, auth reasons etc. to what to do.
+
+### youtube_auth.py (OAuth for uploading)
+
+- Loopback "installed app" flow with PKCE (`pkce_pair`, S256) and a `state`
+  check, stdlib only. The only scope is `youtube.upload`: it can add videos and
+  cannot read or change anything else on the channel.
+- ClipBot ships no credentials. The user's "Desktop app" OAuth client JSON goes at
+  `upload.youtube.client_secret_file` (default `config/youtube_client_secret.json`;
+  `.gitignore` also covers `client_secret*.json` and `youtube_token*.json`);
+  `load_client` rejects a `web` client and prints the setup steps. The refresh
+  token is stored at `upload.youtube.token_file`, else
+  `<work_root>/_cache/youtube_token.json`, and is tied to the client id (a login
+  from another client is not reused).
+- `TokenSource` is callable (`source(force_refresh=False)`), thread-safe, and
+  refreshes `EXPIRY_MARGIN_SECONDS` (120) before expiry, since a multi-hour
+  upload keeps asking. `invalid_grant` is reported with the usual real cause: a
+  consent screen left in **Testing** expires refresh tokens after 7 days;
+  publishing it ("In production", unverified is fine for personal use) stops it.
+- `status(settings)` is offline and returns `state` (`not_configured |
+  needs_auth | ready`), `authorized` and a `detail` string. The Doctor and
+  `POST /api/workspaces` use it; `not_configured` is deliberately not a Doctor
+  failure because the feature is optional.
+
 ### ytsegments.py (cutting straight from YouTube, used by stages 5 and 5c)
 
 - `fetch_segment(resolver, start, end, out_path, settings, encoder, preset,
@@ -1484,7 +1628,11 @@ error message instead of a silent no-op or a 500.
   takes a Kick or YouTube URL through `platforms.parse_url` (400 with a useful
   message for a YouTube channel/playlist/Short; a bare 11-character video id is
   accepted only when the body says `platform: "youtube"`, since it is otherwise
-  ambiguous), stores the canonical URL and submits a `pipeline` job; a kick.com
+  ambiguous), stores the canonical URL and submits a `pipeline` job (or, with
+  `action: "upload"` and an optional `privacy`, an `upload` job - the "To YouTube"
+  button; checked before the workspace is created, so a refusal leaves nothing
+  behind, and refused for a YouTube URL or when `youtube_auth.status` isn't
+  authorised); a kick.com
   URL the slug regex doesn't recognise keeps the route's old leniency; `GET`
   entries carry `platform`, `source_mode` and `video_id`); clips (`GET/POST
   /api/workspaces/{slug}/clips`,
@@ -1525,7 +1673,9 @@ error message instead of a silent no-op or a 500.
   out; `POST /api/doctor/youtube` is the on-request network probe, and the
   Doctor dialog's "Test YouTube" button calls it; an "ffmpeg -request_size
   (YouTube clips)" row from `ytsegments.ffmpeg_supports_request_size` fails on
-  an ffmpeg older than 8.1, and is omitted when ffmpeg can't be run at all);
+  an ffmpeg older than 8.1, and is omitted when ffmpeg can't be run at all; a
+  "YouTube upload (OAuth)" row from `youtube_auth.status`, failing only for a
+  client that is present but not yet authorised);
   media (video/clip/reel/**compilation**
   serving with `?download=1`, manifest CSV download — a compilation's file
   is always `<name>.mp4`, so the name doubles as the lookup key, no
@@ -1553,8 +1703,12 @@ error message instead of a silent no-op or a 500.
   audio → Extract audio → Transcribe → Find clips → (Hinglish captions,
   Speaker diarization) → "Fetch approved clips" (the `cut` job, ready once at
   least one clip is approved, done when the `cut` stage is marked) and *no*
-  chat/reel/cleanup rows - nothing gates on `has_video`. Kick's ten-stage list
-  is unchanged. `workspace.html` hides the Kick-only quality picker for
+  chat/reel/cleanup rows - nothing gates on `has_video`. Kick's list is
+  unchanged except for an "Upload to YouTube" row (key `upload`, before "Delete
+  VOD"): ready whenever a URL is recorded, deliberately not gated on `has_video`
+  because the VOD can be relayed without a download. `workspace.html` gives it a
+  visibility picker, confirms before publishing and asks harder before a second
+  upload, and hides the Kick-only quality picker for
   YouTube, says the video plays from YouTube, and words the empty clip list as
   "No clips fetched yet...".
 - **Player source**: `page_review`/`page_compile` pass `_player_source(ws)`
@@ -1600,16 +1754,20 @@ error message instead of a silent no-op or a 500.
 
 ### jobs.py — JobRunner / EventBus
 
-- **Two worker lanes**: `HEAVY_KINDS = (download, audio, transcribe,
+- **Three worker lanes**: `HEAVY_KINDS = (download, audio, transcribe,
   analyze, diarize, pipeline, reel, compile)`, `LIGHT_KINDS = (cut, chat,
-  transliterate, manifest, cleanup, waveform)`, each on its own
-  thread — a 3-second clip cut never queues behind a 90-minute transcribe,
+  transliterate, manifest, cleanup, waveform)`, `NET_KINDS = (upload,)`, each on
+  its own thread — a 3-second clip cut never queues behind a 90-minute transcribe,
   and chat harvest (must run before Kick's retention expires it) never
   queues behind an x264 render. `transliterate` is light for the same
   reason as `chat`: a handful of batched Claude calls, not CPU/GPU-bound.
   `diarize` is heavy for the same reason as `transcribe`: CPU-bound (no CUDA
   on this machine) and can run long on a multi-hour VOD. `compile` is heavy
   for the same reason as `reel`: every segment is a full x264 re-encode.
+  `upload` has its own lane because it is network-bound for as long as the VOD
+  is long (hours): in the heavy lane it would hold up downloads and
+  transcribes, in the light lane it would hold up chat harvest, which must not
+  wait because chat expires with the VOD.
 - Threads, not subprocesses, because none of the actual work is
   Python-CPU-bound (CTranslate2 releases the GIL; ffmpeg/yt-dlp are
   subprocesses; Claude calls are network I/O) and the ~3GB Whisper model can
@@ -1741,6 +1899,14 @@ Sections and the values worth knowing without opening the file:
   controls the proxy renderer.
 - **`library`** — `dir: ""` (defaults to `<work_root>/_library`);
   `fetch.allow_hosts` is the hard CDN allowlist.
+- **`upload`** — nested `youtube.*` (`stages/upload.py`, `youtube_auth.py`):
+  `client_secret_file` (`config/youtube_client_secret.json`; env
+  `CLIPBOT_YOUTUBE_CLIENT_SECRET`), `token_file` (`null` =
+  `<work_root>/_cache/youtube_token.json`), `privacy` (`"private"`), `mode`
+  (`"auto"`), `title_template` (`"{title}"`), `description_template`,
+  `category_id` (`"20"`, Gaming), `made_for_kids` (`false`), `chunk_mb` (`16`;
+  about three held in memory in stream mode), `max_retries` (`8`) and
+  `stream_container` (`"mp4"`).
 - **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
   posture above).
 
@@ -1832,6 +1998,22 @@ Sections and the values worth knowing without opening the file:
   of the old implementation plus golden values) must not move, and a Kick
   workspace without a video keeps the original "No video" error. The existing
   `test_compile.py` passes unmodified alongside it.
+- `tests/test_youtube_upload.py` — `FakeYouTube`, an in-process HTTP server that
+  speaks the resumable protocol and can lose a chunk, store one without
+  acknowledging it, acknowledge only part of one, 401 a token, expire the
+  session or refuse unknown length. Covers byte-exact round trips (file and
+  unknown-length stream, including an exact chunk multiple and a sub-chunk
+  source), bounded retries, resume from a saved session, the spool fallback
+  losing no bytes, ffmpeg dying never confirming a video, idempotence, and the
+  `-bsf:a aac_adtstoasc` rule. `TestRealFfmpegRelay` remuxes a generated HLS
+  playlist from a local server with the real ffmpeg and ffprobes the result
+  (skipped without ffmpeg; set `CLIPBOT_FFMPEG`).
+- `tests/test_youtube_auth.py` — PKCE, the whole loopback flow against a fake
+  token endpoint, a forged `state`, declined consent, refresh/rotation/
+  `invalid_grant`, and `status()` never touching the network.
+- `tests/test_upload_server.py` — upload on its own lane, the stage row, the
+  Doctor row, `POST /api/workspaces` with `action: "upload"` (refused before
+  anything is created; submits `upload`, not `pipeline`), and the job handler.
 - `tests/test_utils.py` — `resolve_tool`: a value that can't be a path (stray
   quote or control character in `CLIPBOT_YT_DLP`, which raises `OSError` from
   `Path.is_file()` on Windows) reads as "not found" with its hint, never a
@@ -1901,6 +2083,17 @@ Sections and the values worth knowing without opening the file:
   dashboard has no auth and a third-party script in its origin can call every
   mutating route, so it must never run on a Kick/local page (`createPlayer`
   returns the native `<video>` untouched for those).
+- **Uploading to YouTube is opt-in and private by default.** `upload` is never
+  part of `run` or the `pipeline` job, defaults to `private`, is idempotent (a
+  second run is a no-op without `--force`) and every dashboard entry point
+  confirms first. Credentials are the user's own; the client secret and token
+  are gitignored and must never be committed or logged.
+- **A relayed upload must never confirm a truncated VOD.** The source is verified
+  (ffmpeg exit status, duration shortfall) *before* the final chunk - the one
+  that completes the upload - is sent. Anything that changes how
+  `upload_stream` reads ahead must keep that ordering.
+- **`upload`'s spool lives in `_upload/`, never the workspace root**:
+  `Workspace.video_path()` scans the root for video extensions.
 - **`ANTHROPIC_API_KEY` must be set** for `analyze` and `transliterate`;
   there's no fallback path for either.
 - **`diarize` needs both `requirements-diarize.txt` installed and an HF
@@ -1992,6 +2185,11 @@ Sections and the values worth knowing without opening the file:
   from the dashboard at `/w/{slug}/compile` for review/render, not
   cross-stream authoring — see compile.py's section above) — not
   `clipbot cut`, which only ever produces separate per-clip files.
+- ...upload a Kick VOD to YouTube, from disk or relayed with no download →
+  `clipbot upload` / `clipbot/stages/upload.py` (protocol in `ytupload.py`,
+  login in `youtube_auth.py`, one-time `clipbot youtube-auth`). To upload clips,
+  reels or compilations, give `upload_vod` a different source file -
+  `ResumableUpload.upload_file` is already generic.
 - ...add a new full dashboard page (not just a route) → a new template
   extending `base.html` (gets the shared topbar/job-panel/SSE for free) +
   a dedicated `static/<page>.js` if it's non-trivial (see `compile.html`/

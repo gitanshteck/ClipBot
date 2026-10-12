@@ -27,6 +27,7 @@ ENV_OVERRIDES = {
     "CLIPBOT_TRANSCRIBE_BACKEND": "transcribe.backend",
     "CLIPBOT_CLAUDE_MODEL": "analyze.model",
     "CLIPBOT_RUBRIC_FILE": "analyze.rubric_file",
+    "CLIPBOT_YOUTUBE_CLIENT_SECRET": "upload.youtube.client_secret_file",
 }
 
 

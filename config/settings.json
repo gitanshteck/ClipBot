@@ -292,6 +292,26 @@
     }
   },
 
+  "upload": {
+    "_comment": "Stage 6a: upload a Kick VOD to YouTube (`clipbot upload`, dashboard 'Upload to YouTube'). Needs a Google Cloud 'Desktop app' OAuth client - see README.md 'Uploading to YouTube'. Never runs as part of `run`/pipeline.",
+    "youtube": {
+      "client_secret_file": "config/youtube_client_secret.json",
+      "token_file": null,
+      "_comment_privacy": "private | unlisted | public. Default private so nothing goes public by accident; change it in YouTube Studio or per run with --privacy.",
+      "privacy": "private",
+      "_comment_mode": "auto: upload the downloaded VOD if one is on disk, otherwise relay it straight from Kick (no download). file: always from disk (downloads first). stream: never touch disk.",
+      "mode": "auto",
+      "title_template": "{title}",
+      "description_template": "{title}\n\nOriginally streamed live on {date}.",
+      "category_id": "20",
+      "made_for_kids": false,
+      "_comment_chunk": "Upload chunk size in MiB (rounded to a multiple of 256 KiB). Stream mode holds ~3 chunks in memory.",
+      "chunk_mb": 16,
+      "max_retries": 8,
+      "_comment_container": "Container for the relayed stream: mp4 (fragmented), matroska or mpegts. Only used in stream mode.",
+      "stream_container": "mp4"
+    }
+  },
   "library": {
     "_comment": "The cross-stream editing library: sound effects, stickers, fonts, saved effect chains. Lives at <work_root>/_library, a sibling of the shared _cache, so it survives cleanup deleting a workspace and is reachable from every stream. Drop files into its sfx/ music/ stickers/ fonts/ folders and hit Rescan.",
     "dir": "",

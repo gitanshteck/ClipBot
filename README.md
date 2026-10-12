@@ -20,6 +20,7 @@ video is fetched.
 | 4 | Find clips (Claude + editable rubric) | `analyze` | done |
 | 5 | Cut clips (ffmpeg) | `cut` | done |
 | 5b | Author + render vertical 9:16 reels with chat/effects | `reel` | done |
+| 6a | Upload the VOD to YouTube (from disk, or relayed from Kick without downloading) | `upload` | done |
 | 6 | Delete the full VOD | `cleanup` | done |
 
 The table is the main path. Chat harvest (1b), speaker diarization (2b), Hinglish
@@ -191,6 +192,84 @@ first thing to try.
 The video must **allow embedding** (YouTube Studio → the video → Show more →
 Allow embedding) for the dashboard to play it. If it doesn't, the page says so.
 
+## Uploading to YouTube
+
+`clipbot upload` publishes a Kick VOD to your YouTube channel, either from the
+file if you've already downloaded it, or **straight from Kick without downloading
+anything**: ffmpeg stream-copies Kick's playlist (no re-encode) and the bytes are
+passed on to YouTube as they arrive, so this machine is only a relay and uses no
+disk. Nothing uploads as part of `run`; it only happens when you ask, and the
+default visibility is **private**.
+
+```bash
+# one-time setup, see below
+python -m clipbot youtube-auth
+
+# straight from Kick - nothing is saved on this computer
+python -m clipbot upload --url https://kick.com/<channel>/videos/<uuid>
+
+# an already-downloaded VOD, as unlisted
+python -m clipbot upload --workspace <slug> --privacy unlisted
+
+# always go through disk (downloads first if needed)
+python -m clipbot upload --url <url> --mode file
+```
+
+In the dashboard it's an **Upload to YouTube** step on each workspace, and a
+**To YouTube** button next to **Download** in *Browse a channel*. Both ask for
+confirmation and let you pick private / unlisted / public.
+
+`--mode` is `auto` by default: use the downloaded VOD if there is one, else
+relay it. `--force` uploads again; without it a second run is a no-op, because
+every upload makes a new video. The title defaults to the stream title and the
+description to `upload.youtube.description_template`.
+
+### One-time setup
+
+ClipBot can't ship Google credentials, so you create your own (about five
+minutes, free):
+
+1. [Google Cloud Console](https://console.cloud.google.com/) → create a project
+   → **APIs & Services → Library** → enable **YouTube Data API v3**.
+2. **OAuth consent screen**: user type *External*, add your own Google account
+   as a *test user*. Then set **Publishing status** to **In production**. This
+   matters: while it says *Testing*, Google expires the login every **7 days**.
+   "In production" without verification is fine for a personal app - you'll just
+   see an "unverified app" warning once during consent.
+3. **Credentials → Create credentials → OAuth client ID**, application type
+   **Desktop app**. Download the JSON and save it as
+   `config/youtube_client_secret.json` (git-ignored; or point
+   `upload.youtube.client_secret_file` / `CLIPBOT_YOUTUBE_CLIENT_SECRET` at it).
+4. `python -m clipbot youtube-auth` opens a browser for the one-time consent. It
+   asks only for the `youtube.upload` scope: ClipBot can add videos but cannot
+   read, edit or delete anything on your channel. The login is stored under
+   `work/_cache/`. `youtube-auth --status` reports where you are, offline, and the
+   Doctor in the dashboard shows the same.
+
+### Things worth knowing
+
+- **Quota and limits.** The API allows a generous number of uploads a day, and
+  YouTube takes files up to 256 GB. A channel that isn't phone-verified is held
+  to 15-minute videos, so verify it in YouTube Studio before uploading a VOD.
+  Kick VODs expire, so upload while the VOD still exists on Kick.
+- **Private by default.** Google's reference currently says uploads from
+  unverified API projects are *not* forced private (older notices said they
+  were). If yours comes back locked to private, that's the old rule; Studio
+  shows it. Pass `--privacy` as you like, but the first run is the real test.
+- **Interruptions.** A file upload keeps its resumable session in `state.json`,
+  so re-running continues where it stopped. A relayed upload can't be resumed by
+  a new process (the source can't be rewound): re-run and it starts again. Within
+  one run, dropped connections are retried with the unsent chunk held in memory.
+- **Stream mode and the size.** YouTube's guide documents uploads of a declared
+  size; a relayed VOD has no size up front, so ClipBot sends it as a chunked
+  upload of unknown length. If YouTube refuses that, ClipBot falls back to
+  spooling the VOD to `work/<slug>/_upload/spool.mp4` and uploads that with a
+  known size (it needs the disk space for that, and deletes it afterwards).
+- **A truncated VOD is never published.** If ffmpeg dies or Kick cuts the stream
+  short, the upload is abandoned before YouTube is told it is complete.
+- **Copyright.** YouTube's Content ID can claim or mute music that played on
+  stream, same as for any upload.
+
 ## Workspace layout
 
 Each VOD gets a directory under `work/`: `<channel>-<video-id>` for Kick,
@@ -207,6 +286,8 @@ work/<channel>-<video-id>/
   candidates.json   Claude's clip picks (kept)
   clips/            cut clips (kept), with reels/ alongside
   clips.json        your review decisions, ratings, crops and effects
+  _upload/          only if YouTube refused a relayed upload: a temporary spool
+                    of the VOD, deleted once uploaded
   manifest.json     per-clip description + rationale
   manifest.csv      same, spreadsheet-friendly
 ```

@@ -94,6 +94,16 @@ def _read_metadata(ws: Workspace) -> dict:
     except (ValueError, OSError) as exc:
         log.debug("Could not parse %s: %s", path, exc)
         return {}
+    return metadata_from_info(info)
+
+
+def metadata_from_info(info: dict) -> dict:
+    """The state.json fields derived from one yt-dlp info dict.
+
+    Split out of `_read_metadata` so the upload stage, which resolves a VOD with
+    `yt-dlp -J` and never writes a video.info.json, records exactly the same
+    keys a download would have.
+    """
     return {
         "title": info.get("title"),
         # Kick's own figure, which disagrees with the file: it reported 16523s

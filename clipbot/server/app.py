@@ -35,7 +35,9 @@ from .. import manifest as manifest_module
 from .. import platforms
 from .. import review
 from .. import speakerfx
+from .. import youtube_auth
 from .. import ytsegments
+from .. import ytupload
 from ..config import PROJECT_ROOT, load_settings
 from ..ffrun import run_ffmpeg
 from ..preview import PreviewRunner
@@ -49,6 +51,7 @@ from ..stages import reel as reel_stage
 from ..stages import transcribe as transcribe_stage
 from ..stages import diarize as diarize_stage
 from ..stages import transliterate as transliterate_stage
+from ..stages import upload as upload_stage
 from ..stages import youtube as youtube_stage
 from .. import reelspec
 from .. import speakers as speakers_module
@@ -218,6 +221,22 @@ def _h_compile(ws, st, job, progress):
     )
 
 
+def _h_upload(ws, st, job, progress):
+    record = upload_stage.upload_vod(
+        ws,
+        st,
+        force=job.options.get("force", False),
+        privacy=job.options.get("privacy") or None,
+        title=job.options.get("title") or None,
+        description=job.options.get("description"),
+        mode=job.options.get("mode") or None,
+        quality=job.options.get("quality") or None,
+        progress=progress,
+    )
+    # The job's `result` is shown in the dashboard, so make it the address.
+    return record.get("url")
+
+
 def _h_manifest(ws, st, job, progress):
     json_path, _ = manifest_module.write_manifest(ws, st)
     return json_path
@@ -306,6 +325,7 @@ for _kind, _handler in (
     ("compile", _h_compile),
     ("manifest", _h_manifest),
     ("cleanup", _h_cleanup),
+    ("upload", _h_upload),
     ("pipeline", _h_pipeline),
 ):
     runner.register(_kind, _handler)
@@ -426,6 +446,15 @@ def stage_states(ws: Workspace) -> List[Dict[str, Any]]:
             bool(stages.get("reel")),
             has_video and bool(approved),
             "needs the video and at least one approved clip",
+        ),
+        # Needs only the URL: with no video on disk the VOD is relayed straight
+        # from Kick to YouTube, so this is deliberately NOT gated on has_video.
+        entry(
+            "upload",
+            "Upload to YouTube",
+            bool(stages.get("upload")),
+            bool(state.get("url")),
+            "needs a VOD URL",
         ),
         entry(
             "cleanup",
@@ -791,7 +820,41 @@ async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
             status_code=400,
             detail="Expected a kick.com or youtube.com VOD URL",
         )
+    action = payload.get("action") or "pipeline"
+    if action not in ("pipeline", "upload"):
+        raise HTTPException(status_code=400, detail="unknown action")
+
+    if action == "upload":
+        # Checked before the workspace exists, so a refusal leaves nothing
+        # behind (an empty workspace directory is clutter the library lists).
+        if parsed is not None and parsed.platform == platforms.YOUTUBE:
+            raise HTTPException(
+                status_code=400,
+                detail="That is already a YouTube video - there is nothing to upload.",
+            )
+        privacy = payload.get("privacy") or settings.get("upload.youtube.privacy", "private")
+        if privacy not in ytupload.PRIVACY_CHOICES:
+            raise HTTPException(status_code=400, detail="unknown privacy")
+        auth = youtube_auth.status(settings)
+        if not auth["authorized"]:
+            raise HTTPException(
+                status_code=400,
+                detail="YouTube upload is not set up: " + auth["detail"],
+            )
+
     ws = Workspace.for_url(settings.work_root, canonical)
+    if action == "upload":
+        job = runner.submit(
+            "upload",
+            ws.slug,
+            {
+                "url": canonical,
+                "privacy": privacy,
+                "quality": payload.get("quality"),
+                "force": bool(payload.get("force")),
+            },
+        )
+        return {"slug": ws.slug, "job": job.to_dict()}
     job = runner.submit(
         "pipeline",
         ws.slug,
@@ -1438,6 +1501,17 @@ async def api_doctor():
             "name": "OPENAI_API_KEY",
             "ok": bool(os.environ.get("OPENAI_API_KEY")),
             "detail": "set" if os.environ.get("OPENAI_API_KEY") else "not set - openai-backend transcribe will fail",
+        }
+    )
+
+    # Optional feature: "not set up" is not a failure, only a client that is
+    # present but not yet authorised is worth flagging.
+    yt_up = youtube_auth.status(settings)
+    checks.append(
+        {
+            "name": "YouTube upload (OAuth)",
+            "ok": yt_up["state"] != "needs_auth",
+            "detail": yt_up["detail"],
         }
     )
 
