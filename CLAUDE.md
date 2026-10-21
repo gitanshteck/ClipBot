@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-10-12.
+> 2026-10-20.
 
 ## What this actually is, right now
 
@@ -55,6 +55,16 @@ The real state:
   user creates in Google Cloud; nothing ships with the repo. **Not built**:
   uploading clips, reels or compilations (the resumable client is generic, only
   the VOD source selection exists), editing metadata after upload, scheduling.
+- **An edit engine** (`clipbot edit ...`, `clipbot/edit*.py`, `stages/edit.py`):
+  a declarative *edit spec* -> a finished multi-source video (YouTube + Kick +
+  files) with speed ramps, camera moves, grade, callouts, transitions, music and
+  sound effects, loudness mastering, self-inspection (`edit verify`) and a
+  delivery package (`edit deliver`). It is how compilations beyond a plain concat
+  get made; `compile` stays the simple path. Documented in "The edit engine".
+- **A kill-feed reader** (`clipbot killfeed scan`, `stages/killfeed.py`,
+  `killfeed.py`): OCRs a shooter's on-screen kill feed (Windows OCR) and writes
+  `killfeed.json`, the data source for `edittemplates.kill_montage`. Tuned on
+  Wardogs; see "killfeed.py (stage 2c)".
 - Everything below reflects the code as it stands, not the README's table.
 
 The README (setup instructions, the "YouTube", "Transcription", "Analysis",
@@ -115,7 +125,10 @@ clipbot/
                      for what commands exist (run, download, chat, chat-sync,
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
-                     library {scan,list,presets,licenses,hash,fetch,path})
+                     library {scan,list,presets,licenses,hash,fetch,path},
+                     edit {new,validate,inspect,render,verify,deliver,list,clean,taste},
+                     killfeed {scan,list}) - the last two groups are registered
+                     by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
   workspace.py        Workspace (platform / video_id / source_mode() /
@@ -155,6 +168,25 @@ clipbot/
                      build_argv() — pure math, no IO
   fxspec.py          per-clip effects schema + ffmpeg filter builders — pure
                      math, no IO
+  editspec.py        edit-engine spec: normalize()/load()/to_json(), PROFILES,
+                     OUTPUT_PRESETS, EASES - pure, SpecError on anything invalid
+  edittimeline.py    compile_timeline(spec): retiming pieces, anchors resolved
+                     to output time, events, pacing(), chapters() - pure
+  editfilters.py     every ffmpeg filtergraph fragment the edit engine emits
+                     (retime, canvas, grade, camera, overlays, assembly, mix,
+                     master) - strings only, no IO
+  editoverlay.py     callout/text/image overlays -> RGBA PNGs (Pillow)
+  editaudio.py       numpy audio analysis: peak alignment for SFX, beat grid,
+                     join-click score
+  editqa.py          verify(): the checks run on a render + storyboard and
+                     loudness-plot artefacts
+  editdeliver.py     delivery package: platform variants, thumbnails, chapters,
+                     post text, manifest
+  edittemplates.py   kill_montage(): killfeed events -> a first-draft edit spec
+  edittaste.py       the user's standing editing preferences (taste.json)
+  editcli.py         the `edit` and `killfeed` command groups
+  killfeed.py        kill-feed parsing (pure): rows, distance tags, icons
+  data/windows_ocr.ps1  the Windows OCR driver stages/killfeed.py shells out to
   library.py         cross-stream asset library: scan(), asset_id(), presets,
                      speaker profiles, fetch_starter()
   speakers.py        per-workspace segment-id -> speaker-id overlay
@@ -194,6 +226,8 @@ clipbot/
     cut.py             stage 5  (ffmpeg cut, copy or re-encode)
     reel.py            stage 5b (vertical 9:16 re-encode through fx filter graph)
     compile.py         stage 5c (landscape supercut: cut + concat named ranges)
+    edit.py            stage 5d (the edit engine's renderer: spec -> mastered video)
+    killfeed.py        stage 2c (OCR a stream's kill feed -> killfeed.json)
     upload.py          stage 6a (Kick VOD -> YouTube: from disk, or relayed
                        from Kick with no download)
   server/
@@ -247,6 +281,9 @@ tests/
                                 "To YouTube" create-workspace path (FastAPI
                                 TestClient, no startup hooks)
   test_utils.py                 resolve_tool() incl. values that can't be paths
+  test_editspec.py ... test_editcli.py   the edit engine, one file per module -
+                                see "Testing"
+  test_killfeed.py              kill-feed parsing rules + icon geometry
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
                                 infrastructure exists in this repo
@@ -280,12 +317,14 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 | 1b | chat | `stages/chat.py` | `chat.json` | **Kick only** (YouTube has no chat stage yet); Kick REST API, cursor pagination; best-effort, never blocks the rest of `run` |
 | 2 | audio | `stages/audio.py` | `audio.wav` | ffmpeg `-vn`, 16kHz mono PCM; reads `source_audio.*` first (YouTube), then the VOD |
 | 2b | diarize | `stages/diarize.py` | `diarization.json` | pyannote, CPU-only here; opt-in, needs `requirements-diarize.txt` + an HF token, never part of `run` |
+| 2c | killfeed | `stages/killfeed.py` | `killfeed.json`, `killfeed_icons/` | OCRs the shooter's kill feed for one player's kills (Windows OCR); opt-in, never part of `run`. A YouTube workspace's video track is fetched to scratch and deleted |
 | 3 | transcribe | `stages/transcribe.py` (dispatcher) → `stages/transcribe_openai.py` (default) or local faster-whisper | `transcript.json` | `transcribe.backend` picks OpenAI whisper-1 (default, chunked+parallel, ~$0.36/hour) or local faster-whisper `large-v3`; flags but never drops low-confidence segments either way |
 | 3c | transliterate | `stages/transliterate.py` | `captions.json` | Claude API, batched; Devanagari transcript -> Hinglish (Latin script) for caption overlays; opt-in, never part of `run` |
 | 4 | analyze | `stages/analyze.py` | `candidates.json` | Claude API against the rubric; structural validation only |
 | 5 | cut | `stages/cut.py` | `clips/*.mp4` | ffmpeg copy (default) or re-encode; writes into `clips.json[*].output`. A YouTube workspace (no video on disk) is cut straight from YouTube via `ytsegments.py`, always re-encoded |
 | 5b | reel | `stages/reel.py` | `clips/reels/*.mp4` | vertical 9:16 re-encode through the fx/chat/captions/speakers filter graph |
 | 5c | compile | `stages/compile.py` | `clips/compilations/<name>.mp4` | cuts + concatenates a named list of non-contiguous VOD ranges into one landscape supercut; opt-in, never part of `run`. YouTube segments are fetched straight from YouTube (`ytsegments.py`) |
+| 5d | edit | `stages/edit.py` | `work/_edits/<name>/render/<name>.mp4` | the edit engine: a spec of clips from any mix of sources -> retimed, framed, graded, decorated, scored, mastered. Not tied to one workspace; opt-in |
 | 6a | upload | `stages/upload.py` | a YouTube video (id in `state.json`) | **Kick-only.** From the downloaded file (resumable; session saved in state.json) or relayed straight from Kick with no disk. Opt-in, never part of `run`; default privacy `private` |
 | 6 | cleanup | `stages/download.py:delete_vod` | deletes `video.<ext>` | refuses if any approved clip/reel/compilation isn't rendered yet, unless `--force` |
 
@@ -1123,6 +1162,86 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   list and its ✎ edit button disabled (tooltip points at the CLI) — ✕
   remove, Save, and Render all still work on the full mixed list.
 
+### killfeed.py (stage 2c)
+
+- `scan_killfeed(ws, settings, player=None, video=None, force=False,
+  keep_video=False, progress=NULL_PROGRESS) -> Path` writes `killfeed.json` and
+  `killfeed_icons/kNNN.png` into the workspace; `load(ws)` reads it back.
+  Settings: `killfeed.player/fps/scale/crop/chunk_seconds` (`crop` is `W:H:X:Y`
+  in a 1280x720 frame; the default `620:230:0:440` is Wardogs' feed).
+- Method: decode every frame at `killfeed.fps` (1/s), crop the feed, upscale
+  3x, OCR with the built-in **Windows OCR** (`data/windows_ocr.ps1` via
+  PowerShell + WinRT - no install, nothing leaves the machine; isolated in
+  `_ocr_dir` so another backend is one function), then `killfeed.observe()` ->
+  `group_runs()` -> events. A YouTube workspace has no video on disk, so the
+  picture track is copied to scratch (`ytsegments.download_video_track`) and
+  deleted afterwards unless `keep_video`. Dense decode, not keyframe seeking:
+  YouTube keyframes are ~6 s apart and a feed row can come and go between two.
+- **The feed row is `[killer][weapon icon][skull][N m] victim`.** Only rows that
+  involve the local player carry the distance tag. The player's name in the
+  *killer* position (x <= `LEFT_MARGIN`=260 at 3x) is a kill; the name after the
+  tag is a death and is skipped. A distance is read as the **mode** across the
+  frames a row is on screen (OCR misreads the `[` as a leading `1`, so
+  `drop_prefixed_twins` removes `110` sitting beside a better-supported `10`).
+  Name matching (`make_matcher`) accepts one edit (a dissolved first/last letter
+  included); names under 4 letters match exactly.
+- `killfeed.json`: `{schema, player, video, fps, crop, scale, duration, frames,
+  scanned_at, kills, nades, headshots, events[]}`; an event is `{id, t, first,
+  last, dist_m, n_obs, victim_raw, victim, weapon (gun|grenade|other|unknown),
+  headshot, through_cover, strength, blobs, icon}`. `t` is video seconds, half a
+  frame before the row first appeared. The icon crop stops at the last modifier
+  icon (`icon_extent`) so the distance digits never leak into a callout.
+- **Limits, by design:** a stream whose webcam/overlay covers the feed (several of the
+  user's Sep/Oct 2026 Wardogs streams) yields nothing - reported as "no
+  kills", which means "unreadable" there. Victim names in other scripts come back
+  empty (`readable_name`). Calibrated on 1280x720 Wardogs footage only.
+
+### edit.py (stage 5d)
+
+See "The edit engine" for the model; this is the IO. `render_edit(spec,
+settings, preview=False, force=False, progress=NULL_PROGRESS, master=True) ->
+report` where `spec` is a path or a dict and `report` carries `output`,
+`duration`, `frames`, `clips`, `xfade`, `measured_input`, `pacing`, `warnings`,
+`render_seconds`, `cache`. Phases: prepare (open + probe every source) ->
+segments -> clips -> assemble -> mix -> master -> mux.
+
+- **Segments**: each clip's `[in - pad, out + pad]` (`edit.segment_pad`, 0.6 s)
+  is cut once into `work/_cache/edit/seg/<sha>.mp4` - x264 veryfast crf 12,
+  **GOP 15** (`SEGMENT_GOP`), ALAC audio - keyed by the source's tag, the range
+  and the GOP, so edits share them. From YouTube it is
+  `ytsegments.fetch_segment(..., audio_args=, video_args=)`; from a file one
+  ffmpeg cut. The short GOP is what makes the per-piece `-ss` seeks cheap.
+- **Clips**: one ffmpeg per clip -> `cache/<final|preview>/clips/<id>-<fp>.mp4`
+  (video only) + `.wav` (PCM), named by a fingerprint of everything that shapes
+  them (`_clip_fingerprint`), so changing one clip re-encodes only that clip and
+  its neighbours' transition edges. Written as `.part.*` and renamed.
+- **Assemble**: all joins are cuts -> `ffconcat` + `-c copy` (no second encode,
+  clips encoded at *final* quality); any xfade -> a filter graph, clips encoded
+  at the *intermediate* tier (veryfast crf 14) and the assembler makes the final.
+  Preview tier is `ultrafast`; `preview_output()` is the same frame shape at
+  shorter side 540 (never larger than the final), <=30 fps.
+- **Master**: music/SFX mixed (`mix_graph`: beds sidechain-ducked by the game
+  audio, `amix normalize=0`), then `measure_loudness` (loudnorm pass 1) and a
+  second, **linear** loudnorm pass + `alimiter` + AAC once; the picture is
+  `-c copy` muxed beside it, so an audio change never costs a video generation.
+  The limiter ceiling is `true_peak_db - 0.7` (`LIMITER_MARGIN_DB`) so the AAC
+  encode stays under the ceiling; a peaky mix lands up to ~1.5 LU under the
+  target (the verifier passes within 1.5).
+- Everything uses `-/filter_complex <file>`: **`-filter_complex_script` was
+  removed in ffmpeg 8** and a 40-piece graph is far over any argv limit.
+- Layout of `work/_edits/<name>/`: `spec.json` (the author's - **a render never
+  overwrites it**; `edit new --force` keeps the old as `spec.previous.json`),
+  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles), `render/<name>.mp4`,
+  `render/<name>.preview.mp4`, `render/<name>.<final|preview>.spec.json` (what that
+  render used - a preview's 540p output block lives here, not in spec.json) and
+  `.timeline.json`, `verify/<final|preview>/`, `deliver/`, `cache/`. Underscore-
+  prefixed `_edits` so the dashboard's workspace list and slug validator ignore it.
+- A source is `{"workspace": slug}` (video on disk, else a YouTube workspace) or
+  `{"file": abs path}`. **`Workspace.video_path()` scans for the largest video-
+  extension file, and `source_audio.webm` (YouTube's audio-only download) counts
+  as one** - a YouTube workspace that still has it reads as "has video on disk" and
+  breaks `compile`; `clipbot audio` removes it. Not fixed.
+
 ### upload.py (stage 6a: a Kick VOD -> YouTube)
 
 - `upload_vod(ws, settings, force=False, privacy=None, title=None,
@@ -1492,6 +1611,101 @@ error message instead of a silent no-op or a 500.
   changes shorten it; the final `-t` must use this, never the raw `span`.
 - `escape_path`/`escape_text` are the only two escaping functions, used
   respectively for `drawtext`'s `fontfile=` and literal drawn text.
+
+## The edit engine (clipbot/edit*.py, stages/edit.py)
+
+A *spec* (`editspec.py`) says what the video is; `edittimeline.compile_timeline`
+works out when everything happens; `editfilters.py` writes the ffmpeg graphs;
+`stages/edit.py` runs them. Same split as `reelspec`/`reel.py`, same reason: the
+CLI validates and the renderer builds through ONE implementation.
+
+**The invariant that matters: positions are *source seconds*, durations are
+*output seconds*.** A clip's `in`/`out`, a speed key's `at`, a camera key, an
+overlay's `at`, a marker, an fx `at` are all seconds on the source's own clock
+(the same clock as the transcript and `killfeed.json`); `dur`, `in_dur`, a
+transition are what the viewer sees. So a callout lands on the kill whether or
+not a slow-motion ramp stretched it, and trimming `in` never walks an effect off
+its footage. Anything that hangs off *another clip* (music start, an SFX) is an
+anchor `{clip, marker | at | from:"end", offset}` resolved after the timeline
+exists - never an absolute time, which breaks when an earlier clip changes length.
+
+- **editspec.py** - `normalize(spec)` fills every default and raises
+  `SpecError` naming the field (`spec.clips[3].speed[1].rate: ...`);
+  `to_json` output loads back unchanged (a test pins it; the output block's
+  `faststart`/`preview` keys are accepted and ignored for that reason). Clips are
+  `type: clip` (`src,in,out,speed,interp,freezes,camera,grade,fx,overlays,markers,
+  audio,framing,transition_in,tags`) or `type: card` (`dur,bg,overlays`). `fx`
+  reuses fxspec's effect shapes but only `FX_ALLOWED=(punch, shake, flash, sfx,
+  sticker, text)`; ids are auto-assigned. Limits: 400 clips, 12 speed keys, **24
+  camera keys** (raised from 12: a four-kill run needs ~16), 24 overlays, 24
+  markers. `PROFILES` (`punchy|balanced|restrained`) are taste knobs - the pacing
+  gap, default transition, punch zoom, slow-mo rate, pre/post roll, SFX density -
+  not limits. `OUTPUT_PRESETS` follow YouTube's upload guide (H.264 High, yuv420p,
+  2 B-frames, closed 0.5 s GOP, AAC 48 kHz, faststart): `youtube_1080p60/30`,
+  `shorts_1080x1920`, `square_1080`, `portrait_4x5`, `preview_540p`.
+- **edittimeline.py** - `build_pieces(clip)`: a speed ramp becomes pieces of
+  constant rate, one per `RAMP_STEP` = 0.1 source seconds (the picture needs the fine steps); `src_to_out`, `compile_timeline`
+  (durations land on whole frames; an xfade overlap is capped at half of either
+  clip), `pacing()` (the hard gate borrowed from i-hate-editing: any stretch with
+  nothing new on screen longer than the profile's `max_gap`, a dead opening, an
+  overlay up < 1 s or > 4 s, too many SFX), `chapters()` (clips tagged `chapter`,
+  cards, >= 10 s apart, 0:00 forced).
+- **editfilters.py** - per-clip graph (`build_clip_graph`), in this order: retime
+  -> fps conform -> canvas (`fit|fill|blur`) -> grade -> camera -> overlays ->
+  flash -> transition fades -> exact-length `trim`. **One ffmpeg input per
+  retiming piece** (`-an -ss -t -i`), not one input split N ways - `concat` queues
+  every later branch's frames, which was gigabytes for a 40-piece graph. Audio is
+  ONE input per clip: a ramp is a single `atempo` group at its average rate
+  (`audio_groups`), because `atempo` loses ~25 ms per instance and a chain per 0.1 s
+  piece dipped at every boundary; the source is padded 0.07 s and trimmed back to
+  the exact planned length. `atempo` takes 0.5-2.0 so `atempo_chain` chains it.
+  xfade needs matching timebases (`fps=,settb=AVTB,setpts=PTS-STARTPTS` on every
+  node) and a final `trim=end_frame` (it comes out a frame long). Easing
+  expressions (`ease_expr`, `keyed_expr`) have a test that evaluates them against
+  `editspec.ease_value`. 30 ms audio fades at every cut (`audio_edges`).
+- **editoverlay.py** - `render(item, canvas, out_path, font, icon)` draws a
+  `text`/`callout`/`image` overlay to an RGBA PNG at 2x supersampling; the PNG is
+  cached by `fingerprint()` (content + font + icon mtime). A callout is an accent
+  bar + the game's own weapon icon + headline + sub line.
+- **editaudio.py** - `find_peak` (5 ms RMS window, not the single biggest sample)
+  and `sfx_start`: an SFX is placed so its *peak* lands on the hit (`lead` 0.05 s
+  early), not its start; `detect_beats`/`snap_to_beat` (spectral-flux autocorrelation;
+  returns no beats rather than a guess); `click_score` (largest sample jump vs
+  local RMS - `editqa.CLICK_LIMIT` flags a join that pops).
+- **editqa.py** - `verify(ffmpeg, ffprobe, render, timeline, master, out_dir,
+  deep=True)` -> `{ok, checks[{name,status,detail}], artifacts}`: A/V length (picture
+  vs sound within 1.5 frames), length vs plan, loudness vs target (+-1.5), true peak,
+  black / frozen / silent stretches (**planned title cards are exempt** - a mostly-
+  dark still card is by design), clicks at joins, pacing. Writes `verify.json/.md`,
+  a `loudness.png` (short-term RMS with cuts and events marked), `joins_NN.jpg`
+  contact sheets (a frame just after every join) and `moments_NN.jpg` (a frame
+  `MOMENT_LAG`=0.6 s after every marker, <= 64: where callouts are up). `ok` is false only on `fail`.
+- **editdeliver.py** - `build_package(...)`: `VARIANTS` (`shorts` 1080x1920 <= 180 s,
+  `square`, `portrait`) re-frame the master with the blur-fit canvas and **copy the
+  audio** (a hero platform deserves a real `edit render --preset`); thumbnails are
+  candidate frames 0.45 s after each marker, never within 0.3 s of a join, scored
+  by Laplacian sharpness x exposure, >= 5 s apart, JPEG <= 2 MB; `chapter_lines`
+  checks YouTube's three conditions (starts 0:00, >= 3, each >= 10 s);
+  `title_options`; writes `post.md/json` and `manifest.json` (sha1 of everything).
+- **edittemplates.py** - `kill_montage(kills, sources, ...)` -> spec dict.
+  `kills_from_killfeed(data, alias, root)` adapts `killfeed.json`. Kills within
+  12 s share a clip; clips are chaptered HEADSHOTS -> 50 m+ -> 100 m+ -> MULTI-KILLS
+  -> NADES (`order=chapters`; plain kills have no chapter and are left out - use
+  `chronological` for all of them); each kill gets a marker, callout (`DOUBLE KILL`
+  builds across a clip), punch zoom (max 4 per clip), flash on nades/headshots, a
+  slow push-in across any lead-up or gap longer than 0.8 x `max_gap` (so the
+  montage passes its own pacing gate - a test asserts it), and an optional
+  slow-mo ramp (`slowmo=none|nade|special|all`). Hand-editing the output is
+  expected: it is a first draft that is structurally right.
+- **edittaste.py** - `work/_edits/taste.json`: `add/retire/active`. Nothing in the
+  renderer reads it; whoever *writes the spec* does (see the skill), because a
+  taste is a judgement and belongs in the spec where it can be seen.
+
+Edit **skill**: `.claude/skills/clipbot-edit/` (SKILL.md, HARD-RULES.md,
+`rules/*.md`) holds the working method and the rules, each with the failure that
+produced it; read it before cutting an edit. It adapts the rules-from-failures,
+verify-before-present and pacing-gate ideas of github.com/ranahaani/i-hate-editing
+(MIT).
 
 ## Library system (clipbot/library.py)
 
@@ -1907,6 +2121,11 @@ Sections and the values worth knowing without opening the file:
   `category_id` (`"20"`, Gaming), `made_for_kids` (`false`), `chunk_mb` (`16`;
   about three held in memory in stream mode), `max_retries` (`8`) and
   `stream_container` (`"mp4"`).
+- **`killfeed`** — `player` (`"Teck"`), `fps` (`1.0`), `scale` (`3`), `crop`
+  (`"620:230:0:440"`, `W:H:X:Y` of the feed in a 1280x720 frame), `chunk_seconds`
+  (`1800`, how much video is decoded to PNGs at a time).
+- **`edit`** — `segment_pad` (`0.6` s cut either side of each clip so a zoom or
+  ramp never runs out of picture), `thumbnails` (`3`).
 - **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
   posture above).
 
@@ -2024,6 +2243,21 @@ Sections and the values worth knowing without opening the file:
   (stale time before first play, seek-from-ended restarts, no timeupdate).
   Skipped without Node. Mutation-checked for the pending-seek path, the stale
   tick guard, the pause-after-seek, and the referrer policy.
+- The edit engine, one file per module (all under `tests/`): `test_editspec`
+  (defaults, every rejection names its field, `normalize(to_json(x)) == x`),
+  `test_edittimeline` (retiming math, anchors, pacing gate, chapters),
+  `test_editfilters` (golden fragments; **easing expressions evaluated numerically
+  against `editspec.ease_value`**; a real-ffmpeg smoke test that a plain, a
+  slow-mo-ramp+camera+flash and a freeze clip each come out exactly the planned
+  frame count with sound the same length), `test_editaudio`, `test_editoverlay`,
+  `test_editqa` (detectors shown media with a known flaw: black, silent, frozen),
+  `test_editdeliver` (incl. a real package build), `test_edittemplates` (+ taste;
+  asserts the montage passes its own pacing gate and camera keys rise),
+  `test_edit_stage` (a full render of an xfade + card + ramp + music + SFX edit on
+  synthetic media: length, A/V sync, loudness near target, **a re-render reuses
+  every clip**, one changed clip re-encodes alone, a render never overwrites
+  spec.json), `test_editcli`, `test_killfeed` (synthetic OCR words, icons). The
+  ffmpeg-using tests skip when no ffmpeg resolves.
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
   `tests/` is not a package, so `python -m unittest tests.test_x` fails; pass
@@ -2116,6 +2350,16 @@ Sections and the values worth knowing without opening the file:
   to its binary, so that never raises this project's floor - see the
   youtube.py section.)
 
+- **Edit positions are source seconds, durations are output seconds** (see "The
+  edit engine"). Anything hanging off another clip is an anchor, never an absolute
+  time. Don't convert a position to "seconds into the video".
+- **A render never overwrites `spec.json`** - it writes `render/<name>.<tier>.spec.json`.
+  (A preview once replaced the author's spec with its own 540p output block.)
+- **The edit engine passes graphs to ffmpeg with `-/filter_complex <file>`.**
+  `clipbot/stages/reel.py:112` still uses `-filter_complex_script`, which ffmpeg 8
+  (the vendored build) no longer has - reel rendering is broken against it until that
+  one line is changed. Not fixed here.
+
 ## Quick index — "I want to..."
 
 - ...add a new effect type → `clipbot/fxspec.py` (schema + filter builder)
@@ -2197,6 +2441,24 @@ Sections and the values worth knowing without opening the file:
   timeline/transcript techniques rather than including review.js wholesale)
   + a page route in `app.py` + a nav link from wherever makes sense
   (`workspace.html` for a per-workspace page).
+
+- ...make an edit (retiming, callouts, music, mastering) from clips of any
+  source → write a spec (`clipbot edit new` for a kill montage, else by hand to
+  `work/_edits/<name>/spec.json`), then `edit validate` -> `edit render --preview` ->
+  `edit render` -> `edit verify` -> `edit deliver`. Read `.claude/skills/clipbot-edit/`
+  first.
+- ...add a new kind of edit template → `clipbot/edittemplates.py` (a pure function
+  returning a spec dict; validate it with `editspec.normalize` in a test and compile
+  it with `edittimeline.compile_timeline` + `pacing`) + a `--template` choice in
+  `editcli.py`.
+- ...add a new filter/effect to the edit engine → `editspec.py` (schema) +
+  `editfilters.py` (the builder, in the order documented there) +
+  `edittimeline.py` if it has a time-mapped position + a golden-string test and, if
+  it is a moving value, a numeric test in `tests/test_editfilters.py`.
+- ...read another game's kill feed → `data/windows_ocr.ps1` is generic;
+  `killfeed.py`'s row grammar (`observe`) and `LEFT_MARGIN`/`TOP_LABEL_Y`, and the
+  `killfeed.crop` setting, are Wardogs-specific. Run `scan` on a short range and
+  check `killfeed_icons/` by eye before trusting the numbers.
 
 ## Keeping this file honest
 

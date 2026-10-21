@@ -18,6 +18,7 @@ from typing import Optional
 
 from . import chatsync
 from . import compilations
+from . import editcli
 from . import manifest as manifest_module
 from . import platforms
 from . import review
@@ -877,6 +878,8 @@ def build_parser() -> argparse.ArgumentParser:
     lib_sub.add_parser("presets", help="list saved effect chains")
     lib_sub.add_parser("speakers", help="list speaker profiles")
     lib_sub.add_parser("path", help="print the library folder (creating it)")
+
+    editcli.add_parsers(sub)
 
     return parser
 

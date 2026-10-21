@@ -56,7 +56,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .config import Settings
@@ -293,8 +293,15 @@ def segment_argv(
     crf: int,
     size: int = DEFAULT_REQUEST_SIZE,
     audio_bitrate: str = "160k",
+    audio_args: Optional[List[str]] = None,
+    video_args: Optional[List[str]] = None,
 ):
-    """ffmpeg argv for one re-encoded segment cut straight from the stream URLs."""
+    """ffmpeg argv for one re-encoded segment cut straight from the stream URLs.
+
+    `audio_args` replaces the default AAC encode and `video_args` is appended to the
+    video encode; both default to None, which leaves the argv exactly as it was.
+    The edit engine uses them to write a near-lossless, short-GOP, lossless-audio
+    source segment it can seek into cheaply."""
     argv = [
         binary, "-hide_banner", "-nostats", "-loglevel", "error",
         "-progress", "pipe:1", "-y",
@@ -311,7 +318,11 @@ def segment_argv(
         # 10-bit VP9/AV1 sources would otherwise come out as High10 H.264,
         # which browsers and Instagram won't play.
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", audio_bitrate,
+    ]
+    if video_args:
+        argv += list(video_args)
+    argv += list(audio_args) if audio_args else ["-c:a", "aac", "-b:a", audio_bitrate]
+    argv += [
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -419,6 +430,8 @@ def fetch_segment(
     span: float = 1.0,
     log_path: Optional[Path] = None,
     label: Optional[str] = None,
+    audio_args: Optional[List[str]] = None,
+    video_args: Optional[List[str]] = None,
 ) -> None:
     """Cut `[start, end]` (seconds on the video's own clock) out of the YouTube
     video into `out_path`, re-encoded. Raises StageError on failure, leaving no
@@ -430,7 +443,8 @@ def fetch_segment(
     problem = ""
     for attempt in (1, 2):
         streams = resolver.get(refresh=(attempt == 2))
-        argv = segment_argv(binary, streams, start, end, out_path, encoder, preset, crf, size)
+        argv = segment_argv(binary, streams, start, end, out_path, encoder, preset, crf, size,
+                            audio_args=audio_args, video_args=video_args)
         try:
             run_ffmpeg(argv, end - start, progress, base, span, log_path, out_path, label=label)
         except StageError as exc:
@@ -476,3 +490,36 @@ def ffmpeg_supports_request_size(settings: Settings) -> Optional[bool]:
     except Exception:  # noqa: BLE001 - a diagnostic must never raise
         return None
     return "request_size" in (proc.stdout or "")
+
+
+def download_video_track(
+    resolver: StreamResolver,
+    out_path: Path,
+    settings: Settings,
+    progress: Progress = NULL_PROGRESS,
+    log_path: Optional[Path] = None,
+) -> Path:
+    """Copy a YouTube video's picture (no sound, no re-encode) to `out_path`.
+
+    For analysis that must read every frame - the kill-feed reader - not for
+    delivery: a 4-hour 1080p60 stream is ~6-8 GB, so the caller deletes the file
+    when it is done. The same bounded requests as `fetch_segment`, for the same
+    reason (an unbounded read of googlevideo crawls at ~31 KB/s). Written to a
+    `.part.mp4` and renamed, so an interrupted download is never mistaken for a
+    whole one.
+    """
+    binary = resolve_tool(settings.tool("ffmpeg"), FFMPEG_HINT)
+    streams = resolver.get()
+    part = out_path.with_name(out_path.stem + ".part.mp4")
+    argv = [binary, "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y"]
+    argv += _input_args(streams.video_url, streams.headers, request_size(settings), 0.0)
+    argv += ["-map", "0:v:0", "-c", "copy", "-an", str(part)]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run_ffmpeg(argv, streams.video_duration or 0.0, progress, 0.0, 1.0, log_path, part, label="video track")
+    except BaseException:
+        if part.exists():
+            part.unlink()
+        raise
+    part.replace(out_path)
+    return out_path

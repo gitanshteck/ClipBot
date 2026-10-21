@@ -197,6 +197,23 @@
     "crf": 18
   },
 
+  "killfeed": {
+    "_comment": "Kill-feed reader (`clipbot killfeed scan`): decodes the video at `fps` frames per second, crops the feed region, OCRs it with the built-in Windows OCR engine and records the kills that name `player`. Windows only; nothing leaves the machine. `crop` is W:H:X:Y in pixels of a 1280x720 frame - the default is Wardogs' feed, left-middle of the screen; a stream whose webcam sits over that area cannot be read. `scale` is the OCR upscale. YouTube's keyframes are ~6 s apart, so frames are decoded densely rather than seeking.",
+    "player": "Teck",
+    "fps": 1.0,
+    "scale": 3,
+    "crop": "620:230:0:440",
+    "chunk_seconds": 1800
+  },
+
+  "edit": {
+    "_comment": "The edit engine (`clipbot edit ...`): multi-source timelines with retiming, camera moves, grade, overlays, transitions, music/SFX and loudness mastering. Output goes to work/_edits/<name>/; source segments are cached in work/_cache/edit/ and shared between edits.",
+    "_comment_segment_pad": "Seconds of extra footage cut either side of each clip's [in, out] so a retimed or zoomed move never runs out of picture at its edges.",
+    "segment_pad": 0.6,
+    "_comment_thumbs": "Thumbnail candidates per delivery package.",
+    "thumbnails": 3
+  },
+
   "reel": {
     "_comment": "Vertical 9:16 export. Crop rects are fractions of the source frame, so a spec authored against this 720p VOD still resolves correctly if it is re-downloaded at 1080p.",
     "canvas": "1080x1920",

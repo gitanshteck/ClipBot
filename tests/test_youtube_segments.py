@@ -250,6 +250,79 @@ class TestSegmentArgv(unittest.TestCase):
         self.assertNotIn("-user_agent", argv)
 
 
+class TestSegmentArgvOverrides(unittest.TestCase):
+    """The edit engine asks for a short-GOP, lossless-audio segment; the defaults must
+    not move for everyone else (cut and compile fingerprint the whole argv)."""
+
+    def _argv(self, **kw):
+        return ytsegments.segment_argv("ffmpeg", _streams(), 100.0, 130.0, Path("out.mp4"), "libx264", "slow", 18, **kw)
+
+    def test_defaults_are_unchanged(self):
+        argv = self._argv()
+        self.assertEqual(argv[argv.index("-c:a"):argv.index("-c:a") + 4], ["-c:a", "aac", "-b:a", "160k"])
+        self.assertNotIn("-g", argv)
+
+    def test_audio_args_replace_the_aac_encode(self):
+        argv = self._argv(audio_args=["-c:a", "alac"])
+        self.assertIn("alac", argv)
+        self.assertNotIn("aac", argv)
+        self.assertNotIn("-b:a", argv)
+
+    def test_video_args_join_the_video_encode_before_the_output(self):
+        argv = self._argv(video_args=["-g", "15", "-keyint_min", "15"])
+        self.assertEqual(argv[argv.index("-g") + 1], "15")
+        self.assertLess(argv.index("-g"), argv.index("-movflags"))
+        self.assertGreater(argv.index("-g"), argv.index("-pix_fmt"))
+        self.assertEqual(argv[-1], "out.mp4")
+
+
+class TestDownloadVideoTrack(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace.for_url(Path(self._tmp.name), YT_URL)
+        self.out = self.ws.root / "scratch" / "video.mp4"
+        self.settings = _settings()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _resolver(self):
+        r = ytsegments.StreamResolver(self.ws, self.settings)
+        patcher = mock.patch.object(ytsegments, "resolve_streams", return_value=_streams())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return r
+
+    def test_copies_the_picture_only_through_a_part_file(self):
+        seen = {}
+
+        def run(argv, total, progress, base, span, log_path, out_path, label=None):
+            seen["argv"], seen["out"] = argv, out_path
+            Path(out_path).write_bytes(b"video")
+
+        with mock.patch.object(ytsegments, "run_ffmpeg", side_effect=run):
+            result = ytsegments.download_video_track(self._resolver(), self.out, self.settings)
+        self.assertEqual(result, self.out)
+        self.assertEqual(self.out.read_bytes(), b"video")
+        self.assertTrue(str(seen["out"]).endswith(".part.mp4"))
+        self.assertFalse(Path(seen["out"]).exists())              # renamed into place
+        argv = seen["argv"]
+        self.assertIn("-an", argv)
+        self.assertEqual(argv[argv.index("-c") + 1], "copy")
+        self.assertIn("-request_size", argv)                       # bounded reads, or googlevideo throttles it
+
+    def test_a_failed_download_leaves_no_file(self):
+        def run(argv, total, progress, base, span, log_path, out_path, label=None):
+            Path(out_path).write_bytes(b"half")
+            raise StageError("ffmpeg failed")
+
+        with mock.patch.object(ytsegments, "run_ffmpeg", side_effect=run):
+            with self.assertRaises(StageError):
+                ytsegments.download_video_track(self._resolver(), self.out, self.settings)
+        self.assertFalse(self.out.exists())
+        self.assertEqual(list(self.out.parent.glob("*.part.mp4")), [])
+
+
 class TestResolveStreams(unittest.TestCase):
     def _run(self, stdout="", returncode=0, stderr=""):
         proc = subprocess.CompletedProcess([], returncode, stdout, stderr)
