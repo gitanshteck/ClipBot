@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-10-20.
+> 2026-10-21.
 
 ## What this actually is, right now
 
@@ -264,7 +264,9 @@ tests/
                                 stubbed - see the stage-by-stage section)
   test_platforms.py             URL parsing/slugs (Kick slugs pinned against the
                                 pre-YouTube implementation), Workspace platform
-                                + source_mode + source_audio_path
+                                + source_mode + source_audio_path + video_path
+  test_reel_stage.py            stages/reel.py's filtergraph-file handoff
+                                (`-/filter_complex`), incl. a real-ffmpeg render
   test_youtube.py               stages/youtube.py + ytdlp.py + the audio-stage
                                 handoff + acquire() (yt-dlp itself never run,
                                 except a real-subprocess test of the runner)
@@ -984,10 +986,13 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   (`cut.py`'s hand-listed fingerprint, by contrast, does not.)
 - `_maybe_script_filter`: if `-filter_complex` exceeds
   `FILTER_SCRIPT_THRESHOLD = 8000` chars, writes it to
-  `logs/fx-<clip_id>.filter` and uses `-filter_complex_script` instead —
-  Windows caps command lines at 32767 chars, and a dozen effects with long
-  asset paths can approach it. The filter graph's own hash still feeds the
-  fingerprint, so a stable filename doesn't defeat cache invalidation.
+  `logs/fx-<clip_id>.filter` and passes `-/filter_complex <file>` instead
+  (`-filter_complex_script` was removed in ffmpeg 8, the vendored build, and
+  `-/filter_complex` is its replacement) — Windows caps command lines at 32767 chars, and a dozen
+  effects with long asset paths can approach it. The filter graph's own hash
+  still feeds the fingerprint, so a stable filename doesn't defeat cache
+  invalidation. Covered by `tests/test_reel_stage.py`, which renders a real
+  reel through the file path.
 - `reel_output`: `{file, bytes, duration (fx-adjusted — accounts for freeze
   hold / speed change), width, height, preset, upscale: {game, cam},
   source: "vod", rendered_at, fingerprint}`.
@@ -1237,10 +1242,12 @@ segments -> clips -> assemble -> mix -> master -> mux.
   `.timeline.json`, `verify/<final|preview>/`, `deliver/`, `cache/`. Underscore-
   prefixed `_edits` so the dashboard's workspace list and slug validator ignore it.
 - A source is `{"workspace": slug}` (video on disk, else a YouTube workspace) or
-  `{"file": abs path}`. **`Workspace.video_path()` scans for the largest video-
-  extension file, and `source_audio.webm` (YouTube's audio-only download) counts
-  as one** - a YouTube workspace that still has it reads as "has video on disk" and
-  breaks `compile`; `clipbot audio` removes it. Not fixed.
+  `{"file": abs path}`. `Workspace.video_path()` skips everything named
+  `source_audio.*` (YouTube's audio-only download, which is a `.webm`/`.mp4`, plus
+  yt-dlp's `source_audio.f251.webm` fragments), so a YouTube workspace that still
+  has it reads as `embed`, not `local`, and `compile`/`cut` route to
+  `ytsegments`. Kept in `workspace.py` as `_is_source_audio_artifact`; a
+  recorded `video_file` pointing at one is ignored too.
 
 ### upload.py (stage 6a: a Kick VOD -> YouTube)
 
@@ -2184,7 +2191,14 @@ Sections and the values worth knowing without opening the file:
   channel/playlist/Short URLs raising a useful `ValueError`, the bare-id opt-in
   (an 11-character Kick channel name must never parse as a video id),
   `Workspace.for_url` recording platform/video id/canonical URL,
-  `source_mode()`, and `source_audio_path()` ignoring yt-dlp scratch files.
+  `source_mode()`, `source_audio_path()` ignoring yt-dlp scratch files, and
+  `video_path()` never returning `source_audio.*` (a YouTube workspace still holding
+  its audio download stays `embed`).
+- `tests/test_reel_stage.py` — `_maybe_script_filter` (short graph untouched, long
+  graph written to `logs/fx-<id>.filter` behind `-/filter_complex` with the rest of
+  the argv unchanged, signature follows the graph, dry run writes nothing), plus
+  real-ffmpeg renders (skipped without ffmpeg) proving the file form is accepted
+  and produces the same frames as the inline form.
 - `tests/test_youtube.py` — yt-dlp is never run except in `TestRunYtDlp`,
   which drives a real subprocess (this Python) to prove progress parsing, the
   new-phase-on-reset behaviour and cancellation. Everything else stubs
@@ -2355,10 +2369,11 @@ Sections and the values worth knowing without opening the file:
   time. Don't convert a position to "seconds into the video".
 - **A render never overwrites `spec.json`** - it writes `render/<name>.<tier>.spec.json`.
   (A preview once replaced the author's spec with its own 540p output block.)
-- **The edit engine passes graphs to ffmpeg with `-/filter_complex <file>`.**
-  `clipbot/stages/reel.py:112` still uses `-filter_complex_script`, which ffmpeg 8
-  (the vendored build) no longer has - reel rendering is broken against it until that
-  one line is changed. Not fixed here.
+- **Graphs go to ffmpeg with `-/filter_complex <file>`, never
+  `-filter_complex_script`** (removed in ffmpeg 8, the vendored build). The edit
+  engine and `stages/reel.py`'s `_maybe_script_filter` both follow this; a graph in a
+  file is only ever exercised by an oversized reel, so keep
+  `tests/test_reel_stage.py`'s real-ffmpeg test passing.
 
 ## Quick index — "I want to..."
 

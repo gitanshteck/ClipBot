@@ -83,6 +83,8 @@ def _source_id(ws: Workspace, video: Path) -> str:
 
 # Beyond this the filtergraph goes into a file. Windows caps a command line at
 # 32767 characters and a dozen effects with long asset paths can approach it.
+# The file is passed as `-/filter_complex <file>`: `-filter_complex_script` was
+# removed in ffmpeg 8 (the vendored build); `-/filter_complex` is its replacement.
 FILTER_SCRIPT_THRESHOLD = 8000
 
 
@@ -109,7 +111,7 @@ def _maybe_script_filter(argv, ws, clip_id, dry_run):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(graph, encoding="utf-8")
     argv = list(argv)
-    argv[at:at + 2] = ["-filter_complex_script", str(path)]
+    argv[at:at + 2] = ["-/filter_complex", str(path)]
     return argv, signature
 
 

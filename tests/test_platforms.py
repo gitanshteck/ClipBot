@@ -255,6 +255,88 @@ class TestSourceMode(unittest.TestCase):
     def test_missing_workspace_dir_is_none(self):
         self.assertEqual(Workspace(self.root / "nope").source_mode(), MODE_NONE)
 
+    def test_youtube_audio_download_is_not_a_video(self):
+        # The audio-only download is a .webm/.mp4, a video extension. Until
+        # audio.wav exists and it is deleted it must not read as "has a video".
+        ws = Workspace.for_url(self.root, "https://youtu.be/dQw4w9WgXcQ")
+        for name in ("source_audio.webm", "source_audio.mp4"):
+            with self.subTest(name=name):
+                audio = ws.root / name
+                audio.write_bytes(b"x" * 10)
+                self.assertEqual(ws.source_mode(), MODE_EMBED)
+                audio.unlink()
+
+    def test_audio_download_does_not_make_kick_local(self):
+        ws = Workspace.for_url(self.root, KICK_URLS[0])
+        (ws.root / "source_audio.webm").write_bytes(b"x" * 10)
+        self.assertEqual(ws.source_mode(), MODE_NONE)
+
+
+class TestVideoPath(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace(Path(self._tmp.name) / "ws").ensure()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _put(self, name, size):
+        path = self.ws.root / name
+        path.write_bytes(b"x" * size)
+        return path
+
+    def test_none_when_empty(self):
+        self.assertIsNone(self.ws.video_path())
+
+    def test_finds_the_largest_video(self):
+        self._put("a.mp4", 10)
+        big = self._put("b.mkv", 50)
+        self.assertEqual(self.ws.video_path(), big)
+
+    def test_ignores_the_youtube_audio_download(self):
+        for name in ("source_audio.webm", "source_audio.mp4", "source_audio.m4a"):
+            with self.subTest(name=name):
+                audio = self._put(name, 100)
+                self.assertIsNone(self.ws.video_path())
+                self.assertEqual(self.ws.source_audio_path(), audio)
+                audio.unlink()
+
+    def test_ignores_ytdlp_format_fragments(self):
+        # source_audio.f251.webm is a leftover per-format download: a video
+        # extension, never a picture.
+        self._put("source_audio.f251.webm", 100)
+        self._put("source_audio.webm.part", 100)
+        self.assertIsNone(self.ws.video_path())
+
+    def test_a_real_video_beats_a_larger_audio_download(self):
+        self._put("source_audio.webm", 1000)
+        video = self._put("video.mp4", 10)
+        self.assertEqual(self.ws.video_path(), video)
+
+    def test_whatever_source_audio_path_returns_is_never_the_video(self):
+        for name in ("source_audio.m4a", "source_audio.webm", "source_audio.mp4"):
+            with self.subTest(name=name):
+                self._put(name, 100)
+                self.assertIsNotNone(self.ws.source_audio_path())
+                self.assertNotEqual(self.ws.video_path(), self.ws.source_audio_path())
+                self.ws.source_audio_path().unlink()
+
+    def test_recorded_video_wins_over_the_scan(self):
+        self._put("other.mp4", 1000)
+        recorded = self._put("video.mkv", 10)
+        self.ws.update_state(video_file=str(recorded))
+        self.assertEqual(self.ws.video_path(), recorded)
+
+    def test_recorded_relative_path_resolves_against_the_workspace(self):
+        recorded = self._put("video.mp4", 10)
+        self.ws.update_state(video_file="video.mp4")
+        self.assertEqual(self.ws.video_path(), recorded)
+
+    def test_a_recorded_audio_download_is_not_trusted(self):
+        audio = self._put("source_audio.webm", 100)
+        self.ws.update_state(video_file=str(audio))
+        self.assertIsNone(self.ws.video_path())
+
 
 class TestSourceAudioPath(unittest.TestCase):
     def setUp(self):

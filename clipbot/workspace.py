@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from . import platforms
-from .utils import StageError, find_largest_file, get_logger, slugify
+from .utils import StageError, get_logger, slugify
 
 log = get_logger(__name__)
 
@@ -53,6 +53,19 @@ VIDEO_EXTENSIONS = [".mp4", ".mkv", ".ts", ".webm", ".mov", ".flv"]
 # files (source_audio.webm.part, source_audio.info.json, ...) never count.
 SOURCE_AUDIO_STEM = "source_audio"
 SOURCE_AUDIO_EXTENSIONS = (".m4a", ".webm", ".opus", ".ogg", ".mp3", ".aac", ".mka", ".mp4", ".wav")
+
+
+def _is_source_audio(path: Path) -> bool:
+    """Whether `path` is a YouTube audio-only download (what source_audio_path()
+    returns), as opposed to yt-dlp scratch such as source_audio.webm.part."""
+    return path.stem == SOURCE_AUDIO_STEM and path.suffix.lower() in SOURCE_AUDIO_EXTENSIONS
+
+
+def _is_source_audio_artifact(path: Path) -> bool:
+    """Anything the audio-only download owns: the download itself plus yt-dlp's
+    per-format fragments (source_audio.f251.webm), which carry a video extension
+    but are never a picture."""
+    return path.name.startswith(SOURCE_AUDIO_STEM + ".")
 
 # source_mode() values
 MODE_LOCAL = "local"   # a video file is on disk; the page plays that
@@ -257,28 +270,32 @@ class Workspace:
         """Current VOD file, if one is on disk.
 
         Prefers the path stage 1 recorded; falls back to scanning, so a manually
-        placed file still works.
+        placed file still works. Never returns `source_audio.*`: YouTube's
+        audio-only download is often a .webm/.mp4, which would otherwise pass
+        for a video and make a workspace with no picture read as `local`.
         """
         recorded = self.read_state().get("video_file")
         if recorded:
             candidate = Path(recorded)
             if not candidate.is_absolute():
                 candidate = self.root / candidate
-            if candidate.exists():
+            if candidate.exists() and not _is_source_audio_artifact(candidate):
                 return candidate
-        return find_largest_file(self.root, VIDEO_EXTENSIONS)
+        extensions = {e.lower() for e in VIDEO_EXTENSIONS}
+        found = [
+            p
+            for p in self.root.iterdir()
+            if p.is_file()
+            and p.suffix.lower() in extensions
+            and not _is_source_audio_artifact(p)
+        ]
+        return max(found, key=lambda p: p.stat().st_size) if found else None
 
     def source_audio_path(self) -> Optional[Path]:
         """YouTube's audio-only download, if it is still on disk."""
         if not self.root.is_dir():
             return None
-        found = [
-            p
-            for p in self.root.iterdir()
-            if p.is_file()
-            and p.stem == SOURCE_AUDIO_STEM
-            and p.suffix.lower() in SOURCE_AUDIO_EXTENSIONS
-        ]
+        found = [p for p in self.root.iterdir() if p.is_file() and _is_source_audio(p)]
         return max(found, key=lambda p: p.stat().st_size) if found else None
 
     # ---- platform / source ------------------------------------------------
