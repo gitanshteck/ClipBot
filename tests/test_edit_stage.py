@@ -90,6 +90,15 @@ class TestPureHelpers(unittest.TestCase):
         self.assertEqual(sp["name"], "t")
 
 
+class TestMux(unittest.TestCase):
+    def test_both_streams_are_cut_to_the_planned_length(self):
+        argv = stage.mux_argv("ffmpeg", "v.mp4", "a.m4a", "out.mp4", 606.91666667)
+        self.assertEqual(argv[argv.index("-t") + 1], "606.91667")
+        self.assertLess(argv.index("-c"), argv.index("-t"))                  # an output option, after the inputs
+        self.assertEqual(argv[argv.index("-c") + 1], "copy")                 # the picture is never re-encoded here
+        self.assertEqual(argv[-1], "out.mp4")
+
+
 class TestRenderEdit(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -156,6 +165,19 @@ class TestRenderEdit(unittest.TestCase):
         self.assertIn(loud["status"], ("pass", "warn"))
         lufs = float(loud["detail"].split()[0])
         self.assertAlmostEqual(lufs, -14.0, delta=2.0)
+
+    def test_sound_never_runs_past_the_picture_at_60_fps(self):
+        """AAC pads to whole frames behind a priming delay: unmuxed to length, a 607 s episode
+        had 87 ms of tail against a 25 ms limit. Several lengths, so one lucky multiple of the
+        AAC frame cannot pass it."""
+        for k, last in enumerate((3.37, 4.11, 5.93)):
+            spec = self.spec("sync{0}".format(k), output={"preset": "youtube_1080p60", "width": 320, "height": 180,
+                                                          "fps": 60, "x264_preset": "ultrafast"},
+                             clips=[{"id": "a", "src": "v", "in": 1.0, "out": 1.0 + last}])
+            spec["tracks"] = {"music": [], "sfx": []}
+            report = stage.render_edit(spec, self.settings)
+            vdur, adur = self.probe_duration(report["output"], "v:0"), self.probe_duration(report["output"], "a:0")
+            self.assertLessEqual(abs(adur - vdur), 1.5 / 60.0, "length {0}: picture {1}, sound {2}".format(last, vdur, adur))
 
     def test_the_spec_on_disk_is_never_replaced_by_a_render(self):
         stage.render_edit(self.spec("rec"), self.settings, preview=True)

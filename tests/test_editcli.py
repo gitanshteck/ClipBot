@@ -174,5 +174,100 @@ class TestTasteCommand(unittest.TestCase):
                 run(editcli.cmd_edit_taste, s, action="add", text=None, said=None, edit=None, all=False)
 
 
+class TestEditEpisode(unittest.TestCase):
+    """`clipbot edit episode`: a lineup file -> snapped cuts, matched levels, spec + lineup + cuts + facts."""
+
+    def setUp(self):
+        import wave
+
+        import numpy as np
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        ws = self.root / "ws-one"
+        ws.mkdir()
+        rate = 16000
+        t = np.arange(rate * 6) / float(rate)
+        speech = 0.3 * np.sin(2 * np.pi * 220 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 5 * t))
+        gap = np.random.RandomState(1).randn(rate * 2) * 0.001
+        pcm = (np.concatenate([speech, gap, speech, gap, speech]) * 32767).astype("<i2")
+        with wave.open(str(ws / "audio.wav"), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm.tobytes())
+        (ws / "state.json").write_text("{}", encoding="utf-8")
+        self.settings = Settings({"work_root": str(self.root)}, Path("s.json"))
+        self.lineup = {
+            "sources": {"a": {"workspace": "ws-one"}, "f": {"file": str(self.root / "x.mp4")}},
+            "cold_open": {"title": "Cold open", "whoosh": False, "clips": [{"src": "a", "in": 8.3, "out": 13.7}]},
+            "sting": {"dur": 3.0},
+            "chapters": [{"title": "One", "clips": [{"src": "a", "in": 8.3, "out": 13.7}, {"src": "f", "in": 2.0, "out": 6.0}]},
+                         {"title": "Two", "clips": [{"src": "a", "in": 9.0, "out": 12.0}]},
+                         {"title": "Three", "clips": [{"src": "a", "in": 1.0, "out": 5.0}]}],
+            "end": {"dur": 5.0},
+            "titles": ["EP #1 - [TITLE TBD]"], "fact_lines": ["A roundup."], "credits": ["Streams:"], "notes": ["720p upscaled"],
+        }
+        self.file = self.root / "lineup.json"
+        self.file.write_text(json.dumps(self.lineup), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def args(self, **kw):
+        d = dict(name="ep", lineup=str(self.file), no_snap=False, no_match=False, force=False)
+        d.update(kw)
+        return d
+
+    def test_builds_everything(self):
+        code, out = run(editcli.cmd_edit_episode, self.settings, **self.args())
+        self.assertEqual(code, 0)
+        root = self.root / "_edits" / "ep"
+        for name in ("spec.json", "lineup.json", "cuts.json", "facts.json"):
+            self.assertTrue((root / name).is_file(), name)
+        self.assertIn("clip(s) moved", out)
+        self.assertIn("chapters:", out)
+        spec = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+        self.assertEqual(spec["name"], "ep")                                   # the command's name wins
+        facts = json.loads((root / "facts.json").read_text(encoding="utf-8"))
+        self.assertEqual(facts["titles"], ["EP #1 - [TITLE TBD]"])
+        self.assertEqual(facts["notes"], ["720p upscaled"])
+        self.assertEqual(facts["clips"], 5)
+
+    def test_the_prepared_lineup_records_where_the_cuts_went(self):
+        run(editcli.cmd_edit_episode, self.settings, **self.args())
+        root = self.root / "_edits" / "ep"
+        prepared = json.loads((root / "lineup.json").read_text(encoding="utf-8"))
+        cold = prepared["cold_open"]["clips"][0]
+        self.assertNotEqual((cold["in"], cold["out"]), (8.3, 13.7))          # moved into the gaps at 6-8 s and 14-16 s
+        cuts = json.loads((root / "cuts.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cuts["clips"]), 5)
+        self.assertEqual(cuts["clips"][0]["in_was"], 8.3)
+
+    def test_a_file_source_is_left_as_authored(self):
+        run(editcli.cmd_edit_episode, self.settings, **self.args())
+        prepared = json.loads((self.root / "_edits" / "ep" / "lineup.json").read_text(encoding="utf-8"))
+        f = prepared["chapters"][0]["clips"][1]
+        self.assertEqual((f["in"], f["out"]), (2.0, 6.0))
+        self.assertNotIn("gain_db", f)
+
+    def test_no_snap_keeps_the_authors_times(self):
+        run(editcli.cmd_edit_episode, self.settings, **self.args(no_snap=True))
+        prepared = json.loads((self.root / "_edits" / "ep" / "lineup.json").read_text(encoding="utf-8"))
+        cold = prepared["cold_open"]["clips"][0]
+        self.assertEqual((cold["in"], cold["out"]), (8.3, 13.7))
+
+    def test_refuses_to_overwrite_without_force_and_keeps_the_old_spec(self):
+        run(editcli.cmd_edit_episode, self.settings, **self.args())
+        with self.assertRaises(StageError):
+            run(editcli.cmd_edit_episode, self.settings, **self.args())
+        run(editcli.cmd_edit_episode, self.settings, **self.args(force=True))
+        self.assertTrue((self.root / "_edits" / "ep" / "spec.previous.json").is_file())
+
+    def test_parser(self):
+        a = cli.build_parser().parse_args(["edit", "episode", "ep", "lineup.json", "--no-snap"])
+        self.assertEqual((a.func, a.no_snap, a.no_match), (editcli.cmd_edit_episode, True, False))
+
+
 if __name__ == "__main__":
     unittest.main()

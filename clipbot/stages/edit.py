@@ -499,8 +499,7 @@ def render_edit(
 
     # ---- mux
     final = root / "render" / ("{0}.preview.mp4".format(name) if preview else "{0}.mp4".format(name))
-    argv = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-y", "-i", str(video_master), "-i", str(audio_out),
-            "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", str(final)]
+    argv = mux_argv(ffmpeg, video_master, audio_out, final, total)
     _run_ffmpeg(argv, 0, progress, 0, 0, work / "logs" / "mux.log", None)
     progress.update(3)
 
@@ -519,6 +518,18 @@ def render_edit(
     log.info("Rendered %s: %.1fs, %s, %d clip(s), in %.0fs", final.name, total, human_size(report["bytes"]),
              len(clips), report["render_seconds"])
     return report
+
+
+def mux_argv(ffmpeg: str, video: Any, audio: Any, final: Any, total: float) -> List[str]:
+    """The picture copied beside the mastered audio, both cut to the planned length.
+
+    AAC is encoded in whole 1024-sample frames behind a 2048-sample priming delay, so the
+    sound track of a file comes out 40-90 ms longer than the picture it was cut to - a silent
+    tail after the fade-out, but over the verifier's 1.5-frame limit at 60 fps (a 607 s
+    episode measured 87 ms). `-t` trims every stream to `total` at packet level."""
+    return [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-y", "-i", str(video), "-i", str(audio),
+            "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-t", "{0:.5f}".format(total),
+            "-movflags", "+faststart", str(final)]
 
 
 def _soundtrack(spec, timeline, assets, ffprobe, ffmpeg, cache, warnings) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:

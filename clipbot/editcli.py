@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import editdeliver, editqa, editspec, edittaste, edittemplates, edittimeline
+from . import editcut, editdeliver, editqa, editspec, edittaste, edittemplates, edittimeline
 from .config import Settings
 from .progress import Progress
 from .specerror import SpecError
@@ -119,6 +119,9 @@ def _summary(timeline: Dict[str, Any], spec: Dict[str, Any]) -> List[str]:
     lines.append("pacing: " + ("something new at least every {0:g} s".format(pace["max_gap"]) if not pace["dead"] else
                                "{0} dead stretch(es), longest {1:.1f} s".format(
                                    len(pace["dead"]), max(d["length"] for d in pace["dead"]))))
+    # the dead stretches are counted above; the rest (a callout held too long, a flicker, an
+    # opening with nothing in it, too many sound effects) are listed so `validate` shows what the gate saw
+    lines += ["  pacing: " + i["detail"] for i in pace["issues"] if i["what"] != "dead"]
     for w in timeline["warnings"]:
         lines.append("warning: " + w)
     return lines
@@ -164,6 +167,45 @@ def cmd_edit_new(args: argparse.Namespace, settings: Settings) -> int:
     (root / "facts.json").write_text(json.dumps(facts, indent=1), encoding="utf-8")
     timeline = edittimeline.compile_timeline(spec)
     print(path)
+    print("\n".join(_summary(timeline, spec)))
+    return 0
+
+
+def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
+    """Build an episode spec from a lineup file: snap the cuts into pauses, match the clips'
+    levels, run the `episode` template, and write spec.json, lineup.json (the prepared
+    lineup - what the cuts moved to) and facts.json under work/_edits/<name>/."""
+    lineup = json.loads(Path(args.lineup).read_text(encoding="utf-8"))
+    lineup["name"] = args.name
+    root = edit_stage.edit_dir(settings, args.name)
+    path = root / "spec.json"
+    if path.exists() and not args.force:
+        raise StageError("{0} exists; pass --force to overwrite it (the old spec is kept as spec.previous.json)".format(path))
+
+    def wav_for(alias: str) -> Any:
+        src = lineup["sources"].get(alias) or {}
+        if "workspace" not in src:
+            return None
+        wav = _workspace(settings, src["workspace"]).audio_path
+        return wav if wav.is_file() else None
+
+    report = editcut.prepare_lineup(lineup, wav_for, snap=not args.no_snap, match=not args.no_match)
+    facts: Dict[str, Any] = {}
+    spec = editspec.normalize(edittemplates.episode(lineup, facts=facts))
+    root.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        shutil.copyfile(str(path), str(root / "spec.previous.json"))
+    path.write_text(editspec.to_json(spec), encoding="utf-8")
+    (root / "lineup.json").write_text(json.dumps(lineup, indent=1, ensure_ascii=False), encoding="utf-8")
+    (root / "cuts.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    for key in ("titles", "fact_lines", "credits", "hashtags", "game", "player", "notes"):
+        if key in lineup:
+            facts[key] = lineup[key]
+    (root / "facts.json").write_text(json.dumps(facts, indent=1, ensure_ascii=False), encoding="utf-8")
+    timeline = edittimeline.compile_timeline(spec)
+    print(path)
+    print("cuts: {0} clip(s) moved, {1} cut point(s) left as authored (no pause within reach)".format(
+        report["moved"], report["unsnapped"]))
     print("\n".join(_summary(timeline, spec)))
     return 0
 
@@ -274,7 +316,9 @@ def cmd_edit_deliver(args: argparse.Namespace, settings: Settings) -> int:
         thumbs=args.thumbs if args.thumbs is not None else int(settings.get("edit.thumbnails", 3)),
         player=args.player or facts.get("player", ""), game=args.game or facts.get("game", ""),
         kills=int(facts.get("kills", sum(len(e["markers"]) for e in timeline["clips"]))), nades=int(facts.get("nades", 0)),
-        far=facts.get("far"), src_wh=(spec["output"]["width"], spec["output"]["height"]))
+        far=facts.get("far"), src_wh=(spec["output"]["width"], spec["output"]["height"]),
+        warnings=facts.get("notes", []), titles=facts.get("titles"), fact_lines=facts.get("fact_lines"),
+        credits=facts.get("credits", []), hashtags=facts.get("hashtags"))
     for f in manifest["files"]:
         print("{0:<10} {1}  ({2})".format(f["kind"], f["file"], human_size(f["bytes"])))
     for w in manifest["warnings"]:
@@ -379,6 +423,14 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("--no-outro", action="store_true")
     p.add_argument("--force", action="store_true", help="overwrite an existing spec")
     p.set_defaults(func=cmd_edit_new)
+
+    p = ed.add_parser("episode", help="build an episode (cold open, sting, chapters, end card) from a lineup .json")
+    p.add_argument("name", help="edit name (a folder under work/_edits/)")
+    p.add_argument("lineup", help="the lineup file (see edittemplates.episode)")
+    p.add_argument("--no-snap", action="store_true", help="keep every in/out exactly as written (no pause snapping)")
+    p.add_argument("--no-match", action="store_true", help="do not match the clips' levels")
+    p.add_argument("--force", action="store_true", help="overwrite an existing spec")
+    p.set_defaults(func=cmd_edit_episode)
 
     p = ed.add_parser("validate", help="check a spec and print its timeline summary")
     p.add_argument("spec", help=SPEC_HELP)

@@ -270,8 +270,17 @@ def build_package(
     far: Optional[float] = None,
     src_wh: Tuple[int, int] = (1920, 1080),
     warnings: Sequence[str] = (),
+    titles: Optional[Sequence[str]] = None,
+    fact_lines: Optional[Sequence[str]] = None,
+    credits: Sequence[str] = (),
+    hashtags: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """Write the whole package under `out_dir` and return its manifest."""
+    """Write the whole package under `out_dir` and return its manifest.
+
+    The post text is built from the kill counts unless the author supplies it: `titles` (a
+    placeholder is fine - the author may not have chosen one yet), `fact_lines` (what the
+    description says the video holds), `credits` (lines under the chapters) and `hashtags`.
+    A roundup that is not about kills has nothing honest to say with a kill count."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     total = float(timeline["duration"])
@@ -294,12 +303,16 @@ def build_package(
 
     ch = chapter_lines(chapters, total)
     notes.extend(ch["problems"])
-    titles = title_options(player, game, kills, nades, far)
-    facts = ["{0} kill{1}".format(kills, "" if kills == 1 else "s") + ("; {0} with a grenade".format(nades) if nades else "") +
-             ("; longest {0:.0f} m".format(far) if far else "")]
-    post = {"titles": titles, "description": description(titles[0], ch, facts), "chapters": ch,
-            "hashtags": [t for t in ("#" + game.replace(" ", "").lower() if game else "", "#gaming", "#shorts" if "shorts" in made else "") if t],
-            "warnings": notes}
+    titles = list(titles) if titles else title_options(player, game, kills, nades, far)
+    facts = list(fact_lines) if fact_lines is not None else [
+        "{0} kill{1}".format(kills, "" if kills == 1 else "s") + ("; {0} with a grenade".format(nades) if nades else "") +
+        ("; longest {0:.0f} m".format(far) if far else "")]
+    tags = list(hashtags) if hashtags is not None else [
+        t for t in ("#" + game.replace(" ", "").lower() if game else "", "#gaming") if t]
+    if "shorts" in made and "#shorts" not in tags:
+        tags.append("#shorts")
+    post = {"titles": titles, "description": description(titles[0], ch, facts, credits), "chapters": ch,
+            "hashtags": tags, "warnings": notes}
     (out_dir / "post.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
     md = ["# Post scaffold", "", "## Title candidates", ""] + ["- " + t for t in titles] + ["", "## Description", "", "```", post["description"].rstrip(), "```", ""]
     if post["hashtags"]:

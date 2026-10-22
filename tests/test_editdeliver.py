@@ -213,5 +213,39 @@ class TestPackageWithRealFfmpeg(unittest.TestCase):
         self.assertNotIn("#shorts", json.loads((self.dir / "d2" / "post.json").read_text(encoding="utf-8"))["hashtags"])
 
 
+class TestPostTextOverrides(unittest.TestCase):
+    """A roundup that is not about kills supplies its own post text; the kill-count text is the default."""
+
+    CH = [{"t": 0.0, "title": "Cold open"}, {"t": 12.0, "title": "Mortars"}, {"t": 30.0, "title": "Base"}]
+
+    def package(self, **kw):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        master = d / "m.mp4"
+        master.write_bytes(b"x" * 64)
+        D.build_package("ffmpeg", master, {"duration": 50.0, "clips": []}, d / "out", self.CH, thumbs=0, **kw)
+        return json.loads((d / "out" / "post.json").read_text(encoding="utf-8")), (d / "out" / "post.md").read_text(encoding="utf-8")
+
+    def test_the_authors_text_replaces_the_kill_counts(self):
+        post, md = self.package(titles=["EP #1 - [TITLE TBD]"], fact_lines=["A roundup of Teck's streams."],
+                                credits=["Moments from these streams:", "Sep 15 - WarDogs"], hashtags=["#teck"],
+                                warnings=["720p upscaled"], game="Wardogs", kills=7)
+        self.assertEqual(post["titles"], ["EP #1 - [TITLE TBD]"])
+        self.assertIn("A roundup of Teck's streams.", post["description"])
+        self.assertIn("Sep 15 - WarDogs", post["description"])
+        self.assertIn("0:12 Mortars", post["description"])
+        self.assertNotIn("kill", post["description"].lower())
+        self.assertEqual(post["hashtags"], ["#teck"])
+        self.assertIn("720p upscaled", post["warnings"])
+        self.assertIn("720p upscaled", md)
+
+    def test_without_them_the_counts_still_write_the_text(self):
+        post, _ = self.package(player="Teck", game="Wardogs", kills=12, nades=1, far=238.0)
+        self.assertEqual(post["titles"][0], "Teck - 12 kills in Wardogs")
+        self.assertIn("12 kills", post["description"])
+        self.assertEqual(post["hashtags"], ["#wardogs", "#gaming"])
+
+
 if __name__ == "__main__":
     unittest.main()

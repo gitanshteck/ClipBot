@@ -19,6 +19,13 @@ already structurally right, not a black box.
   by score;
 * an intro card, an outro card, an optional music bed (ducked under the game audio)
   and per-kill sound effects.
+
+episode turns a *lineup* - an author's list of chapters, each a run of clips from any
+source - into a numbered variety roundup in the shape of Teo's MISH MASH series: a cold
+open, a sting card, chaptered segments (a lower-third names each one) and an end card.
+Unlike the montage it does not pick moments (choosing them is the author's job); the
+template supplies the structure, the camera life that keeps a talking clip from sitting
+still, the chapter markers and the sound.
 """
 
 import math
@@ -210,6 +217,51 @@ def _punch(camera: List[Dict[str, Any]], t: float, zoom: float) -> None:
                {"at": round(t + 1.1, 3), "zoom": 1.0, "ease": "inout2"}]
 
 
+def kill_clip_parts(cid: str, lo: float, hi: float, kills: List[Dict[str, Any]], prof: Dict[str, Any],
+                    slowmo: str = "nade", callout_xy: Tuple[float, float] = (0.5, 0.80),
+                    sfx: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """What a clip of one or more kills gets: a marker, a callout, a punch-in and (for
+    nades and headshots) a flash on every kill, a slow-motion ramp on the best one, and
+    a sound effect. The window is [`lo`, `hi`] in source seconds. Shared by
+    `kill_montage` and by an `episode` chapter that carries kills."""
+    markers: List[Dict[str, Any]] = []
+    overlays: List[Dict[str, Any]] = []
+    camera: List[Dict[str, Any]] = []
+    fx: List[Dict[str, Any]] = []
+    sfx_items: List[Dict[str, Any]] = []
+    best = max(kills, key=kill_score)
+    punches = 0
+    for i, k in enumerate(kills):
+        t = k["t"]
+        head, sub, accent = _label(k, i + 1)
+        markers.append({"at": round(t, 3), "name": "kill"})
+        ov: Dict[str, Any] = {"kind": "callout", "at": round(t, 3), "dur": 2.2, "text": head, "accent": ACCENTS[accent],
+                              "x": callout_xy[0], "y": callout_xy[1], "size": 0.050, "anim_in": "pop", "anim_out": "fade"}
+        if sub:
+            ov["sub"] = sub
+        if k.get("icon"):
+            ov["image"] = k["icon"]
+        if i > 0 and t - kills[i - 1]["t"] < 2.4:  # two callouts must not overlap on screen
+            ov["y"] = round(callout_xy[1] - 0.12, 3)
+        overlays.append(ov)
+        if prof["punch"] > 1.0 and punches < MAX_PUNCHES:
+            _drift(camera, camera[-1]["at"] if camera else lo, t, prof)
+            _punch(camera, t, prof["punch"])
+            punches += 1
+        if prof["flash"] and (k.get("weapon") == "grenade" or k.get("headshot")):
+            fx.append({"type": "flash", "at": round(t, 3), "dur": 0.12, "amount": 0.45})
+        kind = "hit"
+        if k.get("weapon") == "grenade" and sfx and "nade" in sfx:
+            kind = "nade"
+        elif k.get("headshot") and sfx and "headshot" in sfx:
+            kind = "headshot"
+        if sfx and kind in sfx:
+            sfx_items.append(dict(sfx[kind], id="s{0}_{1}".format(cid, i), on={"clip": cid, "at": round(t, 3)}))
+    want_slow = (slowmo == "all") or (slowmo == "nade" and best.get("weapon") == "grenade") or                 (slowmo == "special" and (best.get("weapon") == "grenade" or best.get("headshot") or (best.get("dist_m") or 0) >= 100))
+    speed = _slowmo_keys(best["t"], lo, hi, prof["slowmo_rate"]) if want_slow else []
+    return {"markers": markers, "overlays": overlays, "camera": camera, "fx": fx, "speed": speed, "sfx": sfx_items}
+
+
 def kill_montage(
     kills: List[Dict[str, Any]],
     sources: Dict[str, Dict[str, Any]],
@@ -256,40 +308,9 @@ def kill_montage(
     for n, s in enumerate(chosen, start=1):
         cid = "k{0:02d}".format(n)
         lo, hi = s["in"], s["out"]
-        markers, overlays, camera, fx = [], [], [], []
-        speed: List[Dict[str, Any]] = []
-        best = max(s["kills"], key=kill_score)
-        punches = 0
-        for i, k in enumerate(s["kills"]):
-            t = k["t"]
-            head, sub, accent = _label(k, i + 1)
-            markers.append({"at": round(t, 3), "name": "kill"})
-            ov: Dict[str, Any] = {"kind": "callout", "at": round(t, 3), "dur": 2.2, "text": head, "accent": ACCENTS[accent],
-                                  "x": callout_xy[0], "y": callout_xy[1], "size": 0.050, "anim_in": "pop", "anim_out": "fade"}
-            if sub:
-                ov["sub"] = sub
-            if k.get("icon"):
-                ov["image"] = k["icon"]
-            if i > 0 and t - s["kills"][i - 1]["t"] < 2.4:  # two callouts must not overlap on screen
-                ov["y"] = round(callout_xy[1] - 0.12, 3)
-            overlays.append(ov)
-            if prof["punch"] > 1.0 and punches < MAX_PUNCHES:
-                _drift(camera, camera[-1]["at"] if camera else lo, t, prof)
-                _punch(camera, t, prof["punch"])
-                punches += 1
-            if prof["flash"] and (k.get("weapon") == "grenade" or k.get("headshot")):
-                fx.append({"type": "flash", "at": round(t, 3), "dur": 0.12, "amount": 0.45})
-            kind = "hit"
-            if k.get("weapon") == "grenade" and sfx and "nade" in sfx:
-                kind = "nade"
-            elif k.get("headshot") and sfx and "headshot" in sfx:
-                kind = "headshot"
-            if sfx and kind in sfx:
-                sfx_items.append(dict(sfx[kind], id="s{0}_{1}".format(cid, i), on={"clip": cid, "at": round(t, 3)}))
-        want_slow = (slowmo == "all") or (slowmo == "nade" and best.get("weapon") == "grenade") or \
-                    (slowmo == "special" and (best.get("weapon") == "grenade" or best.get("headshot") or (best.get("dist_m") or 0) >= 100))
-        if want_slow:
-            speed = _slowmo_keys(best["t"], lo, hi, prof["slowmo_rate"])
+        parts = kill_clip_parts(cid, lo, hi, s["kills"], prof, slowmo, callout_xy, sfx)
+        markers, overlays, camera, fx, speed = parts["markers"], parts["overlays"], parts["camera"], parts["fx"], parts["speed"]
+        sfx_items += parts["sfx"]
         chap = _chapter(s) if order == "chapters" else None
         starts_chapter = bool(chap) and chap != last_chapter
         if chap:
@@ -343,3 +364,189 @@ def kill_montage(
     if music:
         spec["tracks"]["music"].append(dict(music, id="bed", duck=music.get("duck", True)))
     return spec
+
+
+# ---------------------------------------------------------------------------
+# episode: a variety roundup built from an author's lineup
+# ---------------------------------------------------------------------------
+
+EPISODE_ACCENT = "#FFB300"
+LABEL_Y = 0.10          # top centre: clear of a webcam on either side and of the chat at the bottom
+
+
+def _ambient_camera(lo: float, hi: float, prof: Dict[str, Any], punches: List[float]) -> List[Dict[str, Any]]:
+    """Camera life for a clip with no kill in it: a slow push-in across the whole clip
+    (so a talking head over a map never sits still for longer than the profile's gap)
+    and a snap-in on each beat in `punches` (source seconds - the punchline, the reveal).
+
+    The push is a few percent of zoom, felt rather than seen; a key lands at least every
+    0.8 x the profile's gap because the pacing gate counts keys, not intentions.
+    """
+    dur = max(hi - lo, 0.1)
+    step = prof["max_gap"] * 0.8
+    n = max(1, int(math.ceil(dur / step)))
+    top = 1.0 + (prof["punch"] - 1.0) * 0.6
+
+    def base(t: float) -> float:
+        return 1.0 + (top - 1.0) * min(max((t - lo) / dur, 0.0), 1.0)
+
+    keys: List[Tuple[float, float, str]] = [(lo + dur * j / n, base(lo + dur * j / n), "inout2") for j in range(n + 1)]
+    pop = prof["punch"] - 1.0
+    for p in sorted(punches):
+        if not (lo + 0.3 < p < hi - 0.3):
+            continue
+        end = min(p + 1.0, hi)
+        keys += [(p - 0.2, base(p - 0.2), "out2"), (p, base(p) + pop, "out2"),
+                 (p + 0.5, base(p + 0.5) + pop, "linear"), (end, base(end), "inout2")]
+    keys.sort(key=lambda k: k[0])
+    out: List[Dict[str, Any]] = []
+    for at, zoom, ease in keys:
+        if out and at < out[-1]["at"] + 0.08:
+            if zoom > out[-1]["zoom"]:           # a punch wins over the push it lands on
+                out[-1] = {"at": out[-1]["at"], "zoom": round(zoom, 4), "ease": ease}
+            continue
+        out.append({"at": round(at, 3), "zoom": round(zoom, 4), "ease": ease})
+    return out[:editspec.MAX_CAMERA_KEYS]
+
+
+def _title_overlay(text: str, at: float, y: float = LABEL_Y, dur: float = 2.6) -> Dict[str, Any]:
+    return {"kind": "text", "at": round(at, 3), "dur": dur, "text": text.upper(), "x": 0.5, "y": round(y, 3), "size": 0.050,
+            "plate": True, "anim_in": "slide_down", "anim_out": "fade"}
+
+
+def _card(cid: str, dur: float, label: str, lines: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {"id": cid, "type": "card", "dur": dur, "bg": "#0B0B0F", "label": label, "tags": ["nochapter"], "overlays": lines}
+
+
+def _card_lines(series: str, number: Optional[int], dur: float, big: float, small: float, y: float) -> List[Dict[str, Any]]:
+    """The series name, and under it the episode number in the accent colour. Nothing stays
+    up longer than the pacing gate's dwell limit: a long end card is dark with the music
+    under it, which is also where YouTube's end-screen elements go."""
+    hold = min(dur, 3.8)
+    lines = [{"kind": "text", "at": 0.0, "dur": hold, "text": series.upper(), "x": 0.5, "y": y if number else 0.5,
+              "size": big, "anim_in": "pop", "anim_out": "fade"}]
+    if number:
+        lines.append({"kind": "text", "at": 0.3, "dur": hold - 0.3, "text": "#{0}".format(number), "x": 0.5,
+                      "y": round(y + 0.15, 3), "size": small, "color": EPISODE_ACCENT, "anim_in": "slide_up",
+                      "anim_out": "fade"})
+    return lines
+
+
+def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build an edit spec from a lineup.
+
+    lineup = {
+      name, series ("TECK MISH MASH"), number (1), title (None until the author has one),
+      profile ("restrained"), output_preset, grade, sources {alias: {...}},
+      cold_open: {title, clips: [...]} | None,
+      sting: {dur, music: {asset|file, gain_db}} | None,
+      chapters: [{title, label (bool, default True), whoosh (bool, default True),
+                  music: {asset|file, gain_db} | None, clips: [...]}],
+      end: {dur, music: {...}} | None,
+      sfx: {"sting": {...}, "chapter": {...}}, kill_sfx: {"hit": {...}, ...}, slowmo }
+    A clip is {src, in, out, note, label (a lower-third line), punch [source seconds],
+    kills [killfeed events - the clip then gets callouts, punches and a slow-mo ramp like
+    a montage], gain_db, speed, ambient (default True)}. Positions are source seconds,
+    as everywhere in the engine. `facts` (if a dict) is filled with what the edit
+    contains, for `edit deliver`.
+    """
+    prof = editspec.PROFILES[lineup.get("profile", "restrained")]
+    series = lineup.get("series", "MISH MASH")
+    number = lineup.get("number")
+    grade = lineup.get("grade", "neutral_punch")
+    sfx_lib = lineup.get("sfx") or {}
+    clips: List[Dict[str, Any]] = []
+    sfx_items: List[Dict[str, Any]] = []
+    music_items: List[Dict[str, Any]] = []
+    chapter_list: List[Dict[str, Any]] = []
+    counter = {"n": 0}
+
+    def clip_from(c: Dict[str, Any], prefix: str, title: Optional[str], chapter_label: bool, whoosh: bool) -> Dict[str, Any]:
+        counter["n"] += 1
+        cid = "{0}{1:02d}".format(prefix, counter["n"])
+        lo, hi = float(c["in"]), float(c["out"])
+        overlays: List[Dict[str, Any]] = []
+        markers: List[Dict[str, Any]] = []
+        fx: List[Dict[str, Any]] = []
+        speed = c.get("speed") or []
+        camera: List[Dict[str, Any]] = []
+        y = LABEL_Y
+        if title and chapter_label and hi - lo >= 2.5:
+            overlays.append(_title_overlay(title, lo + 0.4, y))
+            y += 0.075
+        if c.get("label") and hi - lo >= 2.5:
+            overlays.append(_title_overlay(c["label"], lo + (0.4 if y == LABEL_Y else 0.7), y))
+        if c.get("kills"):
+            parts = kill_clip_parts(cid, lo, hi, c["kills"], prof, lineup.get("slowmo", "nade"), (0.5, 0.80),
+                                    lineup.get("kill_sfx"))
+            overlays += parts["overlays"]
+            markers += parts["markers"]
+            fx += parts["fx"]
+            camera = parts["camera"]
+            speed = speed or parts["speed"]
+            sfx_items.extend(parts["sfx"])
+        elif c.get("ambient", True):
+            camera = _ambient_camera(lo, hi, prof, [float(p) for p in c.get("punch", [])])
+            markers += [{"at": round(float(p), 3), "name": "punch"} for p in c.get("punch", []) if lo < float(p) < hi]
+        clip: Dict[str, Any] = {
+            "id": cid, "src": c["src"], "in": lo, "out": hi,
+            "label": (title if title else str(c.get("note") or cid))[:80],
+            "tags": ["chapter"] if title else [],
+            "overlays": overlays, "markers": markers, "camera": camera, "fx": fx,
+            "grade": {"preset": grade, "strength": "subtle"},
+            "audio": {"slowmo": "pitch", "gain_db": float(c.get("gain_db", 0.0))},
+        }
+        if speed:
+            clip["speed"] = speed
+            clip["interp"] = "blend"
+        if title and whoosh and sfx_lib.get("chapter"):
+            sfx_items.append(dict(sfx_lib["chapter"], id="w" + cid, on={"clip": cid, "at": round(lo + 0.4, 3)}))
+        return clip
+
+    def run(chapter: Dict[str, Any], prefix: str, label: bool) -> None:
+        first = len(clips)
+        for i, c in enumerate(chapter["clips"]):
+            clips.append(clip_from(c, prefix, chapter["title"] if i == 0 else None, label, chapter.get("whoosh", True)))
+        mus = chapter.get("music")
+        if mus and len(clips) > first:
+            music_items.append(dict(mus, id="bed{0}".format(len(music_items) + 1),
+                                    start={"clip": clips[first]["id"]}, end={"clip": clips[-1]["id"], "from": "end"},
+                                    duck=mus.get("duck", True)))
+        chapter_list.append({"title": chapter["title"], "clips": len(chapter["clips"])})
+
+    cold = lineup.get("cold_open")
+    if cold and cold.get("clips"):
+        run(cold, "o", False)
+    sting = lineup.get("sting")
+    if sting is not None:
+        dur = float(sting.get("dur", 3.0))
+        clips.append(_card("sting", dur, "Intro", _card_lines(series, number, dur, 0.12, 0.08, 0.44)))
+        if sfx_lib.get("sting"):
+            sfx_items.append(dict(sfx_lib["sting"], id="sting", on={"clip": "sting"}))
+        if sting.get("music"):                  # a few seconds of theme, so the card is not a silent gap
+            music_items.append(dict(sting["music"], id="stingbed", start={"clip": "sting"},
+                                    end={"clip": "sting", "from": "end"}, fade_in=0.0, fade_out=0.4, duck=False))
+    for n, chapter in enumerate(lineup.get("chapters", []), start=1):
+        run(chapter, "c{0}_".format(n), chapter.get("label", True))
+    end = lineup.get("end")
+    if end is not None:
+        dur = float(end.get("dur", 6.0))
+        clips.append(_card("end", dur, "End card", _card_lines(series, number, dur, 0.09, 0.06, 0.46)))
+        if end.get("music"):
+            music_items.append(dict(end["music"], id="endbed", start={"clip": "end"}, end="end", fade_out=1.5, duck=False))
+    n_clips = sum(1 for c in clips if c.get("type", "clip") == "clip")
+    if not n_clips:
+        raise editspec.SpecError("the lineup has no clips")
+
+    title = lineup.get("title")
+    if facts is not None:
+        facts.update({"series": series, "number": number, "title": title, "chapters": chapter_list, "clips": n_clips})
+    return {
+        "version": editspec.VERSION, "name": lineup["name"], "profile": lineup.get("profile", "restrained"),
+        "output": {"preset": lineup.get("output_preset", "youtube_1080p60")},
+        "sources": lineup["sources"], "clips": clips,
+        "tracks": {"music": music_items, "sfx": sfx_items},
+        "master": {"loudness_lufs": -14.0, "true_peak_db": -1.0},
+        "notes": "Generated by edittemplates.episode ({0} #{1}, {2} chapters, {3} clips). Title: {4}.".format(
+            series, number, len(chapter_list), n_clips, title or "not chosen yet"),
+    }

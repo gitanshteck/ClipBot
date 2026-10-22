@@ -17,8 +17,9 @@ spec: **render, look, listen (by measurement), fix, only then present.**
    defaults here. If the user just told you a preference, add it
    (`edit taste add "<rule>" --said "<their words>"`) *before* you apply it.
 3. Read the rule file for the kind of edit: `rules/gaming.md` for kill/clutch
-   montages, plus `rules/hooks.md`, `rules/motion.md`, `rules/audio.md`,
-   `rules/cutting.md`, `rules/framing.md` as needed.
+   montages, `rules/roundups.md` for a numbered variety roundup (a "Mish Mash"),
+   plus `rules/hooks.md`, `rules/motion.md`, `rules/audio.md`, `rules/cutting.md`,
+   `rules/framing.md` as needed.
 4. Know what you actually have: which sources, at what resolution (Kick tops out
    at 720p60 - an upscaled 1080p master is not 1080p detail), whether the
    footage's data (kill times, chapters) is *measured* or *guessed*.
@@ -63,6 +64,7 @@ clipbot killfeed list --workspace W
 clipbot edit new NAME --killfeed W [W...] [--game G] [--profile punchy|balanced|restrained]
         [--order chapters|chronological|score] [--max-clips N] [--slowmo none|nade|special|all]
         [--music mus_ID|FILE] [--sfx-hit sfx_ID|FILE] [--sfx-nade ...] [--sfx-headshot ...] [--preset ...]
+clipbot edit episode NAME LINEUP.json [--no-snap] [--no-match] [--force]   # a roundup: see rules/roundups.md
 clipbot edit validate|inspect NAME
 clipbot edit render NAME [--preview] [--force] [--no-master] [--preset shorts_1080x1920]
 clipbot edit verify NAME [--preview] [--shallow]

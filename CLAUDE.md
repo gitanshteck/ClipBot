@@ -126,7 +126,7 @@ clipbot/
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
-                     edit {new,validate,inspect,render,verify,deliver,list,clean,taste},
+                     edit {new,episode,validate,inspect,render,verify,deliver,list,clean,taste},
                      killfeed {scan,list}) - the last two groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
@@ -178,11 +178,14 @@ clipbot/
   editoverlay.py     callout/text/image overlays -> RGBA PNGs (Pillow)
   editaudio.py       numpy audio analysis: peak alignment for SFX, beat grid,
                      join-click score
+  editcut.py         pause-aware cut points and level matching from a
+                     workspace's audio.wav: find_cut(), prepare_lineup()
   editqa.py          verify(): the checks run on a render + storyboard and
                      loudness-plot artefacts
   editdeliver.py     delivery package: platform variants, thumbnails, chapters,
                      post text, manifest
-  edittemplates.py   kill_montage(): killfeed events -> a first-draft edit spec
+  edittemplates.py   kill_montage(): killfeed events -> a first-draft edit spec;
+                     episode(): a lineup of chapters -> a numbered roundup spec
   edittaste.py       the user's standing editing preferences (taste.json)
   editcli.py         the `edit` and `killfeed` command groups
   killfeed.py        kill-feed parsing (pure): rows, distance tags, icons
@@ -489,7 +492,15 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   separate install pointed at via `CLIPBOT_YT_DLP`, not a project Python
   upgrade. `explain_failure(text)` turns the recognisable failures (bot check,
   missing formats / JS runtime, private or members-only, unavailable) into what
-  to do, and `_run` appends it to the `StageError`.
+  to do, and `_run` appends it to the `StageError`. **Measured 2026-10-21**: after
+  a day of many `yt-dlp` resolutions the default client answered HTTP 429 and
+  "Sign in to confirm you're not a bot" (no cookies were set); with
+  `--extractor-args youtube:player_client=<x>`, `web_embedded` returned the
+  progressive 299 (1080p60 H.264) + 140 formats `ytsegments` needs, `mweb` and `ios`
+  returned fewer, `tv`, `android_vr` and `tv_simply` failed. Setting
+  `download.youtube.player_client` in a scratch settings file
+  (`clipbot --settings FILE ...`) got a 54-clip render through without touching a
+  login; `cookies_from_browser` was not used.
 - `list_channel_streams(handle, settings, limit=20, timeout=120)`: `yt-dlp
   --flat-playlist -J https://www.youtube.com/@<handle>/streams` (no API key,
   no quota; handle validated against `^[A-Za-z0-9._-]{1,60}$`).
@@ -1228,7 +1239,12 @@ segments -> clips -> assemble -> mix -> master -> mux.
 - **Master**: music/SFX mixed (`mix_graph`: beds sidechain-ducked by the game
   audio, `amix normalize=0`), then `measure_loudness` (loudnorm pass 1) and a
   second, **linear** loudnorm pass + `alimiter` + AAC once; the picture is
-  `-c copy` muxed beside it, so an audio change never costs a video generation.
+  `-c copy` muxed beside it, so an audio change never costs a video generation;
+  `mux_argv` cuts both streams to the planned length with `-t` because AAC pads to
+  whole 1024-sample frames behind a 2048-sample priming delay and left alone the
+  sound ran 40-90 ms past the picture (87 ms on a 607 s 60 fps episode, against the
+  verifier's 1.5-frame = 25 ms limit; `test_sound_never_runs_past_the_picture_at_60_fps`
+  fails without the `-t`).
   The limiter ceiling is `true_peak_db - 0.7` (`LIMITER_MARGIN_DB`) so the AAC
   encode stays under the ceiling; a peaky mix lands up to ~1.5 LU under the
   target (the verifier passes within 1.5).
@@ -1236,7 +1252,7 @@ segments -> clips -> assemble -> mix -> master -> mux.
   removed in ffmpeg 8** and a 40-piece graph is far over any argv limit.
 - Layout of `work/_edits/<name>/`: `spec.json` (the author's - **a render never
   overwrites it**; `edit new --force` keeps the old as `spec.previous.json`),
-  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles), `render/<name>.mp4`,
+  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles; an episode's holds its own `titles`, `fact_lines`, `credits`, `hashtags` and `notes` instead), `lineup.json` + `cuts.json` (an episode: the lineup *after* `edit episode` snapped its cuts, and where each one moved), `render/<name>.mp4`,
   `render/<name>.preview.mp4`, `render/<name>.<final|preview>.spec.json` (what that
   render used - a preview's 540p output block lives here, not in spec.json) and
   `.timeline.json`, `verify/<final|preview>/`, `deliver/`, `cache/`. Underscore-
@@ -1694,6 +1710,25 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   by Laplacian sharpness x exposure, >= 5 s apart, JPEG <= 2 MB; `chapter_lines`
   checks YouTube's three conditions (starts 0:00, >= 3, each >= 10 s);
   `title_options`; writes `post.md/json` and `manifest.json` (sha1 of everything).
+  The post text comes from the kill counts unless the author passes `titles`,
+  `fact_lines`, `credits` and `hashtags` (`edit deliver` reads them from `facts.json`;
+  `facts.notes` become the "Read before publishing" list): a roundup that is not about
+  kills has nothing honest to say with a kill count.
+- **editcut.py** - `find_cut(wav, t, kind)` moves a cut into the nearest gap in the
+  speech: `read_envelope` (RMS per 10 ms over a 60 ms window) -> `find_pauses` (a run of
+  >= 0.2 s in the bottom 30% of the stretch's *own* dynamic range between its 10th and
+  90th percentile; a stretch less than 12 dB wide has none - **a median-based floor was
+  tried and sits below the noise floor of mostly-quiet talk**) -> `cut_point` (an `in`
+  lands 0.25 s before the speech resumes, an `out` 0.3 s after it stops). No gap within
+  `window` (0.8 s) means `snapped: False` and the time is left exactly as authored - it
+  is never moved on a guess. `clip_level` (mean of a clip's loudest 40% of frames) and
+  `prepare_lineup(lineup, wav_for, snap, match)` snap every clip's in/out and set a
+  `gain_db` that moves each clip 85% of the way to the lineup's median level, <= 8 dB
+  (a clip with `kills` keeps its window, `"snap": false` opts out, an authored `gain_db`
+  is kept). Findings that shaped it: transcript line starts matched speech onsets to
+  ~0.1-0.3 s, but a snap computed on one context window can differ from another's, and
+  one landed 0.5 s inside the last word of a line - so a cut that matters to the words is
+  pinned with `"snap": false` after checking it against the envelope.
 - **edittemplates.py** - `kill_montage(kills, sources, ...)` -> spec dict.
   `kills_from_killfeed(data, alias, root)` adapts `killfeed.json`. Kills within
   12 s share a clip; clips are chaptered HEADSHOTS -> 50 m+ -> 100 m+ -> MULTI-KILLS
@@ -1703,7 +1738,25 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   slow push-in across any lead-up or gap longer than 0.8 x `max_gap` (so the
   montage passes its own pacing gate - a test asserts it), and an optional
   slow-mo ramp (`slowmo=none|nade|special|all`). Hand-editing the output is
-  expected: it is a first draft that is structurally right.
+  expected: it is a first draft that is structurally right. The per-kill decoration is
+  `kill_clip_parts(...)`, shared with `episode`.
+  `episode(lineup, facts=None)` builds a numbered variety roundup in the shape of Teo's
+  MISH MASH series from the *author's* lineup (it picks nothing): cold open -> sting
+  card (`nochapter`, optional theme bed) -> chapters -> end card (dark, with a music bed:
+  text on a card never stays up past the 4 s dwell limit). A lineup is `{name, series,
+  number, title (None until chosen - **never drawn into the picture**), profile
+  (default restrained), grade, sources, sfx {sting, chapter}, kill_sfx, slowmo,
+  cold_open {title, whoosh, clips}, sting {dur, music}, chapters [{title, label, whoosh,
+  music, clips}], end {dur, music}}`; a clip is `{src, in, out, note, label, punch [source
+  seconds], kills, gain_db, speed, ambient}`. The first clip of a chapter is tagged
+  `chapter` (so the YouTube chapter list is the lineup), gets a lower-third at top centre
+  (`LABEL_Y` 0.10, clear of a webcam either side and of the chat) and a whoosh; a clip's own
+  `label` stacks under it. A clip with no kills gets `_ambient_camera`: a slow push-in
+  (zoom 1 + 0.6 x the profile's punch) with a key at least every 0.8 x `max_gap`, plus a
+  snap-in on each `punch` - the pacing gate counts keys, so a talking clip needs them. A
+  clip with `kills` gets the montage treatment (callouts, punches, slow-mo, `kill_sfx`);
+  a chapter's `music` bed spans exactly its clips. `clipbot edit episode NAME lineup.json
+  [--no-snap] [--no-match] [--force]` runs `editcut.prepare_lineup` first.
 - **edittaste.py** - `work/_edits/taste.json`: `add/retire/active`. Nothing in the
   renderer reads it; whoever *writes the spec* does (see the skill), because a
   taste is a judgement and belongs in the spec where it can be seen.
@@ -2265,12 +2318,18 @@ Sections and the values worth knowing without opening the file:
   slow-mo-ramp+camera+flash and a freeze clip each come out exactly the planned
   frame count with sound the same length), `test_editaudio`, `test_editoverlay`,
   `test_editqa` (detectors shown media with a known flaw: black, silent, frozen),
-  `test_editdeliver` (incl. a real package build), `test_edittemplates` (+ taste;
-  asserts the montage passes its own pacing gate and camera keys rise),
+  `test_editdeliver` (incl. a real package build, and the author-supplied post text
+  with no ffmpeg), `test_edittemplates` (+ taste; asserts the montage passes its own
+  pacing gate and camera keys rise; the episode's running order, chapter list,
+  lower-thirds, ambient camera inside the gap, kill clips, music anchors, title never in
+  the picture), `test_editcut` (synthetic speech/gap audio: pauses, `find_cut` in/out,
+  unsnapped in steady noise, level matching, `prepare_lineup`'s exceptions;
+  mutation-checked on the cut point and the pause threshold),
   `test_edit_stage` (a full render of an xfade + card + ramp + music + SFX edit on
   synthetic media: length, A/V sync, loudness near target, **a re-render reuses
   every clip**, one changed clip re-encodes alone, a render never overwrites
-  spec.json), `test_editcli`, `test_killfeed` (synthetic OCR words, icons). The
+  spec.json), `test_editcli` (incl. `edit episode` end to end on a synthetic wav),
+  `test_killfeed` (synthetic OCR words, icons). The
   ffmpeg-using tests skip when no ffmpeg resolves.
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
@@ -2462,6 +2521,12 @@ Sections and the values worth knowing without opening the file:
   `work/_edits/<name>/spec.json`), then `edit validate` -> `edit render --preview` ->
   `edit render` -> `edit verify` -> `edit deliver`. Read `.claude/skills/clipbot-edit/`
   first.
+- ...make a numbered variety roundup (cold open, chapters, end card) from moments you
+  have chosen → write a lineup `.json` (see `edittemplates.episode`) and run
+  `clipbot edit episode <name> lineup.json`; it snaps each cut into a pause
+  (`editcut.py`) and matches levels, then the usual validate -> preview -> verify ->
+  final -> deliver. `edit deliver` takes the title/description/credits from the
+  lineup's fields, so a title that is not chosen yet stays a placeholder.
 - ...add a new kind of edit template → `clipbot/edittemplates.py` (a pure function
   returning a spec dict; validate it with `editspec.normalize` in a test and compile
   it with `edittimeline.compile_timeline` + `pacing`) + a `--template` choice in

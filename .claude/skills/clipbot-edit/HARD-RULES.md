@@ -11,7 +11,10 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
    *Origin:* a nade kill at 3:23:37 was reported as confirmed from a transcript line;
    it was another player's kill, and the kill feed showed it. A reel built on that
    would have put someone else's play in Teck's montage. Use `killfeed.json` or a
-   frame you looked at; otherwise write "unverified".
+   frame you looked at; otherwise write "unverified". A `candidates.json`
+   description is Claude's reading of a noisy transcript, not evidence: a candidate
+   saying "highest kill game ever, 23 kills" was a DEFEAT screen (second place) in
+   the frame, and a "11x chat spike" was five chat messages at the start of a stream.
 2. **Quote the number you measured, from the artefact you measured it in.**
    *Origin:* a stream start was stated as 09:59 UTC from a rounded figure; it was
    08:59:26. Read `verify.md` / `timeline.json` and copy from them.
@@ -84,6 +87,33 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     problem (`reel.py` still passes `-filter_complex_script`, which ffmpeg 8 removed).
 25. **Never invent a library asset id.** `clipbot library list`; the render fails
     loudly on an unknown id, which is correct.
+
+## Cutting a roundup
+
+30. **A cut lands in a pause, and a cut that matters to the words is checked, not
+    trusted.** `edit episode` snaps every in/out into the nearest gap in the speech
+    (`editcut.py`); a transcript timestamp alone is good to ~2 s.
+    *Origin:* one snapped `out` landed 0.5 s inside the last word of a one-liner and
+    another 0.1 s into a swear word the author meant to leave out. Found only by
+    listing the pauses around each cut (`cuts.json` says what moved and what did not);
+    pin those with `"snap": false` and a time read from the envelope.
+31. **Match the clips' levels across sources.** `edit episode` sets a `gain_db` per
+    clip (<= 8 dB) toward the lineup's median. *Origin:* clips from one lineup
+    measured -22 to -35 dB loud-part level; unmatched, the quiet ones sit 10 dB under
+    their neighbours and the master's single loudness pass cannot fix that.
+32. **A card is never a silent gap, and nothing on one stays up past the dwell
+    limit.** *Origin:* the 3 s sting card had 2.8 s of silence under it (verify flagged
+    it) and the end card's text was up 6 s; the pacing issue was in `verify` but
+    `validate` did not print it (it does now). Put a short bed or a hit under a card,
+    and keep card text under 4 s.
+33. **Do not draw a title into the picture until the author has chosen it.**
+    *Origin:* the author wanted to watch the cut before naming it; a title baked in
+    would have meant a re-render. A lineup's `title` stays in `notes`/`post.md` as a
+    placeholder.
+34. **When YouTube answers 429 or "not a bot", try another player client before
+    asking for cookies.** `--extractor-args youtube:player_client=web_embedded` still
+    returned the progressive 1080p60 formats `ytsegments` reads. Use a scratch
+    `--settings` file; do not read the user's browser cookies without being asked.
 
 ## Delivery
 

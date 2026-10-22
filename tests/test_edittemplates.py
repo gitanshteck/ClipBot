@@ -289,5 +289,156 @@ class TestTaste(unittest.TestCase):
             TASTE.load(self.path)
 
 
+def lineup(**kw):
+    base = {
+        "name": "ep", "series": "TECK MISH MASH", "number": 1, "profile": "restrained",
+        "sources": {"a": {"file": "D:/a.mp4"}, "b": {"file": "D:/b.mp4"}},
+        "sfx": {"sting": {"asset": "sfx_90f780eeb23c6778"}, "chapter": {"asset": "sfx_1a98e97b627abc75"}},
+        "kill_sfx": {"hit": {"asset": "sfx_08a073fd8c00c828"}},
+        "cold_open": {"title": "Cold open", "whoosh": False, "clips": [{"src": "a", "in": 100.0, "out": 125.0, "punch": [118.0]}]},
+        "sting": {"dur": 3.0},
+        "chapters": [
+            {"title": "Mortars", "clips": [{"src": "a", "in": 300.0, "out": 312.0, "label": "ACT 1"},
+                                          {"src": "b", "in": 50.0, "out": 58.0}]},
+            {"title": "Receipts", "music": {"asset": "mus_3a25c534c578d312", "gain_db": -18.0},
+             "clips": [{"src": "b", "in": 900.0, "out": 912.0, "kills": [kill(906, src="b", dist=120)]}]},
+            {"title": "Dance", "clips": [{"src": "a", "in": 700.0, "out": 716.0}]},
+        ],
+        "end": {"dur": 6.0, "music": {"asset": "mus_1f311273f96350f0"}},
+    }
+    base.update(kw)
+    return base
+
+
+class TestEpisode(unittest.TestCase):
+    def build(self, **kw):
+        facts = {}
+        spec = E.normalize(TPL.episode(lineup(**kw), facts=facts))
+        return spec, T.compile_timeline(spec), facts
+
+    def test_the_running_order(self):
+        spec, tl, _ = self.build()
+        ids = [c["id"] for c in spec["clips"]]
+        self.assertEqual(ids[0][0], "o")                                # the cold open comes first
+        self.assertEqual(ids[1], "sting")
+        self.assertEqual(ids[-1], "end")
+        self.assertEqual([c["type"] for c in spec["clips"] if c["type"] == "card"], ["card", "card"])
+
+    def test_chapters_are_the_chapter_clips_and_qualify_for_youtube(self):
+        from clipbot import editdeliver as D
+        spec, tl, _ = self.build()
+        ch = T.chapters(tl)
+        self.assertEqual([c["title"] for c in ch], ["Cold open", "Mortars", "Receipts", "Dance"])
+        self.assertTrue(D.chapter_lines(ch, tl["duration"])["qualifies"])
+
+    def test_cards_are_not_chapters(self):
+        spec, _, _ = self.build()
+        for c in spec["clips"]:
+            if c["type"] == "card":
+                self.assertIn("nochapter", c["tags"])
+
+    def test_a_chapter_gets_a_lower_third_and_a_whoosh_but_the_cold_open_does_not(self):
+        spec, tl, _ = self.build()
+        first = next(c for c in spec["clips"] if c.get("label") == "Mortars")
+        texts = [o["text"] for o in first["overlays"]]
+        self.assertIn("MORTARS", texts)
+        self.assertIn("ACT 1", texts)                                    # the clip's own line, stacked under it
+        ys = sorted(o["y"] for o in first["overlays"])
+        self.assertLess(ys[0], ys[1])
+        self.assertEqual(spec["clips"][0]["overlays"], [])               # cold open: nothing on top of the hook
+        whooshes = [s for s in spec["tracks"]["sfx"] if s["id"].startswith("w")]
+        self.assertEqual(len(whooshes), 3)
+        self.assertFalse(any(s["on"]["clip"] == spec["clips"][0]["id"] for s in whooshes))
+
+    def test_a_clip_too_short_for_a_label_gets_none(self):
+        spec, _, _ = self.build(chapters=[{"title": "Quick", "clips": [{"src": "a", "in": 10.0, "out": 11.5, "label": "X"}]}])
+        self.assertEqual([c for c in spec["clips"] if c.get("label") == "Quick"][0]["overlays"], [])
+
+    def test_a_punch_becomes_a_marker_and_a_snap_in_on_a_slow_push(self):
+        spec, _, _ = self.build()
+        cold = spec["clips"][0]
+        self.assertEqual([m["at"] for m in cold["markers"] if m["name"] == "punch"], [118.0])
+        zooms = {k["at"]: k["zoom"] for k in cold["camera"]}
+        self.assertGreater(zooms[118.0], max(z for at, z in zooms.items() if at < 117.5))
+        self.assertEqual(cold["camera"][0]["zoom"], 1.0)                 # life from the first frame
+
+    def test_a_long_talking_clip_has_camera_life_inside_the_gap(self):
+        spec, tl, _ = self.build(cold_open={"title": "c", "whoosh": False, "clips": [{"src": "a", "in": 0.0, "out": 40.0}]})
+        keys = [k["at"] for k in spec["clips"][0]["camera"]]
+        gaps = [b - a for a, b in zip(keys, keys[1:])]
+        self.assertLessEqual(max(gaps), E.PROFILES["restrained"]["max_gap"])
+        self.assertLessEqual(len(keys), E.MAX_CAMERA_KEYS)
+        self.assertEqual(keys, sorted(keys))
+
+    def test_ambient_can_be_turned_off_for_a_clip(self):
+        spec, _, _ = self.build(cold_open={"title": "c", "whoosh": False,
+                                           "clips": [{"src": "a", "in": 0.0, "out": 5.0, "ambient": False}]})
+        self.assertEqual(spec["clips"][0]["camera"], [])
+
+    def test_the_whole_episode_passes_its_own_pacing_gate(self):
+        _, tl, _ = self.build()
+        self.assertTrue(T.pacing(tl)["ok"], T.pacing(tl)["issues"])
+        self.assertEqual(tl["warnings"], [])
+
+    def test_a_kill_clip_gets_the_montage_treatment(self):
+        spec, tl, _ = self.build()
+        rec = next(c for c in spec["clips"] if c.get("label") == "Receipts")
+        self.assertEqual([m["name"] for m in rec["markers"]], ["kill"])
+        self.assertTrue(any(o["kind"] == "callout" and o["text"] == "120 M SHOT" for o in rec["overlays"]))
+        self.assertTrue(any(s["on"]["clip"] == rec["id"] and s["on"].get("at") == 906.0 for s in spec["tracks"]["sfx"]))
+        self.assertTrue(rec["camera"])
+
+    def test_a_chapter_music_bed_spans_exactly_that_chapter(self):
+        spec, tl, _ = self.build()
+        beds = [m for m in tl["tracks"]["music"] if m["id"] == "bed1"]
+        rec = next(c for c in tl["clips"] if c["label"] == "Receipts")
+        self.assertEqual(len(beds), 1)
+        self.assertAlmostEqual(beds[0]["t0"], rec["start"], places=2)
+        self.assertAlmostEqual(beds[0]["t1"], rec["end"], places=2)
+        end = next(m for m in tl["tracks"]["music"] if m["id"] == "endbed")
+        self.assertAlmostEqual(end["t1"], tl["duration"], places=2)
+
+    def test_the_title_is_a_placeholder_until_the_author_has_one(self):
+        spec, _, facts = self.build()
+        self.assertIn("not chosen yet", spec["notes"])
+        self.assertIsNone(facts["title"])
+        spec2, _, facts2 = self.build(title="A Name")
+        self.assertIn("A Name", spec2["notes"])
+        self.assertNotIn("A NAME", [o["text"] for c in spec2["clips"] for o in c["overlays"]])   # never baked into the picture
+
+    def test_facts_describe_what_the_edit_contains(self):
+        _, _, facts = self.build()
+        self.assertEqual(facts["clips"], 5)
+        self.assertEqual([c["title"] for c in facts["chapters"]], ["Cold open", "Mortars", "Receipts", "Dance"])
+
+    def test_the_sting_and_end_cards_name_the_series_and_number(self):
+        spec, _, _ = self.build()
+        sting = next(c for c in spec["clips"] if c["id"] == "sting")
+        self.assertEqual([o["text"] for o in sting["overlays"]], ["TECK MISH MASH", "#1"])
+        self.assertTrue(any(s["id"] == "sting" for s in spec["tracks"]["sfx"]))
+
+    def test_the_sting_can_carry_its_own_theme_so_the_card_is_not_silent(self):
+        spec, tl, _ = self.build(sting={"dur": 2.6, "music": {"asset": "mus_ff58ea86d9d6dddb", "gain_db": -12.0}})
+        bed = next(m for m in tl["tracks"]["music"] if m["id"] == "stingbed")
+        card = next(c for c in tl["clips"] if c["id"] == "sting")
+        self.assertAlmostEqual(bed["t0"], card["start"], places=2)
+        self.assertAlmostEqual(bed["t1"], card["end"], places=2)
+        self.assertFalse(bed["duck"]["enabled"])
+
+    def test_no_clips_is_an_error(self):
+        with self.assertRaises(E.SpecError):
+            TPL.episode(lineup(cold_open=None, chapters=[]))
+
+
+class TestKillPartsAreSharedWithTheMontage(unittest.TestCase):
+    def test_the_montage_keeps_one_callout_per_kill_marker(self):
+        spec = E.normalize(build())
+        tagged = [c for c in spec["clips"] if c["type"] == "clip" and c["markers"]]
+        self.assertTrue(tagged)
+        for c in tagged:
+            self.assertEqual({m["name"] for m in c["markers"]}, {"kill"})
+            self.assertEqual(len(c["markers"]), len([o for o in c["overlays"] if o["kind"] == "callout"]))
+
+
 if __name__ == "__main__":
     unittest.main()
