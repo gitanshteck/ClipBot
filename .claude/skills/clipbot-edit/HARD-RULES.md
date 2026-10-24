@@ -115,6 +115,34 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     returned the progressive 1080p60 formats `ytsegments` reads. Use a scratch
     `--settings` file; do not read the user's browser cookies without being asked.
 
+35. **"Not frozen" is not "alive".** `edit verify` now measures real motion
+    (static picture) because `freezedetect` passes any stream overlay. *Origin:* a
+    10-minute episode had a loading screen, a black screen and a privacy-policy page
+    of 8-15 s each and every check passed; I found them by reading contact sheets. A
+    flagged stretch is a decision for the author (trim it, cover it with a graphic,
+    or keep it because the audio is the joke), never silently ignored.
+36. **Measure a tool before adopting it.** *Origin:* the plan proposed AMD's hardware
+    encoder for previews; measured, `h264_amf` was *slower* (2.3 s) than x264
+    ultrafast (1.4 s) on 20 s of 1080p60, because the preview cost is segment fetching
+    and filtering, not encoding. Dropped, with the numbers in the plan.
+
+37. **Never let a source quietly get worse.** A render that falls back to a lower-quality
+    source is a failed render. *Origin:* an episode's third chapter was cut from 640x360
+    because the YouTube client I had pinned stopped offering 1080p; the log said `format 18,
+    640x360` and nothing failed, and `verify` passed, because it has no idea what the
+    source looked like. The engine now refuses under `edit.min_source_height`; after any
+    re-render **compare against the previous version** (per-clip sharpness) before
+    presenting it.
+38. **A zoom must not crop the stream overlay.** Camera keys centred on (0.5, 0.5)
+    cropped the webcam and the channel logo in every clip of an episode, because the
+    overlay sits against an edge and the layout changes with the stream's scene. Until
+    framing is scene-aware, do not use a centred zoom on a clip whose overlay is not
+    centred: set `camera` focus by hand or leave the clip unzoomed.
+39. **A clip starts where the action starts, not where the sentence does.** *Origin:*
+    clips set from transcript lines began at the reaction ("mortar fell on me") instead of
+    the hit, and kill windows were 6 s before / 3 s after: the kill without the fight.
+    Include the lead-up and the aftermath, or mark the clip a deliberate cutaway.
+
 ## Delivery
 
 26. **YouTube chapters need 0:00, 3+ entries, each >= 10 s.** `edit validate` says

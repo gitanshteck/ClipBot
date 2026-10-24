@@ -69,6 +69,7 @@ clipbot edit validate|inspect NAME
 clipbot edit render NAME [--preview] [--force] [--no-master] [--preset shorts_1080x1920]
 clipbot edit verify NAME [--preview] [--shallow]
 clipbot edit deliver NAME [--variants shorts,square,portrait] [--thumbs N]
+clipbot edit thumbnail NAME --at SECONDS --text "WORDS" [--side left|right] [--zoom 1.4 --focus X,Y] [--font fnt_ID]
 clipbot edit list | clean NAME [--segments] | taste list|add|retire
 clipbot library list                       # music (mus_...), sfx (sfx_...), fonts, stickers
 ```

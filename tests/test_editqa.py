@@ -157,5 +157,95 @@ class TestDetectors(unittest.TestCase):
         self.assertEqual([c for c in res["checks"] if c["name"] == "length vs plan"][0]["status"], "fail")
 
 
+class TestStaticPicture(unittest.TestCase):
+    def test_runs_of_low_motion_are_found(self):
+        shares = [0.3] * 8 + [0.001] * 16 + [0.3] * 4 + [0.005] * 6 + [0.3] * 2
+        found = Q.stretches_from_shares(shares, 4, 3.0, 0.02)
+        self.assertEqual(len(found), 1)                                        # the 1.5 s stretch is too short
+        self.assertAlmostEqual(found[0]["start"], 2.0)
+        self.assertAlmostEqual(found[0]["dur"], 4.0)
+        self.assertLess(found[0]["moving"], 0.01)
+
+    def test_busy_picture_has_none(self):
+        self.assertEqual(Q.stretches_from_shares([0.2] * 40, 4, 3.0, 0.02), [])
+
+    def test_a_stretch_running_to_the_end_is_kept(self):
+        found = Q.stretches_from_shares([0.3] * 4 + [0.0] * 20, 4, 3.0, 0.02)
+        self.assertEqual(len(found), 1)
+        self.assertAlmostEqual(found[0]["end"], 6.0)
+
+
+class TestStaticPictureOnMedia(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tools = _tools()
+        if not cls.tools:
+            raise unittest.SkipTest("ffmpeg is not available")
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.ff = cls.tools[0]
+        d = Path(cls.tmp.name)
+        # 4 s of motion, 5 s of a still frame with a tiny moving dot (a webcam's worth), 4 s of motion
+        cls.mixed = d / "mixed.mp4"
+        subprocess.run([cls.ff, "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=4",
+                        "-f", "lavfi", "-i", "color=c=0x303030:size=320x180:rate=30:duration=5",
+                        "-f", "lavfi", "-i", "color=c=white:size=14x14:rate=30:duration=5",
+                        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=4",
+                        "-filter_complex", "[1:v][2:v]overlay=x='20+40*sin(t*5)':y=20[mid];"
+                                           "[0:v][mid][3:v]concat=n=3:v=1:a=0[v]", "-map", "[v]",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(cls.mixed)], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_a_still_scene_with_a_small_moving_part_is_dead_picture(self):
+        found = Q.static_stretches(self.ff, self.mixed)
+        self.assertEqual(len(found), 1, found)
+        self.assertAlmostEqual(found[0]["start"], 4.0, delta=0.6)
+        self.assertGreater(found[0]["dur"], 4.0)
+
+    def test_the_freeze_detector_alone_would_have_missed_it(self):
+        self.assertEqual(Q.frozen_frames(self.ff, self.mixed), [])
+
+
+class TestJoinJumps(unittest.TestCase):
+    RATE = 16000
+
+    def tone(self, seconds, amp):
+        t = np.arange(int(seconds * self.RATE)) / float(self.RATE)
+        return amp * np.sin(2 * np.pi * 220 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 5 * t))
+
+    def timeline(self, *clips):
+        t, out = 0.0, []
+        for cid, kind, dur in clips:
+            out.append({"id": cid, "type": kind, "start": t, "end": t + dur})
+            t += dur
+        return {"clips": out, "duration": t}
+
+    def test_a_step_across_a_join_is_flagged_with_its_size_and_sign(self):
+        samples = np.concatenate([self.tone(4, 0.4), self.tone(4, 0.04), self.tone(4, 0.04)])
+        tl = self.timeline(("a", "clip", 4), ("b", "clip", 4), ("c", "clip", 4))
+        jumps = Q.join_jumps(samples, self.RATE, tl)
+        self.assertEqual([j["clip"] for j in jumps], ["b"])
+        self.assertAlmostEqual(jumps[0]["jump_db"], -20.0, delta=2.0)
+
+    def test_matched_levels_are_clean(self):
+        samples = np.concatenate([self.tone(4, 0.3), self.tone(4, 0.25), self.tone(4, 0.3)])
+        tl = self.timeline(("a", "clip", 4), ("b", "clip", 4), ("c", "clip", 4))
+        self.assertEqual(Q.join_jumps(samples, self.RATE, tl), [])
+
+    def test_a_card_may_change_the_sound(self):
+        samples = np.concatenate([self.tone(4, 0.4), self.tone(3, 0.001), self.tone(4, 0.4)])
+        tl = self.timeline(("a", "clip", 4), ("title", "card", 3), ("b", "clip", 4))
+        self.assertEqual(Q.join_jumps(samples, self.RATE, tl), [])
+
+    def test_worst_first(self):
+        samples = np.concatenate([self.tone(4, 0.4), self.tone(4, 0.1), self.tone(4, 0.002)])
+        tl = self.timeline(("a", "clip", 4), ("b", "clip", 4), ("c", "clip", 4))
+        jumps = Q.join_jumps(samples, self.RATE, tl)
+        self.assertEqual([j["clip"] for j in jumps], ["c", "b"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -210,6 +210,8 @@
     "_comment": "The edit engine (`clipbot edit ...`): multi-source timelines with retiming, camera moves, grade, overlays, transitions, music/SFX and loudness mastering. Output goes to work/_edits/<name>/; source segments are cached in work/_cache/edit/ and shared between edits.",
     "_comment_segment_pad": "Seconds of extra footage cut either side of each clip's [in, out] so a retimed or zoomed move never runs out of picture at its edges.",
     "segment_pad": 0.6,
+    "_comment_min_source_height": "Refuse (after trying other YouTube player clients) to cut an edit from a YouTube source that only resolves below this many pixels of height. 0 turns the floor off. A flaky client once answered 640x360 and a whole chapter came out blurry.",
+    "min_source_height": 720,
     "_comment_thumbs": "Thumbnail candidates per delivery package.",
     "thumbnails": 3
   },

@@ -255,6 +255,139 @@ def pick_thumbnails(ffmpeg: str, video: Path, timeline: Dict[str, Any], out_dir:
     return results
 
 
+# --------------------------------------------------------------------------
+# designed thumbnails
+# --------------------------------------------------------------------------
+
+THUMB_SIZE = (1280, 720)
+
+
+def _cover(im: Any, size: Tuple[int, int]) -> Any:
+    """Scale to cover `size`, centre-cropped (never letterboxed)."""
+    from PIL import Image
+
+    w, h = im.size
+    k = max(size[0] / float(w), size[1] / float(h))
+    im = im.resize((max(size[0], int(round(w * k))), max(size[1], int(round(h * k)))), Image.LANCZOS)
+    x, y = (im.width - size[0]) // 2, (im.height - size[1]) // 2
+    return im.crop((x, y, x + size[0], y + size[1]))
+
+
+def _wrap(words: List[str], max_lines: int) -> List[str]:
+    """Split into at most `max_lines` lines of similar length (a thumbnail reads in one glance)."""
+    n = len(words)
+    if n <= 1 or max_lines <= 1:
+        return [" ".join(words)]
+    best, best_cost = None, None
+    for cuts in range(1, 1 << (n - 1)):
+        idx = [i + 1 for i in range(n - 1) if cuts >> i & 1]
+        if len(idx) + 1 > max_lines:
+            continue
+        lines = [" ".join(words[a:b]) for a, b in zip([0] + idx, idx + [n])]
+        cost = max(len(l) for l in lines) * 10 + len(lines)
+        if best_cost is None or cost < best_cost:
+            best, best_cost = lines, cost
+    return best or [" ".join(words)]
+
+
+def _rgb(accent: str) -> Tuple[int, int, int]:
+    return int(accent[1:3], 16), int(accent[3:5], 16), int(accent[5:7], 16)
+
+
+def _frame_subject(im: Any, zoom: float, focus: Optional[Tuple[float, float]], side: str) -> Any:
+    """Crop `im` closer so the subject (at `focus`, fractions of the source frame) lands on the side opposite
+    the words: a third in from the edge, vertically centred if the crop allows. `zoom` 1 leaves the frame alone."""
+    if zoom <= 1.0 or focus is None:
+        return im
+    w, h = im.size
+    cw, ch = w / zoom, h / zoom
+    want_x = 0.30 if side == "right" else 0.70          # where the subject should sit in the crop
+    left = min(max(focus[0] * w - want_x * cw, 0.0), w - cw)
+    top = min(max(focus[1] * h - 0.5 * ch, 0.0), h - ch)
+    return im.crop((int(left), int(top), int(left + cw), int(top + ch)))
+
+
+def compose_thumbnail(frame: Any, text: str, out_path: Any, font: Optional[str] = None, accent: str = "#35D0FF",
+                      side: str = "right", max_lines: int = 3, size: Tuple[int, int] = THUMB_SIZE,
+                      zoom: float = 1.0, focus: Optional[Tuple[float, float]] = None) -> Dict[str, Any]:
+    """A designed 1280x720 thumbnail from one frame: graded and vignetted, with 1-3 lines of heavy
+    outlined text on one side (the side without the face), the last line in the accent colour,
+    and a thin accent frame. `side` is `left` or `right`: put the words opposite the person.
+    With `zoom` > 1 and `focus` (the person's centre, fractions of the frame) the frame is cropped
+    closer and shifted so the person sits on the other side from the words; without them the
+    whole frame is used, which only works when the person is already at one edge.
+
+    Returns {file, bytes, box, legibility, lines}; legibility is the luminance spread of the
+    text box at the 168 px width YouTube shows in a sidebar - under 0.5 means the words would
+    not survive being small. JPEG <= THUMB_MAX_BYTES.
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+
+    from .editoverlay import find_font
+
+    if side not in ("left", "right"):
+        raise SpecError("side must be 'left' or 'right'")
+    words = text.upper().split()
+    if not words:
+        raise SpecError("a thumbnail needs some text")
+    W, H = size
+    im = _cover(_frame_subject(Image.open(str(frame)).convert("RGB"), zoom, focus, side), size)
+    im = ImageEnhance.Contrast(im).enhance(1.12)
+    im = ImageEnhance.Color(im).enhance(1.22)
+    im = im.filter(ImageFilter.UnsharpMask(radius=2, percent=70, threshold=3))
+    # vignette: darker toward the corners so the words and the subject both lift
+    yy, xx = np.mgrid[0:H, 0:W]
+    r = np.sqrt(((xx - W / 2.0) / (W / 2.0)) ** 2 + ((yy - H / 2.0) / (H / 2.0)) ** 2)
+    shade = 1.0 - 0.38 * np.clip((r - 0.55) / 0.9, 0.0, 1.0) ** 1.4
+    im = Image.fromarray((np.asarray(im, dtype=np.float32) * shade[..., None]).clip(0, 255).astype(np.uint8))
+
+    lines = _wrap(words, max_lines)
+    fpath = find_font(font)
+    draw = ImageDraw.Draw(im)
+    zone_w = int(W * 0.50)
+    lo, hi = 20, 260
+    while hi - lo > 2:                    # the biggest type that keeps every line inside its zone
+        mid = (lo + hi) // 2
+        f = ImageFont.truetype(fpath, mid) if fpath else ImageFont.load_default()
+        widest = max(draw.textlength(l, font=f) for l in lines)
+        if widest <= zone_w - 40 and mid * len(lines) * 1.05 <= H - 120:
+            lo = mid
+        else:
+            hi = mid
+    f = ImageFont.truetype(fpath, lo) if fpath else ImageFont.load_default()
+    lh = int(lo * 1.05)
+    top = (H - lh * len(lines)) // 2
+    stroke = max(4, lo // 12)
+    box = [W, H, 0, 0]
+    for i, line in enumerate(lines):
+        tw = draw.textlength(line, font=f)
+        x = 44 if side == "left" else W - 44 - tw
+        y = top + i * lh
+        colour = _rgb(accent) if i == len(lines) - 1 and len(lines) > 1 else (255, 255, 255)
+        draw.text((x + 4, y + 6), line, font=f, fill=(0, 0, 0), stroke_width=stroke, stroke_fill=(0, 0, 0))
+        draw.text((x, y), line, font=f, fill=colour, stroke_width=stroke, stroke_fill=(8, 8, 12))
+        bb = draw.textbbox((x, y), line, font=f, stroke_width=stroke)
+        box = [min(box[0], bb[0]), min(box[1], bb[1]), max(box[2], bb[2]), max(box[3], bb[3])]
+    draw.rectangle((10, 10, W - 11, H - 11), outline=_rgb(accent), width=6)
+
+    crop = im.crop(tuple(int(v) for v in box)).convert("L")
+    small = np.asarray(crop.resize((max(8, int(crop.width * 168 / float(W))), max(4, int(crop.height * 168 / float(W))))),
+                       dtype=np.float32) / 255.0
+    legibility = float(np.percentile(small, 95) - np.percentile(small, 5))
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    quality = 93
+    while True:
+        im.save(out_path, quality=quality, subsampling=0)
+        if out_path.stat().st_size <= THUMB_MAX_BYTES or quality <= 60:
+            break
+        quality -= 6
+    return {"file": str(out_path), "bytes": out_path.stat().st_size, "box": tuple(int(v) for v in box),
+            "legibility": round(legibility, 2), "lines": lines}
+
+
 def build_package(
     ffmpeg: str,
     master: Path,

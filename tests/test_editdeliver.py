@@ -247,5 +247,68 @@ class TestPostTextOverrides(unittest.TestCase):
         self.assertEqual(post["hashtags"], ["#wardogs", "#gaming"])
 
 
+class TestDesignedThumbnail(unittest.TestCase):
+    def setUp(self):
+        from PIL import Image
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        # a 16:9 frame with a bright "face" blob at x=0.45 on a dark, noisy ground
+        rng = np.random.RandomState(3)
+        arr = (rng.rand(540, 960, 3) * 60).astype("uint8")
+        yy, xx = np.mgrid[0:540, 0:960]
+        blob = ((xx - 432) ** 2 + (yy - 250) ** 2) < 90 ** 2
+        arr[blob] = (230, 190, 160)
+        self.frame = self.dir / "f.png"
+        Image.fromarray(arr).save(self.frame)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_wrap_balances_lines_and_respects_the_limit(self):
+        self.assertEqual(D._wrap(["I", "SHAVED", "THE", "BEARD"], 3), ["I SHAVED", "THE", "BEARD"])
+        self.assertEqual(len(D._wrap("A B C D E F G".split(), 3)), 3)
+        self.assertEqual(D._wrap(["ONE"], 3), ["ONE"])
+        self.assertEqual(D._wrap(["A", "B"], 1), ["A B"])
+
+    def test_it_writes_a_1280x720_jpeg_under_the_size_limit(self):
+        from PIL import Image
+        r = D.compose_thumbnail(self.frame, "who is teck now", self.dir / "t.jpg")
+        self.assertEqual(Image.open(r["file"]).size, (1280, 720))
+        self.assertLessEqual(r["bytes"], D.THUMB_MAX_BYTES)
+        self.assertEqual(" ".join(r["lines"]), "WHO IS TECK NOW" if len(r["lines"]) == 1 else " ".join(r["lines"]))
+
+    def test_the_words_sit_on_the_requested_side(self):
+        right = D.compose_thumbnail(self.frame, "THE BEARD IS GONE", self.dir / "r.jpg", side="right")["box"]
+        left = D.compose_thumbnail(self.frame, "THE BEARD IS GONE", self.dir / "l.jpg", side="left")["box"]
+        self.assertGreater(right[0], 1280 * 0.40)
+        self.assertLess(left[2], 1280 * 0.60)
+
+    def test_the_words_are_legible_at_sidebar_size(self):
+        r = D.compose_thumbnail(self.frame, "THE BEARD IS GONE", self.dir / "t.jpg")
+        self.assertGreaterEqual(r["legibility"], 0.5)
+
+    def test_zoom_and_focus_move_the_subject_to_the_far_side(self):
+        from PIL import Image
+        im = Image.open(self.frame)
+        right = D._frame_subject(im, 1.4, (0.45, 0.46), "right")
+        left = D._frame_subject(im, 1.4, (0.45, 0.46), "left")
+        self.assertAlmostEqual(right.width, 960 / 1.4, delta=2)
+        # the blob (centre 432 px in the source) lands near 30% / 70% of the crop
+        def blob_x(crop):
+            a = np.asarray(crop.convert("RGB")).astype(int)
+            mask = (a[..., 0] > 200) & (a[..., 1] > 160)
+            return np.nonzero(mask)[1].mean() / crop.width
+        self.assertAlmostEqual(blob_x(right), 0.30, delta=0.04)
+        # a subject at 45% of the frame cannot reach 70%: the crop stops at the frame's left edge (63%)
+        self.assertAlmostEqual(blob_x(left), 0.63, delta=0.04)
+        self.assertIs(D._frame_subject(im, 1.0, (0.5, 0.5), "right"), im)       # no zoom, no change
+
+    def test_bad_input(self):
+        with self.assertRaises(E.SpecError):
+            D.compose_thumbnail(self.frame, "   ", self.dir / "x.jpg")
+        with self.assertRaises(E.SpecError):
+            D.compose_thumbnail(self.frame, "HI", self.dir / "x.jpg", side="middle")
+
+
 if __name__ == "__main__":
     unittest.main()

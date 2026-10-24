@@ -76,9 +76,10 @@ _HANDLE_RE = re.compile(r"^[A-Za-z0-9._-]{1,60}$")
 # --------------------------------------------------------------------------
 
 
-def _common_flags(settings: Settings, playlist: bool = False) -> List[str]:
+def _common_flags(settings: Settings, playlist: bool = False, client: Optional[str] = None) -> List[str]:
     """Flags every YouTube yt-dlp call shares. All optional settings: an
-    unconfigured install passes nothing beyond `--no-playlist`."""
+    unconfigured install passes nothing beyond `--no-playlist`. `client` overrides the
+    configured player client for this one call (`""` = yt-dlp's own default)."""
     flags = [] if playlist else ["--no-playlist"]
     runtime = settings.get("download.youtube.js_runtime")
     if runtime:
@@ -86,7 +87,8 @@ def _common_flags(settings: Settings, playlist: bool = False) -> List[str]:
     browser = settings.get("download.youtube.cookies_from_browser")
     if browser:
         flags += ["--cookies-from-browser", str(browser)]
-    client = settings.get("download.youtube.player_client")
+    if client is None:
+        client = settings.get("download.youtube.player_client")
     if client:
         flags += ["--extractor-args", "youtube:player_client={0}".format(client)]
     return flags
@@ -96,11 +98,11 @@ def _binary(settings: Settings) -> str:
     return resolve_tool(settings.tool("yt_dlp"), YT_DLP_HINT)
 
 
-def base_argv(settings: Settings, playlist: bool = False) -> List[str]:
+def base_argv(settings: Settings, playlist: bool = False, client: Optional[str] = None) -> List[str]:
     """`[yt-dlp, <the flags every YouTube call shares>]`: what other modules
     (clipbot/ytsegments.py) build their own yt-dlp calls on, so the configured
     binary, JS runtime, cookies and player client apply to them too."""
-    return [_binary(settings)] + _common_flags(settings, playlist=playlist)
+    return [_binary(settings)] + _common_flags(settings, playlist=playlist, client=client)
 
 
 def info_json_path(ws: Workspace) -> Path:

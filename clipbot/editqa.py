@@ -28,6 +28,10 @@ log = get_logger(__name__)
 CLICK_LIMIT = 14.0
 MOMENT_LAG = 0.6      # seconds after a marker: the callout has landed
 MAX_MOMENTS = 64      # four contact sheets
+JOIN_WINDOW = 1.5     # seconds of sound either side of a join that its level is judged on
+JUMP_LIMIT_DB = 9.0   # a louder-or-quieter step than this across a join is flagged
+STATIC_MIN = 3.0      # seconds of picture that barely moves before it is called dead
+STATIC_MOVING = 0.02  # fraction of a 160x90 frame whose pixels change by > 12 between samples (4/s)
 
 
 # --------------------------------------------------------------------------
@@ -92,6 +96,101 @@ def silences(ffmpeg: str, path: Any, min_dur: float = 1.5, floor_db: float = -50
         end, dur = float(a), float(b)
         out.append({"start": end - dur, "end": end, "dur": dur})
     return out
+
+
+def static_stretches(ffmpeg: str, path: Any, min_dur: float = STATIC_MIN, moving: float = STATIC_MOVING,
+                     rate: int = 4) -> List[Dict[str, float]]:
+    """Stretches of at least `min_dur` seconds where the picture barely moves.
+
+    `freezedetect` only fires on a byte-for-byte frozen frame, and a stream overlay never is
+    (chat scrolls, a webcam breathes), so a loading screen with a small webcam sails through
+    it. This samples the picture at `rate` per second at 160x90 and counts the share of
+    pixels that changed by more than 12 grey levels since the previous sample; a run of
+    samples under `moving` is a dead stretch. Found on a real episode: a menu, a black
+    screen and a privacy-policy page, each 8-15 s, all passing `frozen picture`.
+    [{start, end, dur, moving}] where `moving` is the stretch's median share.
+    """
+    import numpy as np
+
+    w, h = 160, 90
+    proc = subprocess.Popen(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(path), "-an",
+         "-vf", "fps={0},scale={1}:{2},format=gray".format(rate, w, h), "-f", "rawvideo", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    shares: List[float] = []
+    prev = None
+    size = w * h
+    while True:
+        buf = proc.stdout.read(size)
+        if len(buf) < size:
+            break
+        cur = np.frombuffer(buf, dtype=np.uint8).astype(np.int16)
+        if prev is not None:
+            shares.append(float((np.abs(cur - prev) > 12).mean()))
+        prev = cur
+    proc.stdout.close()
+    proc.wait()
+    return stretches_from_shares(shares, rate, min_dur, moving)
+
+
+def stretches_from_shares(shares: Sequence[float], rate: int, min_dur: float, moving: float) -> List[Dict[str, float]]:
+    """The pure half of `static_stretches`: sample i is the change between sample i and i+1."""
+    import numpy as np
+
+    out: List[Dict[str, float]] = []
+    i, n = 0, len(shares)
+    while i < n:
+        if shares[i] >= moving:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and shares[j + 1] < moving:
+            j += 1
+        dur = (j - i + 1) / float(rate)
+        if dur >= min_dur:
+            out.append({"start": i / float(rate), "end": (j + 1) / float(rate), "dur": dur,
+                        "moving": float(np.median(shares[i:j + 1]))})
+        i = j + 1
+    return out
+
+
+def join_jumps(samples: Any, sample_rate: int, timeline: Dict[str, Any], window: float = JOIN_WINDOW,
+               limit_db: float = JUMP_LIMIT_DB) -> List[Dict[str, Any]]:
+    """Joins where the sound steps up or down by more than `limit_db` across the cut.
+
+    Level on each side is the mean of its loudest 40% of 10 ms frames over `window` seconds (how
+    loud it sounds while something is going on, not what its pauses average - the measure
+    `editcut.clip_level` matches clips with). Joins touching a card are skipped: a title card is
+    meant to change the sound. [{clip, t, jump_db}], worst first.
+    """
+    import numpy as np
+
+    from . import editcut
+
+    times, db = editcut.envelope(samples, sample_rate)
+    if len(times) == 0:
+        return []
+    cards = {c["id"] for c in timeline["clips"] if c["type"] == "card"}
+    clips = timeline["clips"]
+    out: List[Dict[str, Any]] = []
+
+    def level(a: float, b: float) -> Optional[float]:
+        seg = db[(times >= a) & (times < b)]
+        if len(seg) < 20:
+            return None
+        return float(np.mean(np.sort(seg)[int(len(seg) * 0.6):]))
+
+    for prev, c in zip(clips, clips[1:]):
+        if c["id"] in cards or prev["id"] in cards:
+            continue
+        t = c["start"]
+        before, after = level(max(0.0, t - window), t), level(t, min(t + window, timeline["duration"]))
+        if before is None or after is None:
+            continue
+        jump = after - before
+        if abs(jump) > limit_db:
+            out.append({"clip": c["id"], "t": round(t, 2), "jump_db": round(jump, 1)})
+    return sorted(out, key=lambda j: -abs(j["jump_db"]))
 
 
 def loudness(ffmpeg: str, path: Any) -> Optional[Dict[str, float]]:
@@ -313,6 +412,13 @@ def verify(ffmpeg: str, ffprobe: str, render: Any, timeline: Optional[Dict[str, 
                 len(frozen), frozen[0]["start"], frozen[0]["end"]))
         else:
             add("frozen picture", "pass", "none over 1 s")
+        dead = [d for d in static_stretches(ffmpeg, render) if not in_card(d["start"], d["end"])]
+        if dead:
+            worst = max(dead, key=lambda d: d["dur"])
+            add("static picture", "warn", "{0} stretch(es) where the picture barely moves for {1:g} s or more, longest {2:.1f} s at {3:.1f} s "
+                "(first {4:.1f}-{5:.1f} s)".format(len(dead), STATIC_MIN, worst["dur"], worst["start"], dead[0]["start"], dead[0]["end"]))
+        else:
+            add("static picture", "pass", "nothing still for {0:g} s or more".format(STATIC_MIN))
         if a:
             sil = silences(ffmpeg, render)
             if sil:
@@ -346,6 +452,12 @@ def verify(ffmpeg: str, ffprobe: str, render: Any, timeline: Optional[Dict[str, 
                         "{0} {1}".format(i, s) for i, s in bad[:6])))
                 else:
                     add("clicks at joins", "pass", "no join over {0:g}".format(CLICK_LIMIT))
+                jumps = join_jumps(samples, editaudio.ANALYSIS_RATE, timeline)
+                if jumps:
+                    add("level at joins", "warn", "{0} join(s) step the sound by more than {1:g} dB, worst (clip, dB): {2}".format(
+                        len(jumps), JUMP_LIMIT_DB, ", ".join("{0} {1:+.1f}".format(j["clip"], j["jump_db"]) for j in jumps[:6])))
+                else:
+                    add("level at joins", "pass", "no join steps the sound by more than {0:g} dB".format(JUMP_LIMIT_DB))
             ev = [(e["t"], e["kind"][:3]) for e in (timeline or {}).get("events", []) if e["kind"] in ("sfx", "slowmo", "overlay")][:60]
             artifacts["waveform"] = waveform_png(samples, editaudio.ANALYSIS_RATE, out_dir / "loudness.png",
                                                  markers + ev, master["loudness_lufs"] if master else None)

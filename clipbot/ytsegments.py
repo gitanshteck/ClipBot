@@ -150,9 +150,10 @@ def request_size(settings: Settings) -> int:
     return max(MIN_REQUEST_SIZE, min(MAX_REQUEST_SIZE, size))
 
 
-def resolve_streams(url: str, settings: Settings, timeout: int = 180) -> Streams:
-    """One yt-dlp extraction: the direct URLs for the best progressive pair."""
-    argv = youtube_stage.base_argv(settings) + ["-J", "-f", segment_format(settings), url]
+def resolve_streams(url: str, settings: Settings, timeout: int = 180, client: Optional[str] = None) -> Streams:
+    """One yt-dlp extraction: the direct URLs for the best progressive pair. `client` picks the
+    YouTube player client for this call (None = the configured one, "" = yt-dlp's default)."""
+    argv = youtube_stage.base_argv(settings, client=client) + ["-J", "-f", segment_format(settings), url]
     try:
         proc = subprocess.run(
             argv,
@@ -224,13 +225,20 @@ def _streams_from_info(info: Dict[str, Any]) -> Streams:
     )
 
 
+# Player clients tried, after the configured one and yt-dlp's default, when a floor is set and an
+# answer is too small. Measured 2026-10-21/24 (CLAUDE.md, youtube.py): `tv`, `android_vr` and
+# `tv_simply` fail outright, so they are not here.
+FALLBACK_CLIENTS = ("web_embedded", "mweb")
+
+
 class StreamResolver(object):
     """Resolves a workspace's stream URLs lazily, once, and again when they are
     about to expire or after a rejection. One per cut/compile job."""
 
-    def __init__(self, ws: Workspace, settings: Settings):
+    def __init__(self, ws: Workspace, settings: Settings, min_height: int = 0):
         self.ws = ws
         self.settings = settings
+        self.min_height = int(min_height)
         state = ws.read_state()
         self.video_id = state.get("video_id") or ws.slug
         self.url = state.get("url")
@@ -244,7 +252,7 @@ class StreamResolver(object):
             if not self.url:
                 raise StageError("No YouTube URL recorded for workspace {0}.".format(self.ws.slug))
             log.info("Resolving YouTube stream URLs for %s", self.video_id)
-            self._streams = resolve_streams(self.url, self.settings)
+            self._streams = self._resolve()
             log.info(
                 "  format %s, %sx%s @ %s fps",
                 self._streams.format_ids,
@@ -253,6 +261,37 @@ class StreamResolver(object):
                 self._streams.fps,
             )
         return self._streams
+
+    def _resolve(self) -> Streams:
+        """One resolution - or, under a `min_height` floor, the first player client whose answer
+        meets it. YouTube's clients answer with different format lists and the same client
+        answers differently from one minute to the next: `web_embedded` offered 1080p60 for a
+        video, then only 640x360 an hour later, and the edit quietly cut a whole chapter from
+        the 360p. Under a floor that is a retry on another client, then a refusal that names
+        what each client offered - never a soft fallback."""
+        if self.min_height <= 0:
+            return resolve_streams(self.url, self.settings)
+        configured = self.settings.get("download.youtube.player_client") or ""
+        order = []  # type: List[str]
+        for c in (configured, "") + FALLBACK_CLIENTS:
+            if c not in order:
+                order.append(c)
+        offered = []  # type: List[str]
+        for client in order:
+            try:
+                s = resolve_streams(self.url, self.settings, client=client)
+            except StageError as exc:
+                offered.append("{0}: {1}".format(client or "default", str(exc).strip().splitlines()[0][:80]))
+                continue
+            if (s.height or 0) >= self.min_height:
+                if client != configured:
+                    log.info("  the %s client met the %sp floor", client or "default", self.min_height)
+                return s
+            offered.append("{0}: {1}x{2}".format(client or "default", s.width, s.height))
+        raise StageError(
+            "YouTube offered {0} no better than {1} (floor {2}p) - {3}. Not cutting it into a higher-quality "
+            "edit; try again in a few minutes, or lower edit.min_source_height (0 turns the floor off).".format(
+                self.video_id, "; ".join(offered), self.min_height, "tried " + ", ".join(c or "default" for c in order)))
 
     def tag(self) -> str:
         """Identifies what a cached segment was cut from: the video and the

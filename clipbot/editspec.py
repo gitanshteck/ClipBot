@@ -669,7 +669,7 @@ def _sfx(raw: Any, path: str, clip_ids: List[str]) -> Dict[str, Any]:
 
 def _master(raw: Any, path: str) -> Dict[str, Any]:
     d = _dict(raw if raw is not None else {}, path,
-              ("loudness_lufs", "true_peak_db", "lra", "limiter", "fade_in", "fade_out", "normalize"))
+              ("loudness_lufs", "true_peak_db", "lra", "limiter", "fade_in", "fade_out", "normalize", "glue"))
     return {
         # -14 LUFS is where YouTube lands a louder upload; mastering to it stops the
         # platform turning the video down. The measured reel this engine replaces
@@ -681,6 +681,9 @@ def _master(raw: Any, path: str) -> Dict[str, Any]:
         "fade_in": _num(d.get("fade_in", 0.0), path + ".fade_in", 0.0, 10.0),
         "fade_out": _num(d.get("fade_out", 0.6), path + ".fade_out", 0.0, 10.0),
         "normalize": _bool(d.get("normalize", True), path + ".normalize"),
+        # a gentle 2:1 compressor on the whole mix before it is measured: a gunshot does not
+        # leave the voice 15 dB underneath it. Off unless asked; `episode` turns it on.
+        "glue": _bool(d.get("glue", False), path + ".glue"),
     }
 
 

@@ -440,5 +440,39 @@ class TestKillPartsAreSharedWithTheMontage(unittest.TestCase):
             self.assertEqual(len(c["markers"]), len([o for o in c["overlays"] if o["kind"] == "callout"]))
 
 
+class TestEpisodeBrand(unittest.TestCase):
+    BRAND = {"accent": "#35D0FF", "label_style": "brand_label", "title_style": "brand_title"}
+
+    def build(self, **kw):
+        return E.normalize(TPL.episode(lineup(brand=self.BRAND, **kw)))
+
+    def test_lower_thirds_use_the_brand_typeface_and_accent(self):
+        spec = self.build()
+        first = next(c for c in spec["clips"] if c.get("label") == "Mortars")
+        labels = [o for o in first["overlays"] if o["text"] in ("MORTARS", "ACT 1")]
+        self.assertTrue(labels)
+        for o in labels:
+            self.assertEqual((o["style"], o["accent"]), ("brand_label", "#35D0FF"))
+
+    def test_the_sting_and_end_cards_use_the_title_face_and_the_accent_number(self):
+        spec = self.build()
+        for cid in ("sting", "end"):
+            card = next(c for c in spec["clips"] if c["id"] == cid)
+            self.assertTrue(all(o.get("style") == "brand_title" for o in card["overlays"]))
+            self.assertEqual(card["overlays"][1]["color"], "#35D0FF")
+
+    def test_without_a_brand_nothing_changes(self):
+        spec = E.normalize(TPL.episode(lineup()))
+        for c in spec["clips"]:
+            for o in c["overlays"]:
+                self.assertNotIn("style", o)
+
+    def test_an_episode_turns_the_glue_compressor_on_unless_told_not_to(self):
+        self.assertTrue(E.normalize(TPL.episode(lineup()))["master"]["glue"])
+        self.assertFalse(E.normalize(TPL.episode(lineup(glue=False)))["master"]["glue"])
+        self.assertFalse(E.normalize({"name": "x", "sources": {"v": {"file": "D:/a.mp4"}},
+                                      "clips": [{"id": "a", "src": "v", "in": 0, "out": 2}]})["master"]["glue"])
+
+
 if __name__ == "__main__":
     unittest.main()

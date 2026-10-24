@@ -169,7 +169,7 @@ class Source(object):
             if video and video.exists():
                 self.path = video
             elif ws.source_mode() == MODE_EMBED:
-                self.resolver = ytsegments.StreamResolver(ws, settings)
+                self.resolver = ytsegments.StreamResolver(ws, settings, min_height=int(settings.get("edit.min_source_height", 720)))
             else:
                 raise StageError("source {0!r}: workspace {1} has no video on disk and is not a YouTube workspace".format(
                     alias, entry["workspace"]))
@@ -481,6 +481,14 @@ def render_edit(
             argv += ["-i", s["path"]]
         argv += ["-/filter_complex", str(script), "-map", "[{0}]".format(label), "-c:a", "pcm_s16le", "-ar", str(sr), str(mixed)]
         _run_ffmpeg(argv, 0, progress, 0, 0, work / "logs" / "mix.log", None)
+    if spec["master"]["glue"]:
+        # compress BEFORE measuring: the linear loudnorm pass is only right for the signal
+        # whose numbers it was given
+        glued = work / "audio_glue.wav"
+        argv = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-y", "-i", str(mixed), "-af", ef.GLUE_FILTER,
+                "-c:a", "pcm_s16le", "-ar", str(sr), str(glued)]
+        _run_ffmpeg(argv, 0, progress, 0, 0, work / "logs" / "glue.log", None)
+        mixed = glued
     progress.update(2)
 
     # ---- master: measure, then apply linearly, then encode once

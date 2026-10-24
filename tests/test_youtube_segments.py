@@ -395,6 +395,76 @@ class TestStreamResolver(unittest.TestCase):
             ytsegments.StreamResolver(self.ws, _settings()).get()
 
 
+class TestSourceHeightFloor(unittest.TestCase):
+    """A flaky player client once answered 640x360 for a video it had offered at 1080p60; the edit cut a
+    whole chapter from it. Under a floor that is a retry on another client, then a refusal."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace.for_url(Path(self._tmp.name), YT_URL)
+        self.low = _streams("18", width=640, height=360, fps=30.0)
+        self.high = _streams("299+140", width=1920, height=1080, fps=60.0)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def resolver(self, answers, **kw):
+        """`answers` maps a client ("" = default) to what it returns; records which were asked."""
+        asked = []
+
+        def fake(url, settings, timeout=180, client=None):
+            asked.append(client)
+            a = answers[client if client is not None else (settings.get("download.youtube.player_client") or "")]
+            if isinstance(a, Exception):
+                raise a
+            return a
+
+        r = ytsegments.StreamResolver(self.ws, kw.pop("settings", _settings()), min_height=kw.pop("min_height", 720))
+        return r, asked, mock.patch.object(ytsegments, "resolve_streams", side_effect=fake)
+
+    def test_a_small_answer_moves_on_to_a_client_that_meets_the_floor(self):
+        r, asked, patch = self.resolver({"": self.low, "web_embedded": self.high})
+        with patch:
+            s = r.get()
+        self.assertEqual(s.height, 1080)
+        self.assertEqual(asked, ["", "web_embedded"])
+
+    def test_the_configured_client_is_asked_first_then_the_default(self):
+        cfg = _settings()
+        cfg._data.setdefault("download", {}).setdefault("youtube", {})["player_client"] = "web_embedded"
+        r, asked, patch = self.resolver({"web_embedded": self.low, "": self.high}, settings=cfg)
+        with patch:
+            r.get()
+        self.assertEqual(asked, ["web_embedded", ""])
+
+    def test_nothing_meets_the_floor_is_a_refusal_naming_what_each_client_offered(self):
+        r, asked, patch = self.resolver({"": self.low, "web_embedded": self.low, "mweb": self.low})
+        with patch, self.assertRaises(StageError) as ctx:
+            r.get()
+        msg = str(ctx.exception)
+        self.assertIn("640x360", msg)
+        self.assertIn("web_embedded", msg)
+        self.assertIn("edit.min_source_height", msg)
+        self.assertEqual(asked, ["", "web_embedded", "mweb"])
+
+    def test_a_client_that_errors_is_skipped_not_fatal(self):
+        r, asked, patch = self.resolver({"": StageError("bot check"), "web_embedded": self.high})
+        with patch:
+            self.assertEqual(r.get().height, 1080)
+
+    def test_without_a_floor_the_first_answer_is_taken_as_before(self):
+        r, asked, patch = self.resolver({"": self.low}, min_height=0)
+        with patch:
+            self.assertEqual(r.get().height, 360)
+        self.assertEqual(asked, [None])                  # one call, no client override
+
+    def test_the_floor_does_not_ask_twice_when_the_first_answer_is_good(self):
+        r, asked, patch = self.resolver({"": self.high})
+        with patch:
+            r.get()
+        self.assertEqual(asked, [""])
+
+
 class TestFetchSegment(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -179,6 +179,22 @@ class TestRenderEdit(unittest.TestCase):
             vdur, adur = self.probe_duration(report["output"], "v:0"), self.probe_duration(report["output"], "a:0")
             self.assertLessEqual(abs(adur - vdur), 1.5 / 60.0, "length {0}: picture {1}, sound {2}".format(last, vdur, adur))
 
+    def test_the_glue_compressor_is_measured_through_so_loudness_still_lands(self):
+        """With master.glue the mix is compressed BEFORE it is measured; measuring the dry mix and
+        applying the numbers to the compressed one would miss the target."""
+        spec = self.spec("glue", master={"glue": True})
+        report = stage.render_edit(spec, self.settings)
+        root = stage.edit_dir(self.settings, "glue")
+        self.assertTrue((root / "cache" / "final" / "audio_glue.wav").is_file())
+        sp = E.normalize(self.spec("glue", master={"glue": True}))
+        result = editqa.verify(self.tools[0], self.tools[1], Path(report["output"]), T.compile_timeline(sp), sp["master"],
+                               Path(self.tmp.name) / "verify-glue", deep=False)
+        loud = next(c for c in result["checks"] if c["name"] == "loudness")
+        self.assertAlmostEqual(float(loud["detail"].split()[0]), -14.0, delta=1.5)
+        plain = stage.render_edit(self.spec("noglue"), self.settings)
+        self.assertFalse((stage.edit_dir(self.settings, "noglue") / "cache" / "final" / "audio_glue.wav").exists())
+        self.assertGreater(plain["duration"], 0)
+
     def test_the_spec_on_disk_is_never_replaced_by_a_render(self):
         stage.render_edit(self.spec("rec"), self.settings, preview=True)
         root = stage.edit_dir(self.settings, "rec")

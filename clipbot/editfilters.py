@@ -599,6 +599,9 @@ def loudnorm_analysis(master: Dict[str, Any]) -> str:
 LIMITER_MARGIN_DB = 0.7
 
 
+GLUE_FILTER = ("highpass=f=60,acompressor=threshold=0.07:ratio=2:attack=20:release=250:makeup=1.6:knee=4")
+
+
 def master_filters(master: Dict[str, Any], measured: Optional[Dict[str, float]], total: float) -> str:
     """Pass 2: apply the measured gain linearly (no pumping), then catch strays.
 

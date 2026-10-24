@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import editcut, editdeliver, editqa, editspec, edittaste, edittemplates, edittimeline
+from . import editcut, editdeliver, library, editqa, editspec, edittaste, edittemplates, edittimeline
 from .config import Settings
 from .progress import Progress
 from .specerror import SpecError
@@ -189,6 +189,8 @@ def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
         wav = _workspace(settings, src["workspace"]).audio_path
         return wav if wav.is_file() else None
 
+    for style_id, style in ((lineup.get("brand") or {}).get("styles") or {}).items():
+        library.save_text_style(settings, style_id, style)     # the brand's typefaces, idempotently
     report = editcut.prepare_lineup(lineup, wav_for, snap=not args.no_snap, match=not args.no_match)
     facts: Dict[str, Any] = {}
     spec = editspec.normalize(edittemplates.episode(lineup, facts=facts))
@@ -323,6 +325,43 @@ def cmd_edit_deliver(args: argparse.Namespace, settings: Settings) -> int:
         print("{0:<10} {1}  ({2})".format(f["kind"], f["file"], human_size(f["bytes"])))
     for w in manifest["warnings"]:
         print("note: " + w)
+    return 0
+
+
+def cmd_edit_thumbnail(args: argparse.Namespace, settings: Settings) -> int:
+    """A designed thumbnail from the final render: a frame at `--at` seconds of the video, graded, with
+    the words on the side opposite the face."""
+    name = _edit_name(settings, args.spec)
+    paths = _render_paths(settings, name, False)
+    if not paths["video"].is_file():
+        raise StageError("{0} is not rendered yet (clipbot edit render {1})".format(paths["video"], name))
+    ffmpeg = resolve_tool(settings.tool("ffmpeg"), edit_stage.FFMPEG_HINT)
+    out_dir = paths["root"] / "deliver" / "thumbnails"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frame = out_dir / "_frame.png"
+    if not editqa._extract_frame(ffmpeg, paths["video"], args.at, frame, 1920):
+        raise StageError("could not read a frame at {0} s".format(args.at))
+    font = None
+    if args.font:
+        assets = library.asset_map(settings)
+        if args.font not in assets:
+            raise StageError("no library font {0!r} (clipbot library list)".format(args.font))
+        font = str(assets[args.font]["path"])
+    out = Path(args.out) if args.out else out_dir / "designed_{0}.jpg".format(len(list(out_dir.glob("designed_*.jpg"))) + 1)
+    focus = None
+    if args.focus:
+        try:
+            fx, fy = (float(v) for v in args.focus.split(","))
+        except ValueError:
+            raise StageError("--focus is X,Y as fractions of the frame, e.g. 0.45,0.4")
+        focus = (fx, fy)
+    result = editdeliver.compose_thumbnail(frame, args.text, out, font=font, accent=args.accent, side=args.side,
+                                           zoom=args.zoom, focus=focus)
+    frame.unlink()
+    print("{0}  ({1}, text {2}, legibility {3})".format(result["file"], human_size(result["bytes"]),
+                                                         " / ".join(result["lines"]), result["legibility"]))
+    if result["legibility"] < 0.5:
+        print("warning: the words are low-contrast at sidebar size (legibility {0} < 0.5)".format(result["legibility"]))
     return 0
 
 
@@ -461,6 +500,18 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("--player")
     p.add_argument("--game")
     p.set_defaults(func=cmd_edit_deliver)
+
+    p = ed.add_parser("thumbnail", help="a designed thumbnail from the final render: a graded frame plus bold words")
+    p.add_argument("spec", help=SPEC_HELP)
+    p.add_argument("--at", type=float, required=True, help="seconds into the rendered video to take the frame from")
+    p.add_argument("--text", required=True, help="1-3 lines of words (4-6 words reads best)")
+    p.add_argument("--side", default="right", choices=["left", "right"], help="which side the words go (opposite the face)")
+    p.add_argument("--accent", default="#35D0FF", help="accent colour for the last line and the frame")
+    p.add_argument("--font", help="a library font asset id (default: the system display font)")
+    p.add_argument("--zoom", type=float, default=1.0, help="crop closer (1.2-1.6) so the person can sit opposite the words")
+    p.add_argument("--focus", help="X,Y of the person as fractions of the frame (with --zoom), e.g. 0.45,0.4")
+    p.add_argument("--out", help="output .jpg (default deliver/thumbnails/designed_N.jpg)")
+    p.set_defaults(func=cmd_edit_thumbnail)
 
     p = ed.add_parser("list", help="list edits")
     p.set_defaults(func=cmd_edit_list)

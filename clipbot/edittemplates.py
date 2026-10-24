@@ -409,26 +409,43 @@ def _ambient_camera(lo: float, hi: float, prof: Dict[str, Any], punches: List[fl
     return out[:editspec.MAX_CAMERA_KEYS]
 
 
-def _title_overlay(text: str, at: float, y: float = LABEL_Y, dur: float = 2.6) -> Dict[str, Any]:
-    return {"kind": "text", "at": round(at, 3), "dur": dur, "text": text.upper(), "x": 0.5, "y": round(y, 3), "size": 0.050,
-            "plate": True, "anim_in": "slide_down", "anim_out": "fade"}
+def _title_overlay(text: str, at: float, y: float = LABEL_Y, dur: float = 2.6,
+                   brand: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    ov = {"kind": "text", "at": round(at, 3), "dur": dur, "text": text.upper(), "x": 0.5, "y": round(y, 3), "size": 0.050,
+          "plate": True, "anim_in": "slide_down", "anim_out": "fade"}
+    if brand:
+        if brand.get("label_style"):
+            ov["style"] = brand["label_style"]
+            ov["size"] = 0.056              # a condensed display face reads smaller at the same size
+        if brand.get("accent"):
+            ov["accent"] = brand["accent"]
+    return ov
 
 
 def _card(cid: str, dur: float, label: str, lines: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"id": cid, "type": "card", "dur": dur, "bg": "#0B0B0F", "label": label, "tags": ["nochapter"], "overlays": lines}
 
 
-def _card_lines(series: str, number: Optional[int], dur: float, big: float, small: float, y: float) -> List[Dict[str, Any]]:
+def _card_lines(series: str, number: Optional[int], dur: float, big: float, small: float, y: float,
+                brand: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """The series name, and under it the episode number in the accent colour. Nothing stays
     up longer than the pacing gate's dwell limit: a long end card is dark with the music
-    under it, which is also where YouTube's end-screen elements go."""
+    under it, which is also where YouTube's end-screen elements go. A brand kit supplies the
+    title typeface and the accent."""
+    brand = brand or {}
     hold = min(dur, 3.8)
-    lines = [{"kind": "text", "at": 0.0, "dur": hold, "text": series.upper(), "x": 0.5, "y": y if number else 0.5,
-              "size": big, "anim_in": "pop", "anim_out": "fade"}]
+    accent = brand.get("accent") or EPISODE_ACCENT
+    title = {"kind": "text", "at": 0.0, "dur": hold, "text": series.upper(), "x": 0.5, "y": y if number else 0.5,
+             "size": big, "anim_in": "pop", "anim_out": "fade"}
+    if brand.get("title_style"):
+        title["style"] = brand["title_style"]
+    lines = [title]
     if number:
-        lines.append({"kind": "text", "at": 0.3, "dur": hold - 0.3, "text": "#{0}".format(number), "x": 0.5,
-                      "y": round(y + 0.15, 3), "size": small, "color": EPISODE_ACCENT, "anim_in": "slide_up",
-                      "anim_out": "fade"})
+        num = {"kind": "text", "at": 0.3, "dur": hold - 0.3, "text": "#{0}".format(number), "x": 0.5,
+               "y": round(y + 0.15, 3), "size": small, "color": accent, "anim_in": "slide_up", "anim_out": "fade"}
+        if brand.get("title_style"):
+            num["style"] = brand["title_style"]
+        lines.append(num)
     return lines
 
 
@@ -443,7 +460,8 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
       chapters: [{title, label (bool, default True), whoosh (bool, default True),
                   music: {asset|file, gain_db} | None, clips: [...]}],
       end: {dur, music: {...}} | None,
-      sfx: {"sting": {...}, "chapter": {...}}, kill_sfx: {"hit": {...}, ...}, slowmo }
+      sfx: {"sting": {...}, "chapter": {...}}, kill_sfx: {"hit": {...}, ...}, slowmo,
+      brand: {accent, label_style, title_style, styles {id: text style}}, glue (default True) }
     A clip is {src, in, out, note, label (a lower-third line), punch [source seconds],
     kills [killfeed events - the clip then gets callouts, punches and a slow-mo ramp like
     a montage], gain_db, speed, ambient (default True)}. Positions are source seconds,
@@ -454,6 +472,7 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     series = lineup.get("series", "MISH MASH")
     number = lineup.get("number")
     grade = lineup.get("grade", "neutral_punch")
+    brand = lineup.get("brand") or {}
     sfx_lib = lineup.get("sfx") or {}
     clips: List[Dict[str, Any]] = []
     sfx_items: List[Dict[str, Any]] = []
@@ -472,10 +491,10 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
         camera: List[Dict[str, Any]] = []
         y = LABEL_Y
         if title and chapter_label and hi - lo >= 2.5:
-            overlays.append(_title_overlay(title, lo + 0.4, y))
+            overlays.append(_title_overlay(title, lo + 0.4, y, brand=brand))
             y += 0.075
         if c.get("label") and hi - lo >= 2.5:
-            overlays.append(_title_overlay(c["label"], lo + (0.4 if y == LABEL_Y else 0.7), y))
+            overlays.append(_title_overlay(c["label"], lo + (0.4 if y == LABEL_Y else 0.7), y, brand=brand))
         if c.get("kills"):
             parts = kill_clip_parts(cid, lo, hi, c["kills"], prof, lineup.get("slowmo", "nade"), (0.5, 0.80),
                                     lineup.get("kill_sfx"))
@@ -520,7 +539,7 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     sting = lineup.get("sting")
     if sting is not None:
         dur = float(sting.get("dur", 3.0))
-        clips.append(_card("sting", dur, "Intro", _card_lines(series, number, dur, 0.12, 0.08, 0.44)))
+        clips.append(_card("sting", dur, "Intro", _card_lines(series, number, dur, 0.12, 0.08, 0.44, brand)))
         if sfx_lib.get("sting"):
             sfx_items.append(dict(sfx_lib["sting"], id="sting", on={"clip": "sting"}))
         if sting.get("music"):                  # a few seconds of theme, so the card is not a silent gap
@@ -531,7 +550,7 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     end = lineup.get("end")
     if end is not None:
         dur = float(end.get("dur", 6.0))
-        clips.append(_card("end", dur, "End card", _card_lines(series, number, dur, 0.09, 0.06, 0.46)))
+        clips.append(_card("end", dur, "End card", _card_lines(series, number, dur, 0.09, 0.06, 0.46, brand)))
         if end.get("music"):
             music_items.append(dict(end["music"], id="endbed", start={"clip": "end"}, end="end", fade_out=1.5, duck=False))
     n_clips = sum(1 for c in clips if c.get("type", "clip") == "clip")
@@ -546,7 +565,7 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
         "output": {"preset": lineup.get("output_preset", "youtube_1080p60")},
         "sources": lineup["sources"], "clips": clips,
         "tracks": {"music": music_items, "sfx": sfx_items},
-        "master": {"loudness_lufs": -14.0, "true_peak_db": -1.0},
+        "master": {"loudness_lufs": -14.0, "true_peak_db": -1.0, "glue": bool(lineup.get("glue", True))},
         "notes": "Generated by edittemplates.episode ({0} #{1}, {2} chapters, {3} clips). Title: {4}.".format(
             series, number, len(chapter_list), n_clips, title or "not chosen yet"),
     }

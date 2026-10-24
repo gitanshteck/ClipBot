@@ -126,7 +126,7 @@ clipbot/
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
-                     edit {new,episode,validate,inspect,render,verify,deliver,list,clean,taste},
+                     edit {new,episode,validate,inspect,render,verify,deliver,thumbnail,list,clean,taste},
                      killfeed {scan,list}) - the last two groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
@@ -500,7 +500,14 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   returned fewer, `tv`, `android_vr` and `tv_simply` failed. Setting
   `download.youtube.player_client` in a scratch settings file
   (`clipbot --settings FILE ...`) got a 54-clip render through without touching a
-  login; `cookies_from_browser` was not used.
+  login; `cookies_from_browser` was not used. **That answer did not hold**: on
+  2026-10-24 `web_embedded` and `mweb` offered only 640x360 for the same video while
+  yt-dlp's default client offered 1080p60 again, and an episode rendered through the
+  scratch file cut its whole third chapter from 360p (sharpness 2.8 against 7.1). A
+  client is a per-minute answer, not a setting to rely on: `StreamResolver(min_height=)`
+  - the edit engine passes `edit.min_source_height`, 720 - tries the configured client,
+  the default, `web_embedded` and `mweb` in that order and refuses, naming each client's
+  offer, when none meets the floor; cut/compile keep `min_height=0` (no floor).
 - `list_channel_streams(handle, settings, limit=20, timeout=120)`: `yt-dlp
   --flat-playlist -J https://www.youtube.com/@<handle>/streams` (no API key,
   no quota; handle validated against `^[A-Za-z0-9._-]{1,60}$`).
@@ -1237,7 +1244,8 @@ segments -> clips -> assemble -> mix -> master -> mux.
   Preview tier is `ultrafast`; `preview_output()` is the same frame shape at
   shorter side 540 (never larger than the final), <=30 fps.
 - **Master**: music/SFX mixed (`mix_graph`: beds sidechain-ducked by the game
-  audio, `amix normalize=0`), then `measure_loudness` (loudnorm pass 1) and a
+  audio, `amix normalize=0`), then, when `master.glue`, a gentle compressor
+  (`editfilters.GLUE_FILTER`, `audio_glue.wav`), then `measure_loudness` (loudnorm pass 1) and a
   second, **linear** loudnorm pass + `alimiter` + AAC once; the picture is
   `-c copy` muxed beside it, so an audio change never costs a video generation;
   `mux_argv` cuts both streams to the planned length with `-t` because AAC pads to
@@ -1699,7 +1707,14 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   deep=True)` -> `{ok, checks[{name,status,detail}], artifacts}`: A/V length (picture
   vs sound within 1.5 frames), length vs plan, loudness vs target (+-1.5), true peak,
   black / frozen / silent stretches (**planned title cards are exempt** - a mostly-
-  dark still card is by design), clicks at joins, pacing. Writes `verify.json/.md`,
+  dark still card is by design), **static picture** (`static_stretches`: the picture
+  sampled at 4/s at 160x90, a run of >= 3 s where under 2% of pixels change by > 12
+  grey levels; `freezedetect` never fires on a stream overlay - chat scrolls, a webcam
+  breathes - so a loading screen, a black screen and a privacy-policy page, 8-15 s each,
+  passed `frozen picture`), **level at joins** (`join_jumps`: the loudest-40% level of
+  1.5 s either side of a join, flagged past 9 dB; a join touching a card is skipped - on
+  a real episode 6 dB flagged 29% of joins, mostly kill clips whose gunfire is the point),
+  clicks at joins, pacing. Writes `verify.json/.md`,
   a `loudness.png` (short-term RMS with cuts and events marked), `joins_NN.jpg`
   contact sheets (a frame just after every join) and `moments_NN.jpg` (a frame
   `MOMENT_LAG`=0.6 s after every marker, <= 64: where callouts are up). `ok` is false only on `fail`.
@@ -1713,7 +1728,15 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   The post text comes from the kill counts unless the author passes `titles`,
   `fact_lines`, `credits` and `hashtags` (`edit deliver` reads them from `facts.json`;
   `facts.notes` become the "Read before publishing" list): a roundup that is not about
-  kills has nothing honest to say with a kill count.
+  kills has nothing honest to say with a kill count. `compose_thumbnail(frame, text, out,
+  font, accent, side, zoom, focus)` is the designed thumbnail: the frame graded
+  (contrast 1.12, colour 1.22, unsharp) and vignetted, 1-3 lines of heavy outlined type on
+  `side` (the last line in the accent), a thin accent frame, JPEG <= 2 MB; `zoom` + `focus`
+  (the person's centre) crop closer and slide the person to the other side (a subject
+  at 45% of the frame cannot reach 70%: the crop stops at the edge); `legibility` is the
+  luminance spread of the words at 168 px (< 0.5 warns). `clipbot edit thumbnail NAME
+  --at S --text "..." [--side --zoom --focus --font --accent --out]` takes the frame from
+  the final render. Face placement is manual until a face locator exists.
 - **editcut.py** - `find_cut(wav, t, kind)` moves a cut into the nearest gap in the
   speech: `read_envelope` (RMS per 10 ms over a 60 ms window) -> `find_pauses` (a run of
   >= 0.2 s in the bottom 30% of the stretch's *own* dynamic range between its 10th and
@@ -1751,7 +1774,14 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   seconds], kills, gain_db, speed, ambient}`. The first clip of a chapter is tagged
   `chapter` (so the YouTube chapter list is the lineup), gets a lower-third at top centre
   (`LABEL_Y` 0.10, clear of a webcam either side and of the chat) and a whoosh; a clip's own
-  `label` stacks under it. A clip with no kills gets `_ambient_camera`: a slow push-in
+  `label` stacks under it. `lineup.brand` = `{accent, label_style, title_style, styles
+  {id: text style}}` puts every lower-third and card in the brand typeface with the accent
+  bar/number; `edit episode` saves `styles` to the library's `textstyles.json` first
+  (idempotent), so the style ids the overlays name exist; no `brand`, nothing changes.
+  `master.glue` (a spec key, off by default, **on for an episode**) runs `GLUE_FILTER`
+  - highpass 60 Hz + a 2:1 compressor, threshold 0.07, makeup 1.6 - on the whole mix
+  *before* it is loudness-measured, so the linear loudnorm pass gets the numbers of the
+  signal it is applied to. A clip with no kills gets `_ambient_camera`: a slow push-in
   (zoom 1 + 0.6 x the profile's punch) with a key at least every 0.8 x `max_gap`, plus a
   snap-in on each `punch` - the pacing gate counts keys, so a talking clip needs them. A
   clip with `kills` gets the montage treatment (callouts, punches, slow-mo, `kill_sfx`);
@@ -2185,7 +2215,8 @@ Sections and the values worth knowing without opening the file:
   (`"620:230:0:440"`, `W:H:X:Y` of the feed in a 1280x720 frame), `chunk_seconds`
   (`1800`, how much video is decoded to PNGs at a time).
 - **`edit`** — `segment_pad` (`0.6` s cut either side of each clip so a zoom or
-  ramp never runs out of picture), `thumbnails` (`3`).
+  ramp never runs out of picture), `min_source_height` (`720`: the floor for a
+  YouTube source in an edit, `0` turns it off), `thumbnails` (`3`).
 - **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
   posture above).
 
