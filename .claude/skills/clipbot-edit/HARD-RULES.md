@@ -168,6 +168,18 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     language there (the cold open of the first episode said "bastard" at 0:11). It is a
     decision for the author - bleep it, cut it, or keep it - not something to hide or to
     leave unmentioned in the report.
+43. **A model's score is a hint until it has been checked against something that happened - and say
+    which category you checked.** *Origin:* the reaction map (`clipbot events`, PANNs) tags every second of
+    audio; I measured it before wiring it in (`clipbot events check` re-runs the measurement). **Gunfire** holds
+    up against the kill record (AUC 0.74: 58% of kills score >= 0.25, against 20% of random moments).
+    **Laughter** is a weak signal: against the chat's own laugh emotes (five Kick streams, 28-38 messages each)
+    its AUC was 0.49, 0.61, 0.73, 0.61 and 0.64 - better than plain loudness on four of the five (mean 0.62
+    against 0.54), nowhere near enough to pick a moment: of the 86 strongest peaks only 6 (7%) were followed by
+    chat laughing, against 3% for a random moment, and the top peaks I read were game callouts ("spike hai",
+    "win win win"). **Shouting** is barely ever detected (0-4 peaks in hours). So `moments.voice_weight` and
+    `analyze.signals.events` are off. Never write "he laughs here" from `events peaks`: read the transcript and
+    the chat at that second, and say what you could not check. The right fix is labels, not a better model:
+    ten moments he *knows* he laughed in would settle it.
 
 ## Delivery
 

@@ -1,4 +1,4 @@
-"""The `clipbot edit`, `clipbot killfeed` and `clipbot moments` command groups.
+"""The `clipbot edit`, `clipbot killfeed`, `clipbot events` and `clipbot moments` command groups.
 
 Kept out of `cli.py` so that file stays the table of contents it is meant to be:
 `cli.build_parser` calls `add_parsers(sub)` and nothing else here is imported by it.
@@ -14,11 +14,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import editcaptions, editcut, editdeliver, editmoment, editwords, library, editqa, editspec, edittaste, edittemplates, edittimeline
+from . import audioevents, editcaptions, editcut, editdeliver, editmoment, editwords, library, editqa, editspec, edittaste, edittemplates, edittimeline, panns
 from .config import Settings
 from .progress import Progress
 from .specerror import SpecError
 from .stages import edit as edit_stage
+from .stages import events as events_stage
 from .stages import killfeed as killfeed_stage
 from .utils import StageError, get_logger, human_size, resolve_tool
 from .workspace import Workspace
@@ -99,6 +100,118 @@ def cmd_killfeed_list(args: argparse.Namespace, settings: Settings) -> int:
         print("{0}  {1:>9.1f}s  {2:>5}  {3:<8}{4}{5}  {6}".format(
             e["id"], e["t"], "{0:.0f}m".format(e["dist_m"]) if e.get("dist_m") is not None else "?", e["weapon"],
             " headshot" if e.get("headshot") else "", " through-cover" if e.get("through_cover") else "", e.get("victim") or ""))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# events (the reaction map)
+# --------------------------------------------------------------------------
+
+
+def cmd_events_fetch_model(args: argparse.Namespace, settings: Settings) -> int:
+    dest = panns.checkpoint_path(settings)
+    if panns.verify_checkpoint(dest):
+        print("{0} is already here and matches the pinned MD5 {1}".format(dest, panns.CHECKPOINT_MD5))
+        return 0
+    print("fetching {0} ({1}, MD5 {2}) -> {3}".format(panns.CHECKPOINT_NAME, panns.CHECKPOINT_URL.split("?")[0], panns.CHECKPOINT_MD5, dest))
+    last = {"mb": -1}
+
+    def tick(done: int, total: Any) -> None:
+        mb = done // (50 << 20)
+        if mb != last["mb"]:
+            last["mb"] = mb
+            print("  {0:.0f} MB{1}".format(done / 1048576.0, " of {0:.0f}".format(total / 1048576.0) if total else ""), flush=True)
+
+    panns.fetch_checkpoint(settings, progress=tick)
+    print("ok: MD5 matches the record")
+    return 0
+
+
+def cmd_events_scan(args: argparse.Namespace, settings: Settings) -> int:
+    ws = _workspace(settings, args.workspace)
+    path = events_stage.scan_events(ws, settings, force=args.force, first=args.first, last=args.last, progress=_console_progress())
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    print("{0}: {1} s tagged ({2}x realtime)".format(path, doc["seconds"], doc.get("realtime_factor")))
+    for name, peaks in doc["peaks"].items():
+        print("  {0:<10} {1:>4} peak(s) at >= {2:g}".format(name, len(peaks), doc["thresholds"][name]))
+    return 0
+
+
+def cmd_events_peaks(args: argparse.Namespace, settings: Settings) -> int:
+    """The strongest peaks of one category, with the transcript line nearest each - to pick a moment that has no kill."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    ws = _workspace(settings, args.workspace)
+    doc = events_stage.load(ws)
+    if doc is None:
+        raise StageError("{0} has no events.json; run: clipbot events scan --workspace {0}".format(args.workspace))
+    if args.category not in doc["categories"]:
+        raise StageError("no category {0!r}; choose from {1}".format(args.category, ", ".join(doc["categories"])))
+    transcript = ws.read_json(ws.transcript_path) if ws.transcript_path.exists() else {"segments": []}
+    for pk in audioevents.top_peaks(doc, args.category, args.top, args.min_p, args.min_gap):
+        near = editmoment.lines_between(transcript, pk["t"] - 6.0, pk["t"] + 6.0, limit=3)
+        print("{0:>9}  {1:<8} p={2:.2f} mean={3:.2f} {4:>3.0f}s  {5}".format(
+            editmoment._mmss(pk["t"]), args.category, pk["p"], pk["mean"], pk["end"] - pk["start"],
+            " | ".join(l["text"] for l in near)))
+    return 0
+
+
+def cmd_events_check(args: argparse.Namespace, settings: Settings) -> int:
+    """Measure a stream's reaction map against something that happened, so a number is trusted for what it is worth:
+    gunfire against the kill record, laughter and shouting against the chat's laugh emotes (and against plain loudness,
+    the signal the pipeline already had). Needs events.json, plus killfeed.json and/or a chat.json that is ok."""
+    import numpy as np
+
+    from .chatsync import audio_energy_envelope
+
+    ws = _workspace(settings, args.workspace)
+    doc = events_stage.load(ws)
+    if doc is None:
+        raise StageError("{0} has no events.json; run: clipbot events scan --workspace {0}".format(args.workspace))
+    cats = {k: np.array(v) / 100.0 for k, v in doc["categories"].items()}
+    n = doc["seconds"]
+    printed = False
+    kf = killfeed_stage.load(ws)
+    if kf and kf.get("events"):
+        printed = True
+        times = [e["t"] for e in kf["events"]]
+        res = audioevents.check_series({k: cats[k] for k in ("gunfire", "explosion")}, times, 2, 2)
+        print("against {0} kills (the highest score within 2 s of each kill, against random moments):".format(len(times)))
+        for k, r in res.items():
+            print("  {0:<10} AUC {1:.2f}   >=0.25 at {2:.0%} of kills, {3:.0%} of random moments".format(k, r["auc"], r["at_moments"], r["at_random"]))
+    chat = ws.read_json(ws.chat_path) if ws.chat_path.exists() else {}
+    laughs = [t for t in audioevents.chat_laugh_times(chat, float(ws.read_state().get("chat_offset_seconds") or 0.0)) if 0 <= t < n]
+    if len(laughs) >= 5:
+        printed = True
+        series = {k: cats[k] for k in ("laughter", "shout")}
+        series["laughter|shout"] = np.maximum(cats["laughter"], cats["shout"])
+        if ws.audio_path.exists():
+            env = np.asarray(audio_energy_envelope(ws.audio_path, 1.0), dtype=float)[:n]
+            series["loudness"] = (env - env.mean()) / (env.std() + 1e-9)
+        res = audioevents.check_series(series, laughs, 12, 0)
+        print("against {0} chat messages that laugh (the highest score in the 12 s before each; chance is AUC 0.50):".format(len(laughs)))
+        for k, r in res.items():
+            print("  {0:<15} AUC {1:.2f}".format(k, r["auc"]) + ("" if k == "loudness" else "   >=0.25 at {0:.0%} of them, {1:.0%} of random moments".format(r["at_moments"], r["at_random"])))
+        peaks = audioevents.top_peaks(doc, "laughter", args.top, 0.0, 30.0)
+        hits, listed = audioevents.top_hit_rate([p["t"] for p in peaks], laughs)
+        print("the {0} strongest laughter peaks: chat laughed within 12 s after {1} of them ({2:.0%}); a random moment: {3:.0%}".format(
+            listed, hits, hits / max(1, listed), audioevents.random_hit_rate(n, listed, laughs)))
+    if not printed:
+        print("nothing to check against: {0} has no kill record and under 5 chat laughs.".format(ws.slug))
+    return 0
+
+
+def cmd_events_tags(args: argparse.Namespace, settings: Settings) -> int:
+    """What the model hears in one stretch (its ten strongest of 527 classes): the way to check a number."""
+    ws = _workspace(settings, args.workspace)
+    if not ws.audio_path.exists():
+        raise StageError("{0} has no audio.wav".format(args.workspace))
+    model = panns.load_model(panns.checkpoint_path(settings))
+    names = panns.labels()
+    a = float(args.at) - args.span / 2.0
+    p = panns.tag_window(model, panns.read_wav(ws.audio_path, max(0.0, a), max(0.0, a) + args.span))
+    for i in p.argsort()[::-1][:10]:
+        print("  {0:.2f}  {1}".format(float(p[i]), names[int(i)]))
     return 0
 
 
@@ -188,6 +301,7 @@ def cmd_moments_show(args: argparse.Namespace, settings: Settings) -> int:
     if doc is None:
         raise StageError("{0} has no moments.json; run: clipbot moments build --workspace {0}".format(args.workspace))
     want = set(args.ids.split(","))
+    events = events_stage.load(ws)
     for a in doc["arcs"]:
         if a["id"] not in want:
             continue
@@ -202,6 +316,9 @@ def cmd_moments_show(args: argparse.Namespace, settings: Settings) -> int:
             print("  {0:>8.1f}s  {1}{2}".format(l["t"], l["text"], "  (low confidence)" if l.get("low") else ""))
         for c in a.get("analysis", []):
             print("  analysis {0:.0f}-{1:.0f}s: {2}".format(c["start"], c["end"], c["description"]))
+        if events is not None:
+            r = audioevents.reaction_between(events, a["start"], a["end"])
+            print("  voice: {0}".format("{0} p={1:.2f} at {2}".format(r["category"], r["p"], editmoment._mmss(r["t"])) if r["p"] > 0 else "no laughter or shouting heard"))
     return 0
 
 
@@ -768,6 +885,33 @@ def add_parsers(sub: Any) -> None:
     p = kf.add_parser("list", help="print the kills in killfeed.json")
     p.add_argument("--workspace", required=True)
     p.set_defaults(func=cmd_killfeed_list)
+
+    p_ev = sub.add_parser("events", help="the reaction map: tag a stream's audio (laughter, shouting, gunfire, music) second by second")
+    ev = p_ev.add_subparsers(dest="events_cmd", required=True)
+    p = ev.add_parser("fetch-model", help="download the PANNs checkpoint (359 MB, zenodo.org, MD5-pinned) - the only command that does")
+    p.set_defaults(func=cmd_events_fetch_model)
+    p = ev.add_parser("scan", help="tag audio.wav and write events.json (needs PyTorch and the checkpoint)")
+    p.add_argument("--workspace", required=True, help="workspace slug or path")
+    p.add_argument("--first", type=int, help="start at this second (to try the model on a stretch first)")
+    p.add_argument("--last", type=int, help="stop at this second")
+    p.add_argument("--force", action="store_true", help="re-scan even if events.json exists")
+    p.set_defaults(func=cmd_events_scan)
+    p = ev.add_parser("peaks", help="a category's strongest peaks, with the transcript nearby")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--category", default="laughter", help="laughter, shout, gunfire, explosion, cheer, music, speech or silence")
+    p.add_argument("--top", type=int, default=20)
+    p.add_argument("--min-p", type=float, default=0.0, help="only peaks scoring at least this (0-1)")
+    p.add_argument("--min-gap", type=float, default=20.0, help="seconds between two listed peaks")
+    p.set_defaults(func=cmd_events_peaks)
+    p = ev.add_parser("check", help="measure the map against the kill record (gunfire) and the chat's laugh emotes (laughter, shouting) - and against plain loudness")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--top", type=int, default=20, help="how many of the strongest laughter peaks to score (default 20)")
+    p.set_defaults(func=cmd_events_check)
+    p = ev.add_parser("tags", help="the model's ten strongest classes for a few seconds around a time (to check a number)")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--at", type=float, required=True, help="stream second")
+    p.add_argument("--span", type=float, default=4.0, help="seconds of audio to listen to (default 4)")
+    p.set_defaults(func=cmd_events_tags)
 
     p_mo = sub.add_parser("moments", help="build whole moments from kills, rank them, and write a contact sheet of each to choose from")
     mo = p_mo.add_subparsers(dest="moments_cmd", required=True)

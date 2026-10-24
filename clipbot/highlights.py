@@ -121,6 +121,29 @@ def compute_chat_spikes(
     return out
 
 
+def event_moments(ws: Workspace, settings: Settings) -> List[Dict[str, Any]]:
+    """Laughter and shouting peaks from the reaction map (`events.json`, written by `clipbot events scan`) as
+    `[{start, end, label}]`; `[]` when the stream has not been scanned. Gunfire is not listed: the kill record already
+    knows, and a shot is not a reaction. Only peaks scoring at least `analyze.signals.events_min_p` (0.4) are kept,
+    above the map's own cut point, so a hint is rarely a stretch of nothing. **Off by default**
+    (`analyze.signals.events`): on this channel's audio the laughter and shout scores did no better than loudness
+    against the audience's own laughter, and a tag on a transcript line steers the model that picks clips."""
+    path = ws.root / "events.json"
+    if not path.exists() or not settings.get("analyze.signals.events", False):
+        return []
+    from . import audioevents
+
+    doc = ws.read_json(path)
+    floor = float(settings.get("analyze.signals.events_min_p", 0.4))
+    names = {"laughter": "laughter", "shout": "shouting"}
+    out: List[Dict[str, Any]] = []
+    for cat in audioevents.REACTION:
+        for pk in doc.get("peaks", {}).get(cat, []):
+            if pk["p"] >= floor:
+                out.append({"start": float(pk["start"]), "end": float(pk["end"]), "label": "{0}, {1:.1f}".format(names[cat], pk["p"])})
+    return out
+
+
 def notable_moments(ws: Workspace, settings: Settings) -> List[Dict[str, Any]]:
     """Merged, sorted `[{start, end, label}]` spans for `analyze.py` to
     annotate onto matching transcript lines."""
@@ -163,6 +186,11 @@ def notable_moments(ws: Workspace, settings: Settings) -> List[Dict[str, Any]]:
             log.warning("Chat-spike detection skipped: %s", exc)
     else:
         log.debug("No chat.json or unknown duration - skipping chat-spike detection")
+
+    try:
+        moments.extend(event_moments(ws, settings))
+    except Exception as exc:  # a broken signal must not sink the analyze stage
+        log.warning("Reaction-map signal skipped: %s", exc)
 
     moments.sort(key=lambda m: m["start"])
     return moments

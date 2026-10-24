@@ -149,7 +149,10 @@
       "audio_bin_seconds": 5.0,
       "audio_z_threshold": 2.0,
       "chat_bin_seconds": 15.0,
-      "chat_z_threshold": 2.0
+      "chat_z_threshold": 2.0,
+      "_comment_events": "Also annotate the laughter and shouting peaks from the reaction map (events.json, `clipbot events scan`) as (laughter, 0.8) / (shouting, 0.6) when the stream has one; `events_min_p` is the lowest peak probability kept. OFF by default: on this channel's audio those scores did no better than loudness against the audience's own laughter (docs/edit-enhancements-plan.md 0.8), and a tag on a transcript line steers the model that picks clips. Gunfire is never listed: the kill record already knows.",
+      "events": false,
+      "events_min_p": 0.4
     }
   },
 
@@ -213,7 +216,9 @@
     "_comment": "The moment engine (`clipbot moments ...`): kills -> arcs. `lead` seconds before the first kill, `tail` after the last; kills closer than `merge_gap` are one arc. These are a policy, not a detection: the audio does not mark where a firefight began (rate of sharp high-frequency onsets before a kill was 0.34/s, at random times 0.35/s over 70 known kills), so the contact sheet is what corrects them.",
     "lead": 14.0,
     "tail": 7.0,
-    "merge_gap": 16.0
+    "merge_gap": 16.0,
+    "_comment_voice": "Weight of the reaction map in an arc's score (x the strongest laughter/shouting probability inside it; needs events.json). 0 = off, which is where it stays until the score is shown to find funny moments on this channel's audio (it has not: docs/edit-enhancements-plan.md 0.8).",
+    "voice_weight": 0.0
   },
 
   "words": {
@@ -221,6 +226,12 @@
     "model": "whisper-1",
     "language": null,
     "prompt": "Yaar bhai, wait wait, ye kya ho gaya? Chal na, main reposition karta hoon. Oh my god, kya baat hai!"
+  },
+
+  "events": {
+    "_comment": "The reaction map (`clipbot events scan`): the PANNs Cnn14_16k audio tagger over a workspace's audio.wav -> events.json (laughter, shouting, gunfire, explosion, cheering, music, speech, silence per second). Opt-in; needs PyTorch and a 359 MB checkpoint from `clipbot events fetch-model` (zenodo.org, MD5-pinned). `model_file` overrides where the checkpoint lives (default <work_root>/_cache/models/panns/); `threads` 0 = torch's default. A score is a probability from a model trained on ten-second YouTube clips, not a measurement of Hinglish commentary over a game's mix: see docs/edit-enhancements-plan.md section 0.8 for how far it was found to be trustworthy.",
+    "model_file": null,
+    "threads": 0
   },
 
   "captions": {

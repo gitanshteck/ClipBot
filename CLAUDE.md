@@ -61,6 +61,11 @@ The real state:
   sound effects, loudness mastering, self-inspection (`edit verify`) and a
   delivery package (`edit deliver`). It is how compilations beyond a plain concat
   get made; `compile` stays the simple path. Documented in "The edit engine".
+- **A reaction map** (`clipbot events scan`, `stages/events.py`, `panns.py`, `audioevents.py`): a pretrained
+  audio tagger (PANNs) tags every second of a stream's audio with laughter / shouting / gunfire / music /
+  speech / silence -> `events.json`. Opt-in; needs PyTorch and a pinned 359 MB checkpoint from
+  `clipbot events fetch-model`. Measured, not assumed: gunfire checks out against the kill record,
+  laughter is a weak hint (so it is off in ranking and in analyze); see "events.py (stage 2d)".
 - **A kill-feed reader** (`clipbot killfeed scan`, `stages/killfeed.py`,
   `killfeed.py`): OCRs a shooter's on-screen kill feed (Windows OCR) and writes
   `killfeed.json`, the data source for `edittemplates.kill_montage`. Tuned on
@@ -127,7 +132,8 @@ clipbot/
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
                      edit {new,episode,validate,inspect,render,scenes,words,captions,verify,deliver,thumbnail,list,clean,taste},
-                     killfeed {scan,list}, moments {build,list,show,sheet,pool,coverage}) - the last three groups are registered
+                     killfeed {scan,list}, events {fetch-model,scan,peaks,tags},
+                     moments {build,list,show,sheet,pool,coverage}) - the last four groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
@@ -204,9 +210,17 @@ clipbot/
   edittemplates.py   kill_montage(): killfeed events -> a first-draft edit spec;
                      episode(): a lineup of chapters -> a numbered roundup spec
   edittaste.py       the user's standing editing preferences (taste.json)
-  editcli.py         the `edit` and `killfeed` command groups
+  editcli.py         the `edit`, `killfeed`, `events` and `moments` command groups
   killfeed.py        kill-feed parsing (pure): rows, distance tags, icons
+  panns.py           the PANNs Cnn14_16k audio tagger (527 AudioSet classes): the
+                     architecture written out (no pip package), the pinned checkpoint
+                     (fetch_checkpoint / verify_checkpoint / load_model), dense
+                     per-second tagging (tag_second_grid). torch imported lazily
+  audioevents.py     the reaction map, pure: category_series() (laughter, shout,
+                     gunfire, ...), find_peaks(), build_document(), the queries
+                     (reaction_between, top_peaks, score_at)
   data/windows_ocr.ps1  the Windows OCR driver stages/killfeed.py shells out to
+  data/audioset_labels.csv  the 527 AudioSet class names, in the model's output order
   library.py         cross-stream asset library: scan(), asset_id(), presets,
                      speaker profiles, fetch_starter()
   speakers.py        per-workspace segment-id -> speaker-id overlay
@@ -248,6 +262,7 @@ clipbot/
     compile.py         stage 5c (landscape supercut: cut + concat named ranges)
     edit.py            stage 5d (the edit engine's renderer: spec -> mastered video)
     killfeed.py        stage 2c (OCR a stream's kill feed -> killfeed.json)
+    events.py          stage 2d (the reaction map: tag audio.wav -> events.json)
     upload.py          stage 6a (Kick VOD -> YouTube: from disk, or relayed
                        from Kick with no download)
   server/
@@ -310,6 +325,9 @@ tests/
   test_editmoment.py            arcs, ranking, coverage, build; the lineup context rule and
                                 `moment` expansion live in test_edittemplates.py
   test_killfeed.py              kill-feed parsing rules + icon geometry
+  test_panns.py, test_audioevents.py, test_events_stage.py   the reaction map: the pinned
+                                checkpoint, the architecture's shapes, categories and peaks,
+                                the stage/CLI, and how it enters moment ranking and analyze
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
                                 infrastructure exists in this repo
@@ -344,6 +362,7 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 | 2 | audio | `stages/audio.py` | `audio.wav` | ffmpeg `-vn`, 16kHz mono PCM; reads `source_audio.*` first (YouTube), then the VOD |
 | 2b | diarize | `stages/diarize.py` | `diarization.json` | pyannote, CPU-only here; opt-in, needs `requirements-diarize.txt` + an HF token, never part of `run` |
 | 2c | killfeed | `stages/killfeed.py` | `killfeed.json`, `killfeed_icons/` | OCRs the shooter's kill feed for one player's kills (Windows OCR); opt-in, never part of `run`. A YouTube workspace's video track is fetched to scratch and deleted |
+| 2d | events | `stages/events.py` | `events.json` | the reaction map: PANNs Cnn14_16k tags every second of `audio.wav` (laughter, shouting, gunfire, ...) at ~100x realtime on CPU; opt-in, never part of `run`; needs `requirements-events.txt` and a 359 MB checkpoint from `clipbot events fetch-model` |
 | 3 | transcribe | `stages/transcribe.py` (dispatcher) → `stages/transcribe_openai.py` (default) or local faster-whisper | `transcript.json` | `transcribe.backend` picks OpenAI whisper-1 (default, chunked+parallel, ~$0.36/hour) or local faster-whisper `large-v3`; flags but never drops low-confidence segments either way |
 | 3c | transliterate | `stages/transliterate.py` | `captions.json` | Claude API, batched; Devanagari transcript -> Hinglish (Latin script) for caption overlays; opt-in, never part of `run` |
 | 4 | analyze | `stages/analyze.py` | `candidates.json` | Claude API against the rubric; structural validation only |
@@ -1256,6 +1275,52 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   reports "no kills", which means "unreadable". Victim names in other scripts come back
   empty (`readable_name`). The feed crop is calibrated on 1280x720 Wardogs footage (it
   happens to cover the feed at 1080p too); the popup crop is fractional.
+
+### events.py (stage 2d: the reaction map)
+
+- `scan_events(ws, settings, force=False, first=None, last=None, progress=NULL_PROGRESS) -> Path`
+  tags every second of `audio.wav` with the PANNs `Cnn14_16k` model (`panns.py`) and writes
+  `events.json` (`audioevents.build_document`): `{schema, workspace, model: {name, md5}, window, duration,
+  first, seconds, thresholds, categories: {name: [0-100 per second]}, peaks: {name: [{start, end, t, p,
+  mean}]}, scanned_at, scan_seconds, realtime_factor}`. Categories (`panns.CATEGORIES`, AudioSet class
+  indices, a second's score is the highest probability of the category's classes): `speech`,
+  `laughter` (Laughter, Giggle, Belly laugh, Chuckle), `shout` (Shout, Yell, Screaming), `gunfire`
+  (Gunshot, Machine gun, Fusillade), `explosion`, `cheer`, `music`, `silence`. A peak is a run at or
+  above the category's threshold (`DEFAULT_THRESHOLDS`) joined across <= 2 quiet seconds. `first`/`last`
+  scan only a stretch (`events.json` says where it starts; all queries take stream seconds).
+  Opt-in, never part of `run`: needs PyTorch >= 2.5 (`requirements-events.txt`) and the checkpoint.
+- **The checkpoint is third-party and treated so.** `Cnn14_16k_mAP=0.438.pth` (PANNs authors, Zenodo
+  record 3987831, CC BY 4.0, 358,668,570 bytes, MD5 `362fc5ff...2d` pinned in `panns.py`) is fetched only by
+  `clipbot events fetch-model`: host allow-listed (also after redirects), written as `.part`, renamed once
+  its MD5 matches the record, deleted if not; `verify_checkpoint` re-checks it before every load (a sidecar
+  `.verified` remembers a pass for that size and mtime). It is loaded `weights_only=True` with an
+  allow-list of exactly the globals its pickle names (read with `pickletools`, nothing executed):
+  OrderedDict, torch's tensor rebuild and storages, and - for one numpy array of training-sampler indices
+  (`indexes_per_class`, 937,432 int64) - `numpy.ndarray`/`dtype`/`_reconstruct`/int64's dtype class/
+  `_codecs.encode`. The file is torch's legacy pickle format, which `get_unsafe_globals_in_checkpoint`
+  cannot read. The architecture is written out in `panns.py` rather than pip-installed (the pip package
+  would run someone else's setup code to save ~80 lines).
+- **16 kHz variant, not 32 kHz**: `audio.wav` is 16 kHz mono, so there is no resampling and no band the
+  model expects that the file lacks (and it scores slightly higher, mAP 0.438 vs 0.431). `torch.stft`
+  replaces the checkpoint's `spectrogram_extractor.*` conv weights; the mel filterbank is the checkpoint's
+  own `logmel_extractor.melW`.
+- **Dense tagging**: the network ends in a global max+mean pool over time, so one pass answers one window.
+  `tag_second_grid` runs the conv trunk once per minute (`CHUNK_SECONDS`, `MARGIN_SECONDS`=2 of context
+  either side) and pools the trunk's 0.32 s frames over the 2 s around each second before the two linear
+  layers. Against real per-window inference on real audio the category scores differ by a median 0.000
+  (90th percentile 0.024). Measured speed on this CPU: 90-100x realtime (a 7 h stream in 4.4 min).
+- **What it was measured against, and the verdict** (`clipbot events check`; `docs/edit-enhancements-plan.md`
+  0.8): *gunfire* against the kill record, AUC 0.74 (58% of kills >= 0.25, 20% of random moments) -
+  usable as "there is shooting"; *laughter* against the chat's own laugh emotes on five Kick streams, AUC
+  0.49-0.73 (mean 0.62; loudness 0.54), top-20 peaks followed by chat laughing 7% of the time against 3%
+  at random - a weak hint, not a way to find funny moments; *shout* is almost never detected. Hence
+  `moments.voice_weight` (0) and `analyze.signals.events` (false) are off. A score is a probability from
+  a model trained on ten-second YouTube clips, not a measurement of Hinglish commentary over a game mix.
+- **Consumers** (all opt-in, all read `events.json` if it exists): `editmoment.score_arc` adds a `voice` part
+  (`moments.voice_weight` x the strongest laughter/shout probability in the arc; absent, not zero, when the
+  stream has no map or the weight is 0); `moments show` prints the arc's strongest reaction; `highlights.
+  event_moments` adds `(laughter, 0.8)` / `(shouting, 0.6)` tags to the transcript sent to `analyze`;
+  `clipbot events peaks` lists a category's strongest peaks with the transcript nearby.
 
 ### edit.py (stage 5d)
 
@@ -2426,7 +2491,13 @@ Sections and the values worth knowing without opening the file:
   YouTube source in an edit, `0` turns it off), `safe_framing` (`true`: the webcam scene map
   and the camera/overlay adjustments above; `false` renders the camera as authored),
   `thumbnails` (`3`).
-- **`moments`** — `lead` (`14.0`), `tail` (`7.0`), `merge_gap` (`16.0`): the arc policy above.
+- **`moments`** — `lead` (`14.0`), `tail` (`7.0`), `merge_gap` (`16.0`): the arc policy above; `voice_weight`
+  (`0.0` = off): the reaction map's weight in an arc's score (see events.py).
+- **`events`** — `model_file` (`null` = `<work_root>/_cache/models/panns/Cnn14_16k_mAP=0.438.pth`) and
+  `threads` (`0` = torch's default). Nothing else is tunable: the model, its checkpoint's MD5
+  and the category-to-class table are constants in `panns.py`, because a changed checkpoint is a
+  different measurement. `analyze.signals.events` (`true`) and `events_min_p` (`0.4`) control
+  whether laughter/shouting peaks from `events.json` annotate the transcript sent to `analyze`.
 - **`words`** — `model` (`"whisper-1"`: the only OpenAI model whose response carries word
   timestamps), `language` (`null` = auto-detect; **not** `transcribe.language`, see
   `editwords.py` for why) and `prompt` (a short Roman-script Hinglish line; `""` sends none).
@@ -2589,7 +2660,14 @@ Sections and the values worth knowing without opening the file:
   words are spoken, no captions block / `captions: false` / a kill callout draw nothing, a
   changed cue re-renders only that clip, a missing `captions.json` is a warning, and `verify`
   both finds the text and fails when the timeline promises captions the render lacks),
-  `test_killfeed` (synthetic OCR words, icons, and the popup: the real misreadings of one
+  `test_panns` (the label table and that each category's classes are what its name says; the
+  frame arithmetic; the checkpoint - only the pinned MD5 verifies, a download is kept only when its
+  MD5 matches and its host is allowed, a present file is not fetched again; the architecture's
+  parameter names and shapes; the mel table; chunk margins; a pickle that carries code is refused
+  while the checkpoint's own numpy array is admitted), `test_audioevents` (categories, peaks, the
+  stream-clock offset of a partial scan, AUC/benchmark functions), `test_events_stage` (the stage with
+  the model replaced by a fake, the commands, `voice` off/on in moment ranking, the analyze tags off
+  by default; all mutation-checked), `test_killfeed` (synthetic OCR words, icons, and the popup: the real misreadings of one
   clip, a shop that says "confirm" is not a kill, runs, the merge with feed rows),
   `test_editmoment` (each arc rule, the ranking parts, coverage verdicts, `build` on a temp
   workspace; the `context_issues` / `expand_moments` tests are in `test_edittemplates`),
@@ -2701,6 +2779,12 @@ Sections and the values worth knowing without opening the file:
   (`edit.safe_framing`) is what keeps the box in the window; the crop in `camera_chain` must
   never read `iw`/`ih` back from a frame whose size changes (see the editfilters bullet).
   Change the camera chain and `tests/test_edit_framing.py` (real ffmpeg) must still pass.
+- **The PANNs checkpoint is only ever downloaded by `clipbot events fetch-model`, only from an allow-listed
+  host, only kept if its MD5 equals the pinned one, and only loaded `weights_only=True` with the
+  allow-list in `panns._safe_globals`.** Don't loosen any of the three to make a different checkpoint
+  load; a different file is a different (unmeasured) model.
+- **A reaction-map score does not rank or annotate anything unless switched on** (`moments.voice_weight`,
+  `analyze.signals.events`): measured, laughter/shout were a weak hint on this channel's audio.
 - **A render never overwrites `spec.json`** - it writes `render/<name>.<tier>.spec.json`.
   (A preview once replaced the author's spec with its own 540p output block.)
 - **Words are fetched with auto-detected language and a Hinglish prompt, never
@@ -2814,6 +2898,10 @@ Sections and the values worth knowing without opening the file:
   and give the spec a `captions` block. `edit verify` then checks cuts-inside-words, strong
   language in the first 30 s, and that the captions are on screen. Read `editwords.py`'s
   docstring before touching the language/prompt settings.
+- ...tag a stream's audio (laughter, shouting, gunfire, music) or check whether a score can be trusted →
+  `clipbot events fetch-model` (once), `events scan --workspace W`, then `events check` (against the kill
+  record and chat laughs), `events peaks` (the strongest peaks with transcript) and `events tags --at S`
+  (what the model hears there). Read the events.py section for what was measured first.
 - ...add a new kind of edit template → `clipbot/edittemplates.py` (a pure function
   returning a spec dict; validate it with `editspec.normalize` in a test and compile
   it with `edittimeline.compile_timeline` + `pacing`) + a `--template` choice in

@@ -179,7 +179,7 @@ the moment.
 | A1 word timestamps | **done** | `editwords.py`: whisper-1 on only the windows an edit uses (14.7 min of audio for the 53 clips of the first episode, $0.09, cached per workspace), then **corrected against the sound** - collapsed words (several given one instant) are spread, and each word gets the stretches where the signal is actually up, because whisper holds a short word over a pause (a three-letter word for 1.4 s). A cut is "inside a word" only where the sound is up. On the first episode 17 of 106 cut points split a word; `edit episode --words` moved what could be moved (a clip only grows, <= 0.6 s) and 6 remain (pinned clips, or no clean place within reach). |
 | B1 captions | **done, with a measured limit** | `editcaptions.py`: the model writes Hinglish chunks over the numbered words and rates each (`conf`); cues come out timed from the words they cover, drawn with libass karaoke (the word being said lights up), brand font, in a box left of centre so the chat panel (bottom right) and minimap (bottom left) stay clear. `captions.json` is yours to edit. Cues under `captions.min_confidence` are kept but not drawn. Clips with kill callouts get none unless asked. |
 | H checks | **done** | `verify` gains **cuts inside words**, **strong language** (first 30 s of the output) and **captions on screen** (reads the render). `edit captions` prints strong language with its timestamp. On the first episode the cold open says "bastard" at 0:11, which is a decision for you. |
-| A2 reaction map | **not built, deliberately** | It needs a ~300 MB third-party audio-tagging checkpoint downloaded from a model host. That is an untrusted download I should not make unasked; and nothing in the moment engine's measured results needed it (kills carry the value). Ask before fetching. |
+| A2 reaction map | **built after you said yes (2026-10-24); measured, and weaker than hoped** | `clipbot events`: the PANNs `Cnn14_16k` tagger over `audio.wav`, per second, ~95x realtime. Gunfire checks out against the kill record; laughter is a weak hint and shouting is barely detected, so the reaction map is **off** in ranking and in analyze. Section 0.8. |
 
 **The finding that changed the work: the language pin.** The first captions came out 48% unsure (176 of 365 cues) and
 only 9 of 53 clips were fully captioned. The cause was not the caption model: word timing had been fetched with
@@ -207,6 +207,36 @@ Final-tier renders had passed 129 of 129 before, so preview misses remain warnin
 (`analyze`), so the same English-as-nonsense problem is in what picks the moments. Re-transcribing a stream costs
 about $1.66; I have not done it. It is a decision for you (see section 5). Nothing here can hear a clip, so a caption
 the model rates as sure can still be wrong - read `captions.json`.
+
+### 0.8 Phase 2b result: the reaction map (A2), 2026-10-24
+
+You said yes to fetching the checkpoint, so I built it and then measured it before letting it touch anything.
+
+**What was downloaded, so there is a record.** `Cnn14_16k_mAP=0.438.pth` from [Zenodo record 3987831](https://zenodo.org/records/3987831)
+(the PANNs authors' own release, CC BY 4.0), 358,668,570 bytes, MD5 `362fc5ff18f1d6ad2f6d464b45893f2c` - identical to the
+checksum the record lists. I chose the 16 kHz variant over the 327 MB 32 kHz one I first mentioned: `audio.wav` is 16 kHz, so no
+resampling, and it scores a little higher. It sits in `work/_cache/models/panns/` (gitignored), alone in its own folder.
+The file is torch's old pickle format and also carries one numpy array (937,432 training-sampler indices), which the safe loader
+refuses by default; I disassembled the pickle (nothing executed) and allow-listed exactly the six globals it names, and nothing else.
+The architecture is written out in `panns.py` rather than installed from pip, so no third-party code runs - only third-party weights.
+
+| | Result |
+|---|---|
+| Speed | 90-100x realtime on this CPU: a 7 h stream in 4.4 minutes, 5.5 h in 3.4. |
+| Sanity on synthetic audio | quiet noise -> Silence, a 440 Hz tone -> Sine wave, loud white noise -> White noise. |
+| Dense per-second method vs real per-window inference | the category scores differ by a median 0.000 (90th percentile 0.024) on 24 random seconds of real audio. |
+| **Gunfire vs the kill record** (19 kills) | AUC 0.74; 58% of kills score >= 0.25, against 20% of random moments (shooting is everywhere in this game). Usable as "there is shooting here", not as "a kill happened". Explosion: AUC 0.61, and 0% of kills. |
+| **Laughter vs the chat's laugh emotes** (five Kick streams, 28-38 messages each) | AUC **0.49, 0.61, 0.73, 0.61, 0.64** (mean 0.62; 0.50 is chance). Plain loudness on the same moments: 0.44, 0.61, 0.63, 0.46, 0.58 (mean 0.54). |
+| **Top peaks, read by hand** | Of the 86 strongest laughter peaks (20 per stream), chat laughed within 12 s after 6 (7%); a random moment: 3%; the 20 loudest seconds: 2%. The top 12 on the Valorant stream were game callouts ("spike hai", "win win win", "clear") with no chat reaction. |
+| **Shouting** | 0-4 peaks per stream at >= 0.25: the model hardly ever calls this streamer's excitement a shout. |
+
+**Verdict.** The plumbing is sound and fast. Gunfire is real. Laughter carries a weak signal - consistently above chance and above
+loudness in four of five streams - but nowhere near enough to find funny moments: about nine in ten of its best peaks were not
+followed by chat laughing. The label I measured against is itself poor (these chats laugh about 30 times in four hours, and also at
+chat), so the test has little power and I would not call the answer final. What I would not do is let a number that weak reorder
+your moments. So `moments.voice_weight` (0) and `analyze.signals.events` (false) are **off**; the map is recorded, shown in
+`moments show` and `events peaks`, and one setting turns it on. **What would settle it:** ten to twenty moments you *know* you
+laughed or shouted in (decision 8 in section 5). `clipbot events check --workspace W` re-runs this whole measurement on any stream.
 
 ## 1. Where we are
 
@@ -387,7 +417,7 @@ Every phase ends with the same proof:
 5. **YouTube Analytics scope:** OK to add a read-only analytics permission to the existing upload login, for the learning loop?
 6. **Mish Mash #1:** keep it as the test bed and re-cut it at the end of each phase, or publish v1 now and use #2 for the next phase?
 7. **Re-transcribe streams with auto-detected language** (section 0.7)? The stage-3 transcript is Hindi-pinned and reads English as nonsense; it feeds `analyze`'s clip picking. About $1.66 per 4.6 h stream on whisper-1, and the existing `transcript.json` would be replaced (`transcribe --force`), so candidates found from it would need a re-run.
-8. **A2 reaction map:** OK to download a ~300 MB audio-tagging checkpoint from a third-party model host? Nothing built so far needs it.
+8. ~~A2 reaction map~~ - approved and built (section 0.8). **New question:** can you give me 10-20 moments you *know* you laughed or shouted in, with the stream and a rough time? That is the label the measurement lacks.
 
 ## 6. Known limits (said up front)
 

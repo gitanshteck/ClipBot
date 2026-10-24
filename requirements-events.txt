@@ -1,0 +1,6 @@
+# Opt-in: the reaction map (`clipbot events scan`, clipbot/panns.py) needs PyTorch >= 2.5 (torch.serialization.safe_globals).
+# Not part of requirements.txt, deliberately: a multi-GB install for a stage most workspaces never run. If you already
+# installed requirements-diarize.txt you have it. The model weights are a separate, explicit download:
+#   python -m clipbot events fetch-model        (359 MB from zenodo.org, MD5-pinned, loaded tensors-only)
+torch>=2.5
+numpy

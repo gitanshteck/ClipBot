@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import editcut, edittemplates, highlights
+from . import audioevents, editcut, edittemplates, highlights
 from .config import Settings
 from .utils import StageError, get_logger
 from .workspace import MODE_EMBED, Workspace
@@ -49,6 +49,8 @@ CAP_REACTION = 3.0
 W_CHAT = 0.4         # per x of chat-rate multiplier, capped
 CAP_CHAT = 2.0
 W_ANALYSIS = 2.0     # the rubric analysis picked an overlapping stretch
+W_VOICE = 0.0        # x the strongest laughter/shouting probability in the arc (the reaction map). 0 = off: on this channel's
+                     # audio that score did no better than loudness against the audience's own laughter (stages/events.py)
 
 Arc = Dict[str, Any]
 
@@ -134,9 +136,13 @@ def _overlap(spans: Sequence[Dict[str, Any]], a: float, b: float) -> List[Dict[s
 
 
 def score_arc(arc: Arc, energy: Sequence[Dict[str, Any]] = (), chat: Sequence[Dict[str, Any]] = (),
-              candidates: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+              candidates: Sequence[Dict[str, Any]] = (), events: Optional[Dict[str, Any]] = None,
+              voice_weight: float = W_VOICE) -> Dict[str, Any]:
     """`{score, parts{...}, analysis}` for an arc. Parts are separate so a ranking can be argued with:
-    `kills` (sum of `edittemplates.kill_score`), `multi`, `reaction`, `chat`, `analysis`."""
+    `kills` (sum of `edittemplates.kill_score`), `multi`, `reaction`, `chat`, `analysis`, and - only when the stream
+    has a reaction map (`events`, an `events.json` document) *and* `voice_weight` is above zero (`moments.voice_weight`,
+    default off) - `voice`: `voice_weight` x the strongest laughter or shouting probability inside the arc. `voice` is
+    absent, not zero, for an unscanned stream, so a ranking never reads a missing measurement as a quiet one."""
     kills = sum(edittemplates.kill_score(k) for k in arc["kills"])
     multi = W_MULTI * (len(arc["kills"]) - 1)
     spikes = _overlap(energy, arc["start"], arc["end"])
@@ -147,6 +153,8 @@ def score_arc(arc: Arc, energy: Sequence[Dict[str, Any]] = (), chat: Sequence[Di
     analysis = W_ANALYSIS if picked else 0.0
     parts = {"kills": round(kills, 2), "multi": round(multi, 2), "reaction": round(reaction, 2), "chat": round(chat_part, 2),
              "analysis": analysis}
+    if events is not None and voice_weight > 0:
+        parts["voice"] = round(voice_weight * audioevents.reaction_between(events, arc["start"], arc["end"])["p"], 2)
     out: Dict[str, Any] = {"score": round(sum(parts.values()), 2), "parts": parts}
     if picked:
         out["analysis"] = [{"start": c["start_time"], "end": c["end_time"], "description": c.get("description", "")} for c in picked]
@@ -236,11 +244,12 @@ def build(ws: Workspace, settings: Settings, lead: Optional[float] = None, tail:
             log.warning("chat spikes skipped for %s: %s", ws.slug, exc)
     candidates = ws.read_json(ws.candidates_path).get("clips", []) if ws.candidates_path.exists() else []
     transcript = ws.read_json(ws.transcript_path) if ws.transcript_path.exists() else {"segments": []}
+    events = ws.read_json(ws.root / "events.json") if (ws.root / "events.json").exists() else None
 
     for a in arcs:
         if snap:
             _snap(a, ws.audio_path if ws.audio_path.exists() else None)
-        a.update(score_arc(a, energy, chat, candidates))
+        a.update(score_arc(a, energy, chat, candidates, events, float(settings.get("moments.voice_weight", W_VOICE))))
         a["context"] = context(a)
         a["lines"] = lines_between(transcript, a["start"], a["end"])
     arcs.sort(key=lambda a: a["start"])
@@ -250,7 +259,8 @@ def build(ws: Workspace, settings: Settings, lead: Optional[float] = None, tail:
         by_source[e.get("source") or "feed"] = by_source.get(e.get("source") or "feed", 0) + 1
     doc = {"schema": SCHEMA, "workspace": ws.slug, "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "params": p,
            "duration": duration, "kills": len(kf.get("events", [])), "kills_by_source": by_source,
-           "signals": {"energy_spikes": len(energy), "chat_spikes": len(chat), "candidates": len(candidates)}, "arcs": arcs}
+           "signals": {"energy_spikes": len(energy), "chat_spikes": len(chat), "candidates": len(candidates),
+                       "events": events is not None}, "arcs": arcs}
     ws.write_json(moments_path(ws), doc)
     log.info("Moments: %d arc(s) from %d kill(s) in %s", len(arcs), doc["kills"], ws.slug)
     return doc
