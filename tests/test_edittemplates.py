@@ -474,5 +474,119 @@ class TestEpisodeBrand(unittest.TestCase):
                                       "clips": [{"id": "a", "src": "v", "in": 0, "out": 2}]})["master"]["glue"])
 
 
+class TestKillContext(unittest.TestCase):
+    """The first episode's kill clips had 6 s before the kill and 3 after: the kill without the fight."""
+
+    def lineup(self, **clip):
+        c = dict({"src": "v1", "in": 100.0, "out": 130.0, "kills": [{"t": 115.0}]}, **clip)
+        return {"sources": SOURCES, "chapters": [{"title": "The Receipts", "clips": [c]}]}
+
+    def test_a_kill_with_room_either_side_passes(self):
+        self.assertEqual(TPL.context_issues(self.lineup()), [])
+
+    def test_six_seconds_of_lead_up_is_flagged(self):
+        issues = TPL.context_issues(self.lineup(**{"in": 109.0, "out": 130.0}))
+        self.assertEqual(len(issues), 1)
+        self.assertIn("6.0 s before the first kill", issues[0])
+        self.assertNotIn("after the last", issues[0])
+
+    def test_three_seconds_of_aftermath_is_flagged(self):
+        issues = TPL.context_issues(self.lineup(out=118.0))
+        self.assertIn("3.0 s after the last", issues[0])
+
+    def test_both_short_is_one_line_naming_both(self):
+        (issue,) = TPL.context_issues(self.lineup(**{"in": 109.0, "out": 118.0}))
+        self.assertIn("before the first kill", issue)
+        self.assertIn("after the last", issue)
+        self.assertIn("The Receipts", issue)
+
+    def test_a_deliberate_cutaway_is_exempt(self):
+        self.assertEqual(TPL.context_issues(self.lineup(**{"in": 112.0, "out": 118.0, "cutaway": True})), [])
+
+    def test_a_clip_with_no_kills_is_not_judged_here(self):
+        self.assertEqual(TPL.context_issues(self.lineup(kills=[], **{"in": 112.0, "out": 118.0})), [])
+
+    def test_the_cold_open_is_checked_too(self):
+        lu = {"sources": SOURCES, "cold_open": {"title": "x", "clips": [{"src": "v1", "in": 100.0, "out": 105.0, "kills": [{"t": 103.0}]}]}}
+        self.assertEqual(len(TPL.context_issues(lu)), 1)
+
+    def test_the_measure_runs_from_the_first_and_last_of_several_kills(self):
+        c = {"src": "v1", "in": 100.0, "out": 140.0, "kills": [{"t": 112.0}, {"t": 125.0}, {"t": 136.0}]}
+        lu = {"sources": SOURCES, "chapters": [{"title": "t", "clips": [c]}]}
+        (issue,) = TPL.context_issues(lu)
+        self.assertIn("4.0 s after the last", issue)
+        self.assertNotIn("before", issue)
+
+
+class TestExpandMoments(unittest.TestCase):
+    doc = {"arcs": [{"id": "m004", "start": 3005.6, "end": 3062.0, "first": 3020.0, "last": 3055.0, "kills": [
+        {"id": "k001", "t": 3020.0, "dist_m": 68.0, "weapon": "gun", "headshot": False, "through_cover": False},
+        {"id": "k002", "t": 3055.0, "dist_m": 49.0, "weapon": "grenade", "headshot": False, "through_cover": False}]}]}
+
+    def lineup(self, **clip):
+        c = dict({"src": "v1", "moment": "m004"}, **clip)
+        return {"sources": SOURCES, "chapters": [{"title": "The Receipts", "clips": [c]}]}
+
+    def expand(self, lu, doc=None, kills=None):
+        return TPL.expand_moments(lu, lambda alias: doc if doc is not None else self.doc, lambda alias: kills or {})
+
+    def test_the_arc_becomes_the_clip_with_its_kills(self):
+        lu = self.lineup()
+        self.expand(lu)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertEqual((c["in"], c["out"]), (3005.6, 3062.0))
+        self.assertEqual([k["t"] for k in c["kills"]], [3020.0, 3055.0])
+        self.assertEqual(c["kills"][0]["src"], "v1")
+        self.assertFalse(c["snap"])
+        self.assertEqual(c["moment"], "m004")
+
+    def test_the_icon_comes_from_the_kill_feed_when_it_has_one(self):
+        lu = self.lineup()
+        self.expand(lu, kills={"k001": {"icon": "D:/w/killfeed_icons/k001.png", "victim": "Yutpi"}})
+        k = lu["chapters"][0]["clips"][0]["kills"][0]
+        self.assertEqual((k["icon"], k["victim"]), ("D:/w/killfeed_icons/k001.png", "Yutpi"))
+
+    def test_trim_takes_seconds_off_the_lead_up_and_the_aftermath_and_drops_kills_outside(self):
+        lu = self.lineup(trim=[5.0, 12.0])
+        self.expand(lu)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertEqual((c["in"], c["out"]), (3010.6, 3050.0))
+        self.assertEqual([k["t"] for k in c["kills"]], [3020.0])
+
+    def test_the_recorded_first_kill_guards_against_ids_that_moved(self):
+        self.expand(self.lineup(at=3020.0))                       # matches: fine
+        with self.assertRaises(E.SpecError) as ctx:
+            self.expand(self.lineup(at=2800.0))
+        self.assertIn("ids shifted", str(ctx.exception))
+
+    def test_a_trim_that_leaves_nothing_is_an_error(self):
+        with self.assertRaises(E.SpecError):
+            self.expand(self.lineup(trim=[30.0, 30.0]))
+
+    def test_an_unknown_moment_or_source_is_named(self):
+        with self.assertRaises(E.SpecError) as ctx:
+            self.expand(self.lineup(moment="m999"))
+        self.assertIn("m999", str(ctx.exception))
+        with self.assertRaises(E.SpecError) as ctx2:
+            TPL.expand_moments(self.lineup(), lambda a: None, lambda a: {})
+        self.assertIn("no moments.json", str(ctx2.exception))
+
+    def test_clips_without_a_moment_are_untouched_and_the_expanded_lineup_passes_the_context_check(self):
+        lu = self.lineup()
+        lu["chapters"][0]["clips"].append({"src": "v1", "in": 5.0, "out": 9.0})
+        done = self.expand(lu)
+        self.assertEqual(len(done), 1)
+        self.assertEqual(lu["chapters"][0]["clips"][1], {"src": "v1", "in": 5.0, "out": 9.0})
+        self.assertEqual(TPL.context_issues(lu), [])
+
+    def test_the_expanded_lineup_builds_an_episode(self):
+        lu = {"name": "e", "sources": SOURCES, "profile": "restrained",
+              "chapters": [{"title": "The Receipts", "clips": [{"src": "v1", "moment": "m004"}]}]}
+        self.expand(lu)
+        spec = E.normalize(TPL.episode(lu))
+        clip = next(c for c in spec["clips"] if c["type"] == "clip")
+        self.assertEqual(len([m for m in clip["markers"] if m["name"] == "kill"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

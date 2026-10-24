@@ -193,5 +193,75 @@ class TestStageHelpers(unittest.TestCase):
         self.assertEqual(stage._chunks(0.3, 1800.0), [])
 
 
+def words(*texts):
+    """OCR words as the Windows OCR driver returns them: one dict per token."""
+    return [{"t": t, "x": 10 * i, "y": 5, "w": 8, "h": 12} for i, t in enumerate(" ".join(texts).split())]
+
+
+class TestConfirmPopup(unittest.TestCase):
+    """The `KILL CONFIRMED +$2,750 250XP` popup at the crosshair: the record of a kill that survives a webcam over the feed."""
+
+    # the four OCR readings of the same popup measured on a real clip (frames 4, 5, 7, 6)
+    REAL = [("2 � 750", "KILL ONFJRMEO .S2.7S0"), ("+ 2.750", "KILL CONFIRMEO"), ("KILL CONFIRMED 250XP",)]
+
+    def test_the_real_misreadings_are_all_the_popup(self):
+        for texts in self.REAL:
+            self.assertIsNotNone(K.parse_confirm(words(*texts)), texts)
+
+    def test_the_xp_tag_is_read(self):
+        self.assertEqual(K.parse_confirm(words("KILL CONFIRMED 250XP"))["xp"], 250)
+
+    def test_nothing_on_screen_is_not_a_kill(self):
+        self.assertIsNone(K.parse_confirm([]))
+        self.assertIsNone(K.parse_confirm(words("HEALTH 100 AMMO 30")))
+
+    def test_a_shop_that_says_confirm_is_not_a_kill(self):
+        self.assertIsNone(K.parse_confirm(words("CONFIRM PURCHASE $500")))
+
+    def test_confirmed_with_a_kill_word_but_no_other_text_is_a_kill(self):
+        self.assertIsNotNone(K.parse_confirm(words("KILL", "CONFIRMED")))
+
+    def test_the_popup_on_four_frames_in_five_is_one_run(self):
+        obs = [{"t": 3.0, "amount": None, "xp": None}, {"t": 4.0, "amount": None, "xp": None}, {"t": 6.0, "amount": None, "xp": 250}]
+        runs = K.group_confirms(obs)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0]["first"], runs[0]["last"], runs[0]["n_obs"], runs[0]["xp"]), (3.0, 6.0, 3, 250))
+
+    def test_two_kills_well_apart_are_two_runs(self):
+        obs = [{"t": 3.0}, {"t": 4.0}, {"t": 30.0}, {"t": 31.0}]
+        self.assertEqual(len(K.group_confirms(obs)), 2)
+
+    def feed_event(self, first, **kw):
+        return dict({"id": "k001", "first": first, "last": first + 3, "t": first - 0.5, "dist_m": 40.0, "n_obs": 3, "weapon": "gun",
+                     "headshot": False, "through_cover": False, "victim": "x", "icon": "killfeed_icons/k001.png"}, **kw)
+
+    def test_a_feed_event_inside_a_popup_is_confirmed_and_keeps_its_detail(self):
+        run = {"first": 2.0, "last": 5.0, "n_obs": 3, "amount": 2750, "xp": 250}
+        out = K.merge_confirms([self.feed_event(2.5)], [run], 1.0)
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["source"], out[0]["confirmed"], out[0]["dist_m"], out[0]["amount"]), ("both", True, 40.0, 2750))
+
+    def test_a_popup_with_no_feed_row_is_a_kill_the_feed_did_not_show(self):
+        out = K.merge_confirms([], [{"first": 50.0, "last": 53.0, "n_obs": 3, "amount": None, "xp": 250}], 1.0)
+        self.assertEqual(len(out), 1)
+        e = out[0]
+        self.assertEqual((e["source"], e["weapon"], e["dist_m"], e["icon"], e["id"]), ("confirm", "unknown", None, None, "c001"))
+        self.assertAlmostEqual(e["t"], 49.5)
+
+    def test_a_feed_row_with_no_popup_stays_a_feed_event(self):
+        out = K.merge_confirms([self.feed_event(100.0)], [{"first": 10.0, "last": 12.0, "n_obs": 2, "amount": None, "xp": None}], 1.0)
+        self.assertEqual(sorted(e["source"] for e in out), ["confirm", "feed"])
+        self.assertFalse(next(e for e in out if e["source"] == "feed")["confirmed"])
+
+    def test_the_merged_list_is_in_time_order(self):
+        out = K.merge_confirms([self.feed_event(100.0)], [{"first": 10.0, "last": 12.0, "n_obs": 2, "amount": None, "xp": None}], 1.0)
+        self.assertEqual([e["first"] for e in out], [10.0, 100.0])
+
+    def test_one_popup_over_two_feed_rows_confirms_both_and_adds_nothing(self):
+        run = {"first": 2.0, "last": 7.0, "n_obs": 4, "amount": None, "xp": None}
+        out = K.merge_confirms([self.feed_event(2.5), self.feed_event(5.0)], [run], 1.0)
+        self.assertEqual([e["source"] for e in out], ["both", "both"])
+
+
 if __name__ == "__main__":
     unittest.main()

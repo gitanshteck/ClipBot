@@ -127,7 +127,7 @@ clipbot/
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
                      edit {new,episode,validate,inspect,render,scenes,verify,deliver,thumbnail,list,clean,taste},
-                     killfeed {scan,list}) - the last two groups are registered
+                     killfeed {scan,list}, moments {build,list,show,sheet,pool,coverage}) - the last three groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
   config.py          Settings / load_settings() / ENV_OVERRIDES
@@ -187,6 +187,9 @@ clipbot/
   editframe.py       camera moves that know the webcam: safe_camera() adjusts a
                      clip's keys so the window always holds it, clear_of_webcam()
                      moves an overlay off it - pure
+  editmoment.py      the moment engine: arcs_from_kills() (lead-up + kills +
+                     aftermath), score_arc(), coverage(), evidence_sheet() (a contact
+                     sheet per arc); writes <workspace>/moments.json
   editqa.py          verify(): the checks run on a render + storyboard and
                      loudness-plot artefacts
   editdeliver.py     delivery package: platform variants, thumbnails, chapters,
@@ -297,6 +300,8 @@ tests/
                                 see "Testing"
   test_editscene.py, test_editframe.py, test_edit_framing.py   the webcam scene map,
                                 the safe camera, and both through a real render
+  test_editmoment.py            arcs, ranking, coverage, build; the lineup context rule and
+                                `moment` expansion live in test_edittemplates.py
   test_killfeed.py              kill-feed parsing rules + icon geometry
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
@@ -1223,10 +1228,27 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   headshot, through_cover, strength, blobs, icon}`. `t` is video seconds, half a
   frame before the row first appeared. The icon crop stops at the last modifier
   icon (`icon_extent`) so the distance digits never leak into a callout.
-- **Limits, by design:** a stream whose webcam/overlay covers the feed (several of the
-  user's Sep/Oct 2026 Wardogs streams) yields nothing - reported as "no
-  kills", which means "unreadable" there. Victim names in other scripts come back
-  empty (`readable_name`). Calibrated on 1280x720 Wardogs footage only.
+- **The `KILL CONFIRMED` popup** (`killfeed.parse_confirm` / `group_confirms` /
+  `merge_confirms`, `killfeed.confirm`, default on): the game draws `+$2,750  KILL
+  CONFIRMED  250XP` at the crosshair on every kill the player makes, centre of the screen,
+  for ~4 s, and no stream layout covers the centre - so it is the *record* of a kill
+  where the feed is its *detail*. A second crop (`killfeed.confirm_crop`, `X:Y:W:H` as
+  fractions of the frame, so any resolution) is cut from the same ffmpeg pass and OCR'd;
+  `CONFIRMED` (read as `ONFJRMEO`, `CONFIRMEO`: fuzzy, ratio >= 0.68) plus `KILL` or an
+  `NNN XP` tag is a sighting (a shop saying "Confirm purchase $500" is not), sightings
+  within 3.5 s are one popup (it flickers: read on 3 frames of 4), and a feed event inside or
+  within 2.5 s of a popup is `confirmed` (`source: "both"`), a feed event with none stays
+  `"feed"`, and a popup with no feed event becomes a new event `c001`...: `source:
+  "confirm"`, `weapon: "unknown"`, `dist_m: None`, no icon - a kill a webcam hid. New
+  top-level keys: `confirm_crop`, `confirm_sightings`, `feed_only`, `confirm_only`, `both`
+  (their absence = scanned before the popup pass existed: `moments coverage` says "rescan").
+  Verified on a real clip: a 238 m kill read by both. The Kick layout of 11 and 15
+  September has the webcam over the feed, which is what this exists for.
+- **Limits, by design:** a stream whose webcam/overlay covers the feed yields no *detail*
+  (distance, weapon, victim) - only the popup's kill. A stream where neither is readable
+  reports "no kills", which means "unreadable". Victim names in other scripts come back
+  empty (`readable_name`). The feed crop is calibrated on 1280x720 Wardogs footage (it
+  happens to cover the feed at 1080p too); the popup crop is fractional.
 
 ### edit.py (stage 5d)
 
@@ -1801,6 +1823,45 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   luminance spread of the words at 168 px (< 0.5 warns). `clipbot edit thumbnail NAME
   --at S --text "..." [--side --zoom --focus --font --accent --out]` takes the frame from
   the final render. Face placement is manual until a face locator exists.
+- **editmoment.py** - the moment engine; read "Moments" below for why it exists.
+  `arcs_from_kills(events, duration, lead=14, tail=7, merge_gap=16, max_arc=90)`: kills
+  within `merge_gap` are one arc, the window is `lead` before the first to `tail` after the
+  last, arcs whose windows touch are merged (so nothing is cut twice) unless that would pass
+  `max_arc`, in which case the boundary goes halfway between the two kills. `build(ws,
+  settings)` reads `killfeed.json`, moves each edge into the nearest pause in the speech
+  (`editcut.find_cut`), scores the arc (`score_arc`: `kills` = sum of
+  `edittemplates.kill_score`, `multi` 1.5 per extra kill, `reaction` 0.7 x the z-score of a
+  loudness spike (`highlights.compute_energy_spikes`) inside it capped at 3, `chat` 0.4 x the
+  chat-rate multiplier capped at 2, `analysis` 2.0 if `candidates.json` picked an overlapping
+  stretch) and attaches the transcript lines; the parts are stored, so a ranking can be
+  argued with. `coverage(ws)` is a verdict per stream (`not scanned`, `feed only (rescan...)`,
+  `unread or no kills`, `feed mostly covered`, `ok`); it is NOT a count of the kills that
+  happened - that needs the end-of-match scoreboard, which is not read. `evidence_sheet`
+  draws a contact sheet: a dozen tiles across the arc with a red border and a `KILL 68m HEAD
+  NADE` tag on each kill, one just before the first, the transcript lines (lines in
+  Devanagari are not drawn - Pillow without libraqm cannot shape them - and are printed by
+  `moments show`), the analysis's own words. A YouTube arc is fetched once through
+  `ytsegments` and cached under `<workspace>/moments/_seg/`. `range_arc(ws, a, b)` makes the
+  same sheet for any stretch by hand (`moments sheet --range`), which is how a clip is judged
+  *with its surroundings*.
+- **Moments (the rule, and the measurement behind it)**. An episode's clips used to be chosen
+  from `candidates.json` descriptions and transcript lines. Evidence sheets of those clips
+  showed the failure: a clip captioned "mortar landed on my face" ran over a quiet walk
+  through a yard (he was *retelling* it; the transcript said where, not what was on screen),
+  and "I hope you get him - and the kill comes" ended before the kill. Also measured: the
+  audio does **not** mark where a firefight began (the rate of sharp high-frequency onsets in
+  the 40 s before 70 known kills was 0.34/s, at random times 0.35/s; the mix is the voice), so
+  lead-up is a policy (`moments.lead`), corrected by looking at the sheet.
+  `edittemplates.context_issues(lineup)` is the gate: a lineup clip with `kills` must start
+  >= 10 s before the first and end >= 5 s after the last (`MIN_LEAD`, `MIN_TAIL`) unless it is
+  `"cutaway": true`; `edit episode` prints a `CONTEXT:` line per clip that falls short.
+  `edittemplates.expand_moments` lets a lineup clip be `{"src": alias, "moment": "m004",
+  "trim": [lead_cut, tail_cut], "at": first_kill_seconds}`: `in`/`out`/`kills` (with the feed's
+  weapon icon) come from the arc, so a clip is chosen by id from a sheet instead of times
+  copied by hand. Ids are positional (`m001`... by time), so a rescan that finds more kills
+  shifts them: `at`, when given, must match the arc's first kill within 2 s or the expansion
+  fails naming the drift. `edit episode --no-snap` is right for such a lineup (the arcs'
+  edges were moved into pauses when they were built).
 - **editcut.py** - `find_cut(wav, t, kind)` moves a cut into the nearest gap in the
   speech: `read_envelope` (RMS per 10 ms over a 60 ms window) -> `find_pauses` (a run of
   >= 0.2 s in the bottom 30% of the stretch's *own* dynamic range between its 10th and
@@ -2283,6 +2344,7 @@ Sections and the values worth knowing without opening the file:
   YouTube source in an edit, `0` turns it off), `safe_framing` (`true`: the webcam scene map
   and the camera/overlay adjustments above; `false` renders the camera as authored),
   `thumbnails` (`3`).
+- **`moments`** — `lead` (`14.0`), `tail` (`7.0`), `merge_gap` (`16.0`): the arc policy above.
 - **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
   posture above).
 
@@ -2426,7 +2488,11 @@ Sections and the values worth knowing without opening the file:
   synthetic media: length, A/V sync, loudness near target, **a re-render reuses
   every clip**, one changed clip re-encodes alone, a render never overwrites
   spec.json), `test_editcli` (incl. `edit episode` end to end on a synthetic wav),
-  `test_killfeed` (synthetic OCR words, icons), `test_editscene` (the detector on synthetic
+  `test_killfeed` (synthetic OCR words, icons, and the popup: the real misreadings of one
+  clip, a shop that says "confirm" is not a kill, runs, the merge with feed rows),
+  `test_editmoment` (each arc rule, the ranking parts, coverage verdicts, `build` on a temp
+  workspace; the `context_issues` / `expand_moments` tests are in `test_edittemplates`),
+  `test_editscene` (the detector on synthetic
   frames: boxes in both real layouts and against the edge, and what must NOT be one - a cyan
   blob, a filled area, another colour, too small, tall, two sides; the span rules; a real
   video whose box jumps at 1.0 s found to within a frame), `test_editframe` (the window

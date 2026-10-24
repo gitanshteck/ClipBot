@@ -60,7 +60,7 @@ def kills_from_killfeed(data: Dict[str, Any], alias: str, root: Optional[Any] = 
         if e.get("icon") and root is not None:
             p = Path(str(root)) / e["icon"]
             icon = str(p) if p.is_file() else None
-        out.append({"src": alias, "t": float(e["t"]), "dist_m": e.get("dist_m"), "weapon": e.get("weapon", "gun"),
+        out.append({"id": e.get("id"), "src": alias, "t": float(e["t"]), "dist_m": e.get("dist_m"), "weapon": e.get("weapon", "gun"),
                     "headshot": bool(e.get("headshot")), "through_cover": bool(e.get("through_cover")),
                     "victim": killfeed.readable_name(e.get("victim") or ""), "icon": icon})
     return out
@@ -372,6 +372,85 @@ def kill_montage(
 
 EPISODE_ACCENT = "#FFB300"
 LABEL_Y = 0.10          # top centre: clear of a webcam on either side and of the chat at the bottom
+
+
+MIN_LEAD = 10.0          # seconds of lead-up a kill clip must give the first kill (rules/roundups.md: context)
+MIN_TAIL = 5.0           # ...and of aftermath after the last
+
+
+def _lineup_clip_lists(lineup: Dict[str, Any]) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    out: List[Tuple[str, List[Dict[str, Any]]]] = []
+    cold = lineup.get("cold_open")
+    if cold and cold.get("clips"):
+        out.append(("cold open", cold["clips"]))
+    for ch in lineup.get("chapters", []):
+        out.append((ch.get("title", "chapter"), ch.get("clips", [])))
+    return out
+
+
+def context_issues(lineup: Dict[str, Any], min_lead: float = MIN_LEAD, min_tail: float = MIN_TAIL) -> List[str]:
+    """Kill clips that show the kill without what leads to it or what follows.
+
+    A clip of a kill with six seconds before it and three after was the shape of the first episode's
+    complaint: the kill without the fight. Each clip with `kills` must start `min_lead` seconds before
+    the first and end `min_tail` after the last, unless the author marks it `"cutaway": true` (a deliberate
+    insert). Returns one sentence per clip that falls short; an empty list is a pass.
+    """
+    out: List[str] = []
+    for title, clips in _lineup_clip_lists(lineup):
+        for i, c in enumerate(clips, start=1):
+            if not c.get("kills") or c.get("cutaway"):
+                continue
+            first = min(float(k["t"]) for k in c["kills"])
+            last = max(float(k["t"]) for k in c["kills"])
+            lead, tail = first - float(c["in"]), float(c["out"]) - last
+            short = []
+            if lead < min_lead - 1e-6:
+                short.append("{0:.1f} s before the first kill (want {1:g})".format(lead, min_lead))
+            if tail < min_tail - 1e-6:
+                short.append("{0:.1f} s after the last (want {1:g})".format(tail, min_tail))
+            if short:
+                out.append("{0!r} clip {1} ({2} {3:.0f}-{4:.0f}): {5}".format(title, i, c.get("src"), c["in"], c["out"], "; ".join(short)))
+    return out
+
+
+def expand_moments(lineup: Dict[str, Any], moments_for: Any, kills_for: Any) -> List[str]:
+    """Fill in clips that name a moment: `{"src": alias, "moment": "m004", "trim": [lead_cut, tail_cut]}`.
+
+    `moments_for(alias)` returns that source's `moments.json` document (or None) and `kills_for(alias)` a
+    map of kill id -> kill dict (with the weapon icon's path where the feed had one). The clip's `in`/`out`
+    become the arc's window less `trim` (seconds taken off the lead-up and the aftermath), its `kills` the
+    arc's kills inside that window, and `moment` stays on the clip as a record. Changes the lineup in place;
+    returns a line per clip it filled. An unknown source or id is a `SpecError` naming it.
+    """
+    done: List[str] = []
+    for title, clips in _lineup_clip_lists(lineup):
+        for i, c in enumerate(clips, start=1):
+            mid = c.get("moment")
+            if not mid:
+                continue
+            alias = c.get("src")
+            doc = moments_for(alias)
+            where = "{0!r} clip {1}".format(title, i)
+            if doc is None:
+                raise editspec.SpecError("{0}: source {1!r} has no moments.json (clipbot moments build --workspace ...)".format(where, alias))
+            arc = next((a for a in doc["arcs"] if a["id"] == mid), None)
+            if arc is None:
+                raise editspec.SpecError("{0}: no moment {1!r} in {2} ({3} arcs)".format(where, mid, alias, len(doc["arcs"])))
+            if c.get("at") is not None and abs(float(arc["first"]) - float(c["at"])) > 2.0:
+                raise editspec.SpecError("{0}: moment {1} of {2} now starts at its first kill {3:.1f} s, not {4:.1f} s as the lineup recorded - "
+                                         "the ids shifted after a rescan; look the moment up again".format(where, mid, alias, float(arc["first"]), float(c["at"])))
+            trim = c.get("trim") or [0.0, 0.0]
+            lo, hi = float(arc["start"]) + float(trim[0]), float(arc["end"]) - float(trim[1])
+            if hi - lo < 2.0:
+                raise editspec.SpecError("{0}: trim {1} leaves under 2 s of moment {2}".format(where, trim, mid))
+            known = kills_for(alias) or {}
+            c["in"], c["out"] = round(lo, 2), round(hi, 2)
+            c["kills"] = [dict(known.get(k["id"]) or {}, **{kk: k[kk] for kk in ("t", "dist_m", "weapon", "headshot", "through_cover")},
+                               src=alias) for k in arc["kills"] if lo <= k["t"] <= hi]
+            c.setdefault("snap", False)            # the arc's edges were already moved into pauses when it was built
+            done.append("{0}: {1} {2} -> {3:.1f}-{4:.1f} s, {5} kill(s)".format(where, alias, mid, lo, hi, len(c["kills"])))
+    return done
 
 
 def _ambient_camera(lo: float, hi: float, prof: Dict[str, Any], punches: List[float]) -> List[Dict[str, Any]]:

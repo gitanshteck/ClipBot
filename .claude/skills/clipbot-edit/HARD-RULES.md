@@ -146,6 +146,13 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     clips set from transcript lines began at the reaction ("mortar fell on me") instead of
     the hit, and kill windows were 6 s before / 3 s after: the kill without the fight.
     Include the lead-up and the aftermath, or mark the clip a deliberate cutaway.
+40. **A transcript line says what was said, not what was on screen.** *Origin:* a "mortar
+    landed on my face" clip ran over a quiet walk (he was retelling it from the last fight),
+    "I hope you get him - and the kill comes" ended before the kill, and two Wardogs streams
+    "had no kills" because a webcam covered the feed. Look at a contact sheet of the clip *and
+    its surroundings* (`clipbot moments sheet --range`) before a clip goes in; a kill clip
+    needs its lead-up and aftermath (`edit episode` flags it); and "no kills found" on a
+    stream you know had a fight means *unreadable*, not *none* (`moments coverage`).
 
 ## Delivery
 

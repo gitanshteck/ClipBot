@@ -146,20 +146,34 @@ def scan_killfeed(
     duration = _probe_duration(settings, source)
 
     cw, ch, cx, cy = crop
-    vf = "fps={0:g},crop={1}:{2}:{3}:{4},scale={5}:{6}:flags=lanczos".format(fps, cw, ch, cx, cy, cw * scale, ch * scale)
+    feed_vf = "crop={0}:{1}:{2}:{3},scale={4}:{5}:flags=lanczos".format(cw, ch, cx, cy, cw * scale, ch * scale)
+    # the centre-of-screen "KILL CONFIRMED" popup, as fractions of the frame (any resolution): no layout covers it
+    want_confirm = bool(settings.get("killfeed.confirm", True))
+    cfrac = [float(x) for x in str(settings.get("killfeed.confirm_crop", "0.335:0.65:0.33:0.15")).split(":")]
+    if len(cfrac) != 4:
+        raise StageError("killfeed.confirm_crop must look like X:Y:W:H as fractions (got {0!r})".format(settings.get("killfeed.confirm_crop")))
+    confirm_vf = "crop=iw*{2}:ih*{3}:iw*{0}:ih*{1},scale=1260:330:flags=lanczos".format(*cfrac)
     chunks = _chunks(duration, chunk_seconds)
     progress.phase("scan", total=max(1, len(chunks)), unit="chunks")
     obs: List[Dict[str, Any]] = []
+    confirm_obs: List[Dict[str, Any]] = []
     frames_seen = 0
     try:
         for ci, (t0, span) in enumerate(chunks):
             progress.check_cancelled()
             frames = scratch / "frames"
-            if frames.exists():
-                shutil.rmtree(frames)
-            frames.mkdir()
+            cframes = scratch / "confirm"
+            for d in (frames, cframes):
+                if d.exists():
+                    shutil.rmtree(d)
+                d.mkdir()
             argv = [ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-nostdin", "-y", "-ss", "{0:.3f}".format(t0),
-                    "-t", "{0:.3f}".format(span), "-i", str(source), "-vf", vf, "-q:v", "2", str(frames / "%06d.jpg")]
+                    "-t", "{0:.3f}".format(span), "-i", str(source)]
+            if want_confirm:
+                argv += ["-filter_complex", "[0:v]fps={0:g},split=2[a][b];[a]{1}[f];[b]{2}[c]".format(fps, feed_vf, confirm_vf),
+                         "-map", "[f]", "-q:v", "2", str(frames / "%06d.jpg"), "-map", "[c]", "-q:v", "2", str(cframes / "%06d.jpg")]
+            else:
+                argv += ["-vf", "fps={0:g},{1}".format(fps, feed_vf), "-q:v", "2", str(frames / "%06d.jpg")]
             proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
                                   encoding="utf-8", errors="replace")
             if proc.returncode != 0:
@@ -180,14 +194,26 @@ def scan_killfeed(
                     o["cls"] = killfeed.classify_icons(o["blobs"])[0]
                     o["crop"] = crop_im
                     obs.append(o)
+            if want_confirm:
+                cjsonl = scratch / "ocr_confirm.jsonl"
+                _ocr_dir(cframes, cjsonl, progress)
+                for line in open(cjsonl, encoding="utf-8"):
+                    d = json.loads(line)
+                    seen = killfeed.parse_confirm([w for ln in d["lines"] for w in ln["w"]])
+                    if seen is not None:
+                        confirm_obs.append(dict(seen, t=t0 + (int(Path(d["f"]).stem) - 1) / fps))
             shutil.rmtree(frames, ignore_errors=True)
+            shutil.rmtree(cframes, ignore_errors=True)
             progress.update(ci + 1, label="{0:.0f} min".format((t0 + span) / 60.0))
     finally:
         shutil.rmtree(scratch / "frames", ignore_errors=True)
+        shutil.rmtree(scratch / "confirm", ignore_errors=True)
         if downloaded and not keep_video and (scratch / "video.mp4").exists():
             (scratch / "video.mp4").unlink()
 
     events = _events(obs, ws, fps)
+    if want_confirm:
+        events = killfeed.merge_confirms(events, killfeed.group_confirms(confirm_obs), fps)
     doc = {
         "schema": SCHEMA, "player": player, "video": str(source) if not downloaded else "youtube:" + ws.slug,
         "fps": fps, "crop": crop, "scale": scale, "duration": duration, "frames": frames_seen,
@@ -195,9 +221,15 @@ def scan_killfeed(
         "nades": sum(1 for e in events if e["weapon"] == "grenade"),
         "headshots": sum(1 for e in events if e["headshot"]), "events": events,
     }
+    if want_confirm:
+        doc.update({"confirm_crop": cfrac, "confirm_sightings": len(confirm_obs),
+                    "feed_only": sum(1 for e in events if e["source"] == "feed"),
+                    "confirm_only": sum(1 for e in events if e["source"] == "confirm"),
+                    "both": sum(1 for e in events if e["source"] == "both")})
     if not events:
         doc["note"] = ("No kills found. If the player was in the match, the stream's overlay probably covers the kill "
-                       "feed (a webcam over the left-middle of the screen), or the feed was not on.")
+                       "feed (a webcam over the left-middle of the screen) and the popup was not read either, or the player "
+                       "had no kills.")
     ws.write_json(out_path, doc)
     ws.mark_stage(STAGE, kills=len(events), player=player)
     log.info("Kill feed: %d kill(s) for %s (%d grenade, %d headshot) in %s", len(events), player, doc["nades"],

@@ -203,7 +203,17 @@
     "fps": 1.0,
     "scale": 3,
     "crop": "620:230:0:440",
+    "_comment_confirm": "Also read the `KILL CONFIRMED` popup the game draws at the crosshair on every kill (centre of the screen, which no stream layout covers) and join it to the feed rows: a kill with a popup and no feed row is one a webcam hid. `confirm_crop` is X:Y:W:H as fractions of the frame, so it is resolution-independent.",
+    "confirm": true,
+    "confirm_crop": "0.335:0.65:0.33:0.15",
     "chunk_seconds": 1800
+  },
+
+  "moments": {
+    "_comment": "The moment engine (`clipbot moments ...`): kills -> arcs. `lead` seconds before the first kill, `tail` after the last; kills closer than `merge_gap` are one arc. These are a policy, not a detection: the audio does not mark where a firefight began (rate of sharp high-frequency onsets before a kill was 0.34/s, at random times 0.35/s over 70 known kills), so the contact sheet is what corrects them.",
+    "lead": 14.0,
+    "tail": 7.0,
+    "merge_gap": 16.0
   },
 
   "edit": {

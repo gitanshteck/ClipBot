@@ -9,6 +9,22 @@ work.
 
 ## Choosing moments
 
+- **Look at it before it goes in: `clipbot moments sheet`.** A contact sheet per candidate
+  (a dozen frames across it, the kills marked, the transcript lines) is the evidence a
+  transcript line is not. `clipbot moments build --workspace W` (needs `killfeed scan`) makes
+  the arcs - every kill with its lead-up and aftermath, ranked, parts shown - and `moments
+  pool` ranks them across streams; `moments sheet --range START,END` draws any stretch you are
+  considering *with its surroundings*, and `moments show` prints the lines the picture cannot
+  (Devanagari). Choose a kill moment by id (`{"src": ..., "moment": "m004"}` in the lineup)
+  instead of copying times. `moments coverage` says which streams have a kill record you can
+  trust, and which need a (re)scan - **a stream that "has no kills" may just be one whose
+  webcam covers the feed**.
+- **A kill clip gives the kill its fight.** At least 10 s before the first kill and 5 s after
+  the last, or mark it a deliberate `"cutaway": true`; `edit episode` prints `CONTEXT:` for any
+  that fall short and that is a failure to fix, not a note to read.
+- **The picture must show what the line says.** Teck often *retells* an event over quiet
+  footage (a "mortar landed on my face" clip was a walk through a yard). If the sheet shows
+  the thing is not on screen, find where it is, or cut the clip.
 - **Evidence per moment, written down.** A moment goes in the lineup only with a
   transcript window you read, a frame you looked at, or a measurement. Say which in
   the clip's `note`. `candidates.json` descriptions are a reading list, not evidence

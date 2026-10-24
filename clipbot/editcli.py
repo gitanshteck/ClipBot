@@ -1,4 +1,4 @@
-"""The `clipbot edit` and `clipbot killfeed` command groups.
+"""The `clipbot edit`, `clipbot killfeed` and `clipbot moments` command groups.
 
 Kept out of `cli.py` so that file stays the table of contents it is meant to be:
 `cli.build_parser` calls `add_parsers(sub)` and nothing else here is imported by it.
@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import editcut, editdeliver, library, editqa, editspec, edittaste, edittemplates, edittimeline
+from . import editcut, editdeliver, editmoment, library, editqa, editspec, edittaste, edittemplates, edittimeline
 from .config import Settings
 from .progress import Progress
 from .specerror import SpecError
@@ -99,6 +99,141 @@ def cmd_killfeed_list(args: argparse.Namespace, settings: Settings) -> int:
         print("{0}  {1:>9.1f}s  {2:>5}  {3:<8}{4}{5}  {6}".format(
             e["id"], e["t"], "{0:.0f}m".format(e["dist_m"]) if e.get("dist_m") is not None else "?", e["weapon"],
             " headshot" if e.get("headshot") else "", " through-cover" if e.get("through_cover") else "", e.get("victim") or ""))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# moments
+# --------------------------------------------------------------------------
+
+
+def _all_workspaces(settings: Settings) -> List[Workspace]:
+    root = Path(settings.work_root)
+    out = []
+    for d in sorted(root.iterdir()) if root.is_dir() else []:
+        if d.is_dir() and not d.name.startswith("_") and (d / "state.json").exists():
+            out.append(Workspace.open(d))
+    return out
+
+
+def _arc_line(slug: str, a: Dict[str, Any]) -> str:
+    ctx = a["context"]
+    return "{0:<22} {1:<5} {2:>9} {3:>4.0f}s  lead {4:>3.0f}s tail {5:>3.0f}s  {6:>2} kill(s)  score {7:>5.1f}  {8}".format(
+        slug[:22], a["id"], editmoment._mmss(a["start"]), ctx["length"], ctx["lead"], ctx["tail"], len(a["kills"]), a["score"],
+        " ".join("{0}={1}".format(k, v) for k, v in a["parts"].items() if v))
+
+
+def cmd_moments_build(args: argparse.Namespace, settings: Settings) -> int:
+    ws = _workspace(settings, args.workspace)
+    doc = editmoment.build(ws, settings, lead=args.lead, tail=args.tail, merge_gap=args.merge_gap, snap=not args.no_snap)
+    print("{0}: {1} arc(s) from {2} kill(s) {3}".format(ws.slug, len(doc["arcs"]), doc["kills"], doc["kills_by_source"]))
+    for a in editmoment.ranked(doc)[:args.top]:
+        print(_arc_line(ws.slug, a))
+    return 0
+
+
+def cmd_moments_list(args: argparse.Namespace, settings: Settings) -> int:
+    ws = _workspace(settings, args.workspace)
+    doc = editmoment.load(ws)
+    if doc is None:
+        raise StageError("{0} has no moments.json; run: clipbot moments build --workspace {0}".format(args.workspace))
+    arcs = editmoment.ranked(doc) if args.by_score else doc["arcs"]
+    for a in arcs[:args.top]:
+        print(_arc_line(ws.slug, a))
+    return 0
+
+
+def cmd_moments_sheet(args: argparse.Namespace, settings: Settings) -> int:
+    ws = _workspace(settings, args.workspace)
+    doc = editmoment.load(ws)
+    if doc is None and not args.range:
+        raise StageError("{0} has no moments.json; run: clipbot moments build --workspace {0}".format(args.workspace))
+    arcs = doc["arcs"] if doc else []
+    if args.range:
+        arcs = []
+        for r in args.range:
+            try:
+                a, b = (float(x) for x in r.split(","))
+            except ValueError:
+                raise StageError("--range is START,END in seconds, e.g. --range 1200,1260 (got {0!r})".format(r))
+            arcs.append(editmoment.range_arc(ws, a, b))
+    elif args.ids:
+        want = set(args.ids.split(","))
+        arcs = [a for a in arcs if a["id"] in want]
+    else:
+        arcs = editmoment.ranked(doc)[:args.top]
+    resolver = None
+    if ws.source_mode() == "embed" and ws.video_path() is None:
+        from . import ytsegments
+
+        resolver = ytsegments.StreamResolver(ws, settings)       # one stream resolution for every arc
+    for a in arcs:
+        out = ws.root / "moments" / "{0}.jpg".format(a["id"])
+        if not args.force and out.exists():
+            print("have {0}".format(out))
+            continue
+        try:
+            print(editmoment.evidence_sheet(ws, settings, a, out, resolver=resolver))
+        except StageError as exc:
+            print("{0}: {1}".format(a["id"], exc), file=sys.stderr)
+    return 0
+
+
+def cmd_moments_show(args: argparse.Namespace, settings: Settings) -> int:
+    """Arcs with everything the sheet cannot draw: the kills, the transcript lines (any script), what the analysis said."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # Devanagari on a cp1252 console
+    ws = _workspace(settings, args.workspace)
+    doc = editmoment.load(ws)
+    if doc is None:
+        raise StageError("{0} has no moments.json; run: clipbot moments build --workspace {0}".format(args.workspace))
+    want = set(args.ids.split(","))
+    for a in doc["arcs"]:
+        if a["id"] not in want:
+            continue
+        print(_arc_line(ws.slug, a))
+        print("  window {0:.1f}-{1:.1f}s  (edges moved into a pause: in {2}, out {3})".format(
+            a["start"], a["end"], a["snapped"]["in"], a["snapped"]["out"]))
+        for k in a["kills"]:
+            print("  kill {0:>8.1f}s  {1:>5}  {2:<8}{3}{4}  [{5}]".format(
+                k["t"], "{0:.0f}m".format(k["dist_m"]) if k.get("dist_m") is not None else "?", k["weapon"],
+                " headshot" if k.get("headshot") else "", " through-cover" if k.get("through_cover") else "", k["source"]))
+        for l in a["lines"]:
+            print("  {0:>8.1f}s  {1}{2}".format(l["t"], l["text"], "  (low confidence)" if l.get("low") else ""))
+        for c in a.get("analysis", []):
+            print("  analysis {0:.0f}-{1:.0f}s: {2}".format(c["start"], c["end"], c["description"]))
+    return 0
+
+
+def cmd_moments_pool(args: argparse.Namespace, settings: Settings) -> int:
+    import time
+
+    rows = []
+    for ws in _all_workspaces(settings):
+        doc = editmoment.load(ws)
+        if doc:
+            rows += [(ws.slug, a) for a in doc["arcs"]]
+    rows.sort(key=lambda r: -r[1]["score"])
+    pool = {"built_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "arcs": [dict(a, workspace=slug) for slug, a in rows]}
+    out = Path(settings.work_root) / "_moments" / "pool.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(pool, indent=1), encoding="utf-8")
+    print("{0} arc(s) from {1} workspace(s) -> {2}".format(len(rows), len({r[0] for r in rows}), out))
+    for slug, a in rows[:args.top]:
+        print(_arc_line(slug, a))
+    return 0
+
+
+def cmd_moments_coverage(args: argparse.Namespace, settings: Settings) -> int:
+    print("{0:<24} {1:>5}  {2:>5} {3:>5}  {4:<16} {5}".format("workspace", "hours", "kills", "/h", "feed/popup/both", "verdict"))
+    for ws in _all_workspaces(settings):
+        row = editmoment.coverage(ws)
+        if args.wardogs and not (row["scanned"] or "wardogs" in row["title"].lower()):
+            continue
+        src = row.get("sources") or {}
+        print("{0:<24} {1:>5.1f}  {2:>5} {3:>5}  {4:<16} {5}   {6}".format(
+            row["workspace"][:24], row["hours"], row.get("kills", "-"), row.get("per_hour") if row.get("per_hour") is not None else "-",
+            "{0}/{1}/{2}".format(src.get("feed", 0), src.get("confirm", 0), src.get("both", 0)) if src else "-", row["verdict"], row["title"][:34]))
     return 0
 
 
@@ -189,6 +324,23 @@ def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
         wav = _workspace(settings, src["workspace"]).audio_path
         return wav if wav.is_file() else None
 
+    def moments_for(alias: str) -> Any:
+        src = lineup["sources"].get(alias) or {}
+        return editmoment.load(_workspace(settings, src["workspace"])) if "workspace" in src else None
+
+    def kills_for(alias: str) -> Any:
+        src = lineup["sources"].get(alias) or {}
+        if "workspace" not in src:
+            return {}
+        ws_ = _workspace(settings, src["workspace"])
+        data = killfeed_stage.load(ws_)
+        if not data:
+            return {}
+        return {k_["id"]: k_ for k_ in edittemplates.kills_from_killfeed(data, alias, ws_.root) if k_.get("id")}
+
+    filled = edittemplates.expand_moments(lineup, moments_for, kills_for)
+    for line in filled:
+        print("moment: " + line)
     for style_id, style in ((lineup.get("brand") or {}).get("styles") or {}).items():
         library.save_text_style(settings, style_id, style)     # the brand's typefaces, idempotently
     report = editcut.prepare_lineup(lineup, wav_for, snap=not args.no_snap, match=not args.no_match)
@@ -208,6 +360,11 @@ def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
     print(path)
     print("cuts: {0} clip(s) moved, {1} cut point(s) left as authored (no pause within reach)".format(
         report["moved"], report["unsnapped"]))
+    issues = edittemplates.context_issues(lineup)
+    for issue in issues:
+        print("CONTEXT: " + issue)
+    if issues:
+        print("{0} kill clip(s) without their lead-up or aftermath: widen them, or mark a deliberate insert \"cutaway\": true".format(len(issues)))
     print("\n".join(_summary(timeline, spec)))
     return 0
 
@@ -466,6 +623,39 @@ def add_parsers(sub: Any) -> None:
     p = kf.add_parser("list", help="print the kills in killfeed.json")
     p.add_argument("--workspace", required=True)
     p.set_defaults(func=cmd_killfeed_list)
+
+    p_mo = sub.add_parser("moments", help="build whole moments from kills, rank them, and write a contact sheet of each to choose from")
+    mo = p_mo.add_subparsers(dest="moments_cmd", required=True)
+    p = mo.add_parser("build", help="kills -> arcs (lead-up, kills, aftermath), ranked; writes <workspace>/moments.json")
+    p.add_argument("--workspace", required=True, help="workspace slug or path")
+    p.add_argument("--lead", type=float, help="seconds before the first kill (default moments.lead, %g)" % editmoment.LEAD)
+    p.add_argument("--tail", type=float, help="seconds after the last kill (default moments.tail, %g)" % editmoment.TAIL)
+    p.add_argument("--merge-gap", type=float, help="kills closer than this are one arc (default %g)" % editmoment.MERGE_GAP)
+    p.add_argument("--no-snap", action="store_true", help="do not move the edges into a pause in the speech")
+    p.add_argument("--top", type=int, default=10)
+    p.set_defaults(func=cmd_moments_build)
+    p = mo.add_parser("list", help="print a workspace's arcs")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--top", type=int, default=100)
+    p.add_argument("--by-score", action="store_true", help="best first (default: in time order)")
+    p.set_defaults(func=cmd_moments_list)
+    p = mo.add_parser("sheet", help="write a contact sheet per arc to <workspace>/moments/<id>.jpg (a YouTube arc is fetched first)")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--ids", help="comma list of arc ids (default: the --top best)")
+    p.add_argument("--range", action="append", metavar="START,END", help="a stretch by hand, in seconds (repeatable); no moments.json needed")
+    p.add_argument("--top", type=int, default=8)
+    p.add_argument("--force", action="store_true", help="redraw sheets that exist")
+    p.set_defaults(func=cmd_moments_sheet)
+    p = mo.add_parser("show", help="print arcs in full: kills, transcript lines in any script, what the analysis said")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--ids", required=True, help="comma list of arc ids")
+    p.set_defaults(func=cmd_moments_show)
+    p = mo.add_parser("pool", help="every workspace's arcs, best first, across streams; writes work/_moments/pool.json")
+    p.add_argument("--top", type=int, default=30)
+    p.set_defaults(func=cmd_moments_pool)
+    p = mo.add_parser("coverage", help="which streams have a trustworthy kill record, and which need a (re)scan")
+    p.add_argument("--wardogs", action="store_true", help="only streams that were scanned or whose title says Wardogs")
+    p.set_defaults(func=cmd_moments_coverage)
 
     p_ed = sub.add_parser("edit", help="the edit engine: spec -> multi-source edit with retiming, overlays, music, mastering")
     ed = p_ed.add_subparsers(dest="edit_command", metavar="<action>", required=True)

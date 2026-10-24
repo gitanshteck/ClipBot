@@ -116,7 +116,7 @@ fix what you saw**, before ears and captions:
 |---|---|---|
 | **1a: Quality guard** | Q1 (done), Q2, Q3, Q4, Q5. | `edit compare` between v1 and any render prints no clip under 85% sharpness; the report lists every source's resolution. |
 | **1b: Safe, dynamic framing - DONE 2026-10-24, see 0.5** | S1-S5 on the YouTube and Kick layouts. | `verify` "overlay clipped" passes on Mish Mash #1 re-rendered; no punch crops a cam; scenes map matches a hand check on 20 sampled frames. |
-| **1c: Moment engine v1** | M1-M6; rebuild the Mish Mash lineup from evidence sheets, with kill context. | Every kill chapter clip has lead-up and aftermath; coverage report per game; you review a candidate sheet, not a list of descriptions. |
+| **1c: Moment engine v1 - BUILT 2026-10-24, see 0.6** | M1-M6; rebuild the Mish Mash lineup from evidence sheets, with kill context. | Every kill chapter clip has lead-up and aftermath; coverage report per game; you review a candidate sheet, not a list of descriptions. |
 | 2 | Ears: A1 word timestamps, A2 reaction map (also feeds M3), B1 captions, H checks. | as before |
 | 3 | Review loop (E). | as before |
 | 4 | Look (B3 graphics kit, B4 punctuation, B5 transitions, B2 reaction framing, on top of S). | as before |
@@ -147,6 +147,30 @@ corner pivot). The detector had to be loosened twice to read boxes back out of a
 editscene); the first run of the check on v3 reported 5 misses that were the detector's, not the camera's.
 **Caveat, said plainly:** no clip in the first episode changes layout mid-clip, so the mid-clip switch path is
 proven on a synthetic video only.
+
+### 0.6 Phase 1c result (2026-10-24)
+
+| | Status | What exists |
+|---|---|---|
+| M1 scan every stream | **partly** | The kill reader now also reads the `KILL CONFIRMED` popup at the crosshair (no stream layout covers it), joins it to the feed rows and reports `source: both / feed / confirm`. On the Kick stream of 15 September (5.9 h, webcam over the feed) the feed reader found **no** kills and the popup found **39**. Scans of 11 September, a short 15 September stream and the 25 September YouTube stream were started in the background (about 30 minutes of OCR per 3-6 hours of video); the five streams scanned before the popup pass existed still need a `--force` rescan, deliberately not done unasked because it rewrites their icon files, which older edit specs point at. |
+| M2 arc builder | **built, with a measured limit** | `editmoment.arcs_from_kills`: kills within 16 s are one arc, 14 s lead-up and 7 s aftermath, touching arcs merged (or split halfway between two kills if over 90 s), edges moved into a pause. **Not a detection of "first gunfire":** on 70 known kills the rate of sharp high-frequency audio onsets in the 40 s before a kill was 0.34 per second, at random times 0.35 - the mix is the voice - so lead-up is a policy and the contact sheet corrects it. |
+| M3 rank | **built, weights unvalidated** | `score_arc` with printed parts: kills (nade/headshot/distance), multi, loudness spike, chat burst, analysis pick. The weights are hand-set; the top of the list looked right on the sheets, but nothing has been fitted to what viewers liked. A kill known only from the popup has no weapon or distance, so its `kills` part is flat. |
+| M4 evidence sheet | **built** | `clipbot moments sheet` (per arc, or `--range` for any stretch by hand): a dozen frames, kills marked, transcript lines, the analysis's words; `moments show` prints what the picture cannot (Devanagari). |
+| M5 completeness | **not built** | The end-of-match scoreboard is not read. `moments coverage` is a verdict per stream ("not scanned", "feed only - rescan", "unread or no kills", "feed mostly covered", "ok"), not a count of the kills that happened. |
+| M6 context rules | **built** | `edit episode` prints a `CONTEXT:` line for any kill clip with under 10 s before its first kill or under 5 s after its last (`"cutaway": true` exempts); lineup clips can be `{"moment": id, "trim": [..], "at": first_kill}` so a moment is chosen by id from a sheet. |
+
+**What the review found** (a sheet of every one of the 55 clips with 6 s either side): a clip captioned "mortar
+landed on my face" ran over a quiet walk through a yard - he was *retelling* it, so the footage had no mortar (cut); "I hope you
+get him - and the kill comes" ended 0.4 s before its punchline, "This is my first Nade game" (extended); two Base
+clips and one helicopter clip show a death screen or a wall while the voice carries the joke (kept, said so); a 25 s static
+title screen carries a New Look line (kept, not fixed). The Receipts chapter was rebuilt from six arcs (21-37 s each, at
+least 10 s before and 5 s after the kills, against 9-16 s with 6 s and 3 s) and went from 86 s to 160 s; the episode from
+10:07 to 11:27.
+
+**Still open:** the rescan of five older streams; a better answer for talking-over-nothing clips than "keep or cut" (reaction
+framing on the webcam, B2, needs a face and a higher-resolution cam than the 510 px box in a 1080p frame); the ranking
+weights; the scoreboard check; transcripts are still the only way to find a non-kill moment, and they point at *talk about*
+the moment.
 
 ## 1. Where we are
 

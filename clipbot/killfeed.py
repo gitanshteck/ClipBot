@@ -36,6 +36,7 @@ skull) and `cover` (a thinner icon: shot through a surface).
 """
 
 import collections
+import difflib
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -343,3 +344,99 @@ def drop_prefixed_twins(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         and abs(o["dist_m"] - twin) <= 1 and o["n_obs"] >= e["n_obs"]:
                     e["drop"] = True
     return [e for e in events if not e.get("drop")]
+
+
+# --------------------------------------------------------------------------
+# the "KILL CONFIRMED" popup
+# --------------------------------------------------------------------------
+#
+# The feed is not always readable: a stream layout can put the webcam over it, and then the
+# feed reader finds nothing (the Kick layout of 11 and 15 September did). But the game also
+# draws a popup at the crosshair on every kill the player makes - `+$2,750  KILL CONFIRMED
+# 250XP`, centre of the screen, a few seconds - and no stream layout covers the centre. It
+# carries no distance, weapon or victim, so it is the *record* of a kill and the feed is its
+# *detail*; `merge_confirms` joins the two.
+
+CONFIRM_GAP = 3.5            # popup sightings this close are one popup (it flickers: OCR reads it on 3 frames in 4)
+CONFIRM_MATCH = 2.5          # a feed row this close to a popup's span is the same kill
+_AMOUNT = re.compile(r"\+?\s*\$\s*([0-9][0-9,.\sOoSs]{2,8})")
+_XP = re.compile(r"([0-9]{2,4})\s*X\s*P", re.I)
+
+
+def _letters(word: str) -> str:
+    return re.sub(r"[^A-Z]", "", word.upper())
+
+
+def _like(token: str, target: str, floor: float) -> bool:
+    return len(token) >= max(3, len(target) - 3) and difflib.SequenceMatcher(None, token, target).ratio() >= floor
+
+
+def parse_confirm(words: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The popup in one frame's OCR words, or None. `CONFIRMED` (misread as `ONFJRMEO`, `CONFIRMEO`)
+    must be there, and with it `KILL` or an `NNN XP` tag, so a shop that says "Confirm purchase $500" is not a kill."""
+    toks = [_letters(w["t"]) for w in words]
+    confirmed = any(_like(t, "CONFIRMED", 0.68) for t in toks) or any(_like(t, "KILLCONFIRMED", 0.75) for t in toks)
+    if not confirmed:
+        return None
+    text = " ".join(w["t"] for w in words)
+    kill = any(_like(t, "KILL", 0.7) for t in toks)
+    m = _AMOUNT.search(text)
+    amount = None
+    if m:
+        digits = re.sub(r"[^0-9]", "", m.group(1).replace("O", "0").replace("o", "0").replace("S", "5").replace("s", "5"))
+        amount = int(digits) if digits else None
+    xp = _XP.search(text)
+    if not (kill or xp):
+        return None
+    return {"amount": amount, "xp": int(xp.group(1)) if xp else None}
+
+
+def group_confirms(obs: List[Dict[str, Any]], gap: float = CONFIRM_GAP) -> List[Dict[str, Any]]:
+    """Sightings `{t, amount, xp}` -> one run per popup: `{first, last, n_obs, amount, xp}`."""
+    runs: List[Dict[str, Any]] = []
+    for o in sorted(obs, key=lambda x: x["t"]):
+        if runs and o["t"] - runs[-1]["last"] <= gap:
+            r = runs[-1]
+            r["last"] = o["t"]
+            r["n_obs"] += 1
+            r["_amounts"].append(o.get("amount"))
+            r["_xps"].append(o.get("xp"))
+        else:
+            runs.append({"first": o["t"], "last": o["t"], "n_obs": 1, "_amounts": [o.get("amount")], "_xps": [o.get("xp")]})
+    for r in runs:
+        for key, out in (("_amounts", "amount"), ("_xps", "xp")):
+            known = [v for v in r.pop(key) if v is not None]
+            r[out] = collections.Counter(known).most_common(1)[0][0] if known else None
+    return runs
+
+
+def merge_confirms(events: List[Dict[str, Any]], runs: List[Dict[str, Any]], fps: float,
+                   match: float = CONFIRM_MATCH) -> List[Dict[str, Any]]:
+    """Join feed events with popup runs.
+
+    A feed event inside (or within `match` s of) a run is `confirmed` and `source: "both"`; a feed
+    event with no popup stays `source: "feed"`. A run no feed event falls in is a kill the feed did
+    not show (a webcam over it): a new event, `source: "confirm"`, with no distance, weapon or
+    victim - `weapon: "unknown"`, `dist_m: None` - and an id `c001`... Returns every event, by time.
+    """
+    out: List[Dict[str, Any]] = []
+    used = set()
+    for e in events:
+        hit = next((i for i, r in enumerate(runs) if r["first"] - match <= e["first"] <= r["last"] + match), None)
+        e = dict(e, source="feed", confirmed=False)
+        if hit is not None:
+            used.add(hit)
+            e.update(source="both", confirmed=True, amount=runs[hit]["amount"])
+        out.append(e)
+    n = 0
+    for i, r in enumerate(runs):
+        if i in used:
+            continue
+        n += 1
+        out.append({"id": "c{0:03d}".format(n), "t": round(max(0.0, r["first"] - 0.5 / fps), 2), "first": r["first"], "last": r["last"],
+                    "dist_m": None, "n_obs": r["n_obs"], "victim_raw": "", "victim": "", "weapon": "unknown", "headshot": False,
+                    "through_cover": False, "strength": "strong" if r["n_obs"] >= 2 else "weak", "blobs": [], "icon": None,
+                    "source": "confirm", "confirmed": True, "amount": r["amount"]})
+    out.sort(key=lambda e: e["first"])
+    return out
+
