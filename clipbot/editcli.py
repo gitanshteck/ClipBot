@@ -276,6 +276,35 @@ def cmd_edit_verify(args: argparse.Namespace, settings: Settings) -> int:
     return 0 if result["ok"] else 1
 
 
+def cmd_edit_scenes(args: argparse.Namespace, settings: Settings) -> int:
+    """Where the webcam was, per zoomed clip, as the last render saw it - and a sheet to check it by eye."""
+    name = _edit_name(settings, args.spec)
+    paths = _render_paths(settings, name, args.preview)
+    if not paths["timeline"].is_file():
+        raise StageError("{0} has not been rendered yet (clipbot edit render {0}{1}); the scene map is made during a render".format(
+            name, " --preview" if args.preview else ""))
+    timeline = json.loads(paths["timeline"].read_text(encoding="utf-8"))["timeline"]
+    n = 0
+    for e in timeline["clips"]:
+        if e.get("type") != "clip" or not e.get("scene"):
+            continue
+        n += 1
+        spans = "; ".join("{0:.1f}-{1:.1f}s {2}".format(s["t0"], s["t1"],
+                          "moving" if s.get("unstable") else "no webcam" if s["cam"] is None else
+                          "webcam at x{0:.2f} y{1:.2f} {2:.2f}x{3:.2f}".format(s["cam"]["x"], s["cam"]["y"], s["cam"]["w"], s["cam"]["h"]))
+                          for s in e["scene"])
+        print("{0:<8} {1}".format(e["id"], spans))
+    if not n:
+        print("no clip in {0} zooms, so none was mapped".format(name))
+        return 0
+    if paths["video"].is_file():
+        ffmpeg = resolve_tool(settings.tool("ffmpeg"), edit_stage.FFMPEG_HINT)
+        sheets = editqa.webcam_sheet(ffmpeg, paths["video"], timeline, paths["root"] / "verify" / ("preview" if args.preview else "final"))
+        for f in sheets:
+            print("sheet: " + f)
+    return 0
+
+
 def cmd_edit_inspect(args: argparse.Namespace, settings: Settings) -> int:
     spec = editspec.load(_spec_path(settings, args.spec))
     timeline = edittimeline.compile_timeline(spec)
@@ -492,6 +521,11 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("--preview", action="store_true")
     p.add_argument("--shallow", action="store_true", help="skip the slow black/freeze/silence scans")
     p.set_defaults(func=cmd_edit_verify)
+
+    p = ed.add_parser("scenes", help="where the webcam was in each zoomed clip (from the last render) and a sheet to check it by eye")
+    p.add_argument("spec", help=SPEC_HELP)
+    p.add_argument("--preview", action="store_true")
+    p.set_defaults(func=cmd_edit_scenes)
 
     p = ed.add_parser("deliver", help="variants, thumbnails, chapters and post text for a finished render")
     p.add_argument("spec", help=SPEC_HELP)

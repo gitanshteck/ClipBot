@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import editaudio, editoverlay
+from . import editaudio, editframe, editoverlay, editscene
 from .utils import StageError, get_logger
 
 log = get_logger(__name__)
@@ -32,6 +32,7 @@ JOIN_WINDOW = 1.5     # seconds of sound either side of a join that its level is
 JUMP_LIMIT_DB = 9.0   # a louder-or-quieter step than this across a join is flagged
 STATIC_MIN = 3.0      # seconds of picture that barely moves before it is called dead
 STATIC_MOVING = 0.02  # fraction of a 160x90 frame whose pixels change by > 12 between samples (4/s)
+WEBCAM_TOL = 0.02     # the webcam box may sit this far (frame fractions) from where the camera should put it
 
 
 # --------------------------------------------------------------------------
@@ -209,6 +210,103 @@ def loudness(ffmpeg: str, path: Any) -> Optional[Dict[str, float]]:
 # --------------------------------------------------------------------------
 # artefacts
 # --------------------------------------------------------------------------
+
+
+def _webcam_times(entry: Dict[str, Any], per_clip: int) -> List[float]:
+    """Clip seconds worth looking at for the webcam: while the picture is zoomed, away from the clip's
+    edges (a join may be blending two frames there) and from a layout change (the box is in transit)."""
+    dur = entry["dur"]
+    keys = entry.get("camera") or []
+    lo, hi = 0.5, dur - 0.5
+    if hi <= lo or not any(k["zoom"] > 1.02 for k in keys):
+        return []
+    bounds = [s["t0"] for s in (entry.get("scene") or [])[1:]]
+    cand = [k["t"] for k in keys if k["zoom"] > 1.02]
+    cand += [(a["t"] + b["t"]) / 2.0 for a, b in zip(keys, keys[1:]) if min(a["zoom"], b["zoom"]) > 1.02]
+    cand = sorted({round(min(max(t, lo), hi), 3) for t in cand
+                   if editframe.camera_at(keys, min(max(t, lo), hi))[0] > 1.02})
+    cand = [t for t in cand if all(abs(t - b) > 0.2 for b in bounds)]
+    if len(cand) <= per_clip:
+        return cand
+    step = (len(cand) - 1) / float(per_clip - 1) if per_clip > 1 else 0.0
+    return [cand[int(round(i * step))] for i in range(per_clip)]
+
+
+def webcam_in_frame(ffmpeg: str, render: Any, timeline: Dict[str, Any], per_clip: int = 3) -> List[Dict[str, Any]]:
+    """For every clip that zooms over a webcam, read frames of the render and look for the box.
+
+    Where the box is expected comes from the clip's scene map and camera keys
+    (`editframe.box_in_output`); a frame passes if the same detector that mapped the scene finds
+    the box within `WEBCAM_TOL` of it - whole, not cropped by the frame edge, which it could not
+    be found as. Returns one {clip, checked, matched, misses[(second, found, expected)]} per clip.
+    """
+    out: List[Dict[str, Any]] = []
+    for e in timeline.get("clips", []):
+        if e.get("type") != "clip" or not e.get("scene"):
+            continue
+        res = {"clip": e["id"], "checked": 0, "matched": 0, "misses": []}
+        for t in _webcam_times(e, per_clip):
+            box = editscene.box_at(e["scene"], t)
+            if box is None:
+                continue
+            z, x, y = editframe.camera_at(e["camera"], t)
+            want = editframe.box_in_output(box, z, x, y)
+            T = e["start"] + t
+            try:
+                _, frame = next(editscene.read_frames(ffmpeg, render, T, T + 0.15, 30.0))
+            except StopIteration:
+                continue
+            found = editscene.find_cam_box(frame)
+            res["checked"] += 1
+            if found is not None and all(abs(found[k] - want[k]) <= WEBCAM_TOL for k in ("x", "y", "w", "h")):
+                res["matched"] += 1
+            else:
+                res["misses"].append((round(T, 2), found, {k: round(v, 3) for k, v in want.items()}))
+        if res["checked"]:
+            out.append(res)
+    return out
+
+
+def webcam_sheet(ffmpeg: str, render: Any, timeline: Dict[str, Any], out_dir: Path, cols: int = 4, thumb_w: int = 480) -> List[str]:
+    """Contact sheets of one frame per zoomed clip, each with the box where the camera should have put the
+    webcam drawn on it in magenta: if the magenta frame is not the real one, the camera is wrong. A person (or an
+    AI that cannot watch video) reads this instead of the numbers."""
+    from PIL import Image, ImageDraw
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tiles = []
+    for e in timeline.get("clips", []):
+        if e.get("type") != "clip" or not e.get("scene"):
+            continue
+        times = _webcam_times(e, 1) or [e["dur"] / 2.0]
+        t = times[0]
+        try:
+            _, frame = next(editscene.read_frames(ffmpeg, render, e["start"] + t, e["start"] + t + 0.15, 30.0, (thumb_w, thumb_w * 9 // 16)))
+        except StopIteration:
+            continue
+        im = Image.fromarray(frame)
+        d = ImageDraw.Draw(im)
+        box = editscene.box_at(e["scene"], t)
+        z, x, y = editframe.camera_at(e.get("camera") or [], t)
+        if box is not None:
+            r = editframe.box_in_output(box, z, x, y)
+            d.rectangle([r["x"] * im.width, r["y"] * im.height, (r["x"] + r["w"]) * im.width, (r["y"] + r["h"]) * im.height],
+                        outline=(255, 0, 255), width=2)
+        d.text((4, 3), "{0} {1:.1f}s zoom {2:.2f}{3}".format(e["id"], e["start"] + t, z, "" if box else " (no webcam)"), fill=(255, 220, 80))
+        tiles.append(im)
+    sheets: List[str] = []
+    per = cols * 6
+    for s0 in range(0, len(tiles), per):
+        group = tiles[s0:s0 + per]
+        tw, th = group[0].size
+        sheet = Image.new("RGB", (cols * tw, ((len(group) + cols - 1) // cols) * th), (0, 0, 0))
+        for k, im in enumerate(group):
+            sheet.paste(im, ((k % cols) * tw, (k // cols) * th))
+        f = out_dir / "webcam_{0:02d}.jpg".format(len(sheets) + 1)
+        sheet.save(f, quality=82)
+        sheets.append(str(f))
+    return sheets
 
 
 def _extract_frame(ffmpeg: str, path: Any, t: float, out_png: Path, width: int) -> bool:
@@ -480,6 +578,24 @@ def verify(ffmpeg: str, ffprobe: str, render: Any, timeline: Optional[Dict[str, 
     if timeline:
         for issue in _pacing_checks(timeline):
             add(issue["name"], issue["status"], issue["detail"])
+        if any(c.get("scene") for c in timeline.get("clips", [])):
+            sheets = webcam_sheet(ffmpeg, render, timeline, out_dir)
+            if sheets:
+                artifacts["webcam"] = sheets
+            rows = webcam_in_frame(ffmpeg, render, timeline, per_clip=3 if deep else 1)
+            lost = [r for r in rows if r["matched"] == 0]
+            part = [r for r in rows if 0 < r["matched"] < r["checked"]]
+            n_frames = sum(r["checked"] for r in rows)
+            if lost:
+                first = lost[0]["misses"][0]
+                add("webcam in frame", "fail", "{0} zoomed clip(s) do not show the webcam where the camera should put it: {1} (first: {2} s, "
+                    "found {3}, expected {4})".format(len(lost), ", ".join(r["clip"] for r in lost[:8]), first[0], first[1], first[2]))
+            elif part:
+                add("webcam in frame", "warn", "{0} of {1} sampled frame(s) miss the webcam box: {2}".format(
+                    sum(r["checked"] - r["matched"] for r in part), n_frames, ", ".join(r["clip"] for r in part[:8])))
+            elif rows:
+                add("webcam in frame", "pass", "the webcam is whole and where the camera puts it in all {0} sampled frame(s) of {1} zoomed clip(s)".format(
+                    n_frames, len(rows)))
 
     ok = not any(c["status"] == "fail" for c in checks)
     result = {"ok": ok, "checks": checks, "artifacts": artifacts, "file": str(render)}

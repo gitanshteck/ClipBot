@@ -133,11 +133,15 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     source looked like. The engine now refuses under `edit.min_source_height`; after any
     re-render **compare against the previous version** (per-clip sharpness) before
     presenting it.
-38. **A zoom must not crop the stream overlay.** Camera keys centred on (0.5, 0.5)
-    cropped the webcam and the channel logo in every clip of an episode, because the
-    overlay sits against an edge and the layout changes with the stream's scene. Until
-    framing is scene-aware, do not use a centred zoom on a clip whose overlay is not
-    centred: set `camera` focus by hand or leave the clip unzoomed.
+38. **A zoom must not crop the webcam - and check where it zooms, not where you meant it
+    to.** Every zoom in the first episode pivoted on the top-left corner (a filtergraph bug: crop
+    read `iw` back from frames that change size), which I had read as "centred, and cropping the
+    overlay"; it cropped the webcam in all 54 clips, and the layout changes with the stream's
+    scene besides. Fixed twice over: the pivot, and `edit.safe_framing` (a scene map of the webcam
+    box, camera keys whose window always holds it, overlays moved off it). `verify` now reads
+    frames of the render for it (`webcam in frame`). *Origin of the second half:* I measured
+    geometry that I assumed from the spec instead of from a rendered frame - the one number that
+    would have shown the corner pivot was where a known box landed in the output.
 39. **A clip starts where the action starts, not where the sentence does.** *Origin:*
     clips set from transcript lines began at the reaction ("mortar fell on me") instead of
     the hit, and kill windows were 6 s before / 3 s after: the kill without the fight.

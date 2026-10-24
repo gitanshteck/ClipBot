@@ -34,8 +34,17 @@ looked at *source quality*, and I shipped v2 without comparing it to v1. Added b
 
 ### 0.2 "The zoom-ins on the camera are wrong when the camera position changes with the stream scene; this needs to be dynamic"
 
+> **Correction, 2026-10-24 (phase 1b):** the cause below was incomplete, and the part I missed was
+> worse. The keys ask for a centred zoom, but the filtergraph never delivered one: `camera_chain`'s
+> crop read the scaled frame's width back as `iw`, which stays at the first (unzoomed) frame's size
+> when the frame size changes per frame, so the crop window clamped to (0, 0) and **every zoom pivoted
+> on the top-left corner**. I found it by measuring where a known webcam box landed in a rendered
+> frame (0.790 where a centred 1.09x zoom puts it at 0.740). It has been in the engine since the first
+> edit; it is fixed, pinned by a test that fails against the old expression, and the clip cache was
+> invalidated. Everything below about "centred" is what the keys said; the render did something else.
+
 **Cause (measured):** every one of the 54 clips (30 YouTube, 24 Kick) has camera keys, and **all of
-them zoom around the dead centre (0.5, 0.5)**, up to 1.09x. The stream overlay is not at the centre:
+them ask for a zoom around the dead centre (0.5, 0.5)**, up to 1.09x. The stream overlay is not at the centre:
 on the YouTube layout the facecam and the channel logo sit against the right edge, on the Kick layout
 the cam is at the left, and full-cam scenes are another layout again. A centre zoom therefore crops
 the webcam box and the logo off the frame (frame at 1:47: the cam's right border and the poster are cut
@@ -106,7 +115,7 @@ fix what you saw**, before ears and captions:
 | Phase | Scope | Done when |
 |---|---|---|
 | **1a: Quality guard** | Q1 (done), Q2, Q3, Q4, Q5. | `edit compare` between v1 and any render prints no clip under 85% sharpness; the report lists every source's resolution. |
-| **1b: Safe, dynamic framing** | S1-S5 on the YouTube and Kick layouts. | `verify` "overlay clipped" passes on Mish Mash #1 re-rendered; no punch crops a cam; scenes map matches a hand check on 20 sampled frames. |
+| **1b: Safe, dynamic framing - DONE 2026-10-24, see 0.5** | S1-S5 on the YouTube and Kick layouts. | `verify` "overlay clipped" passes on Mish Mash #1 re-rendered; no punch crops a cam; scenes map matches a hand check on 20 sampled frames. |
 | **1c: Moment engine v1** | M1-M6; rebuild the Mish Mash lineup from evidence sheets, with kill context. | Every kill chapter clip has lead-up and aftermath; coverage report per game; you review a candidate sheet, not a list of descriptions. |
 | 2 | Ears: A1 word timestamps, A2 reaction map (also feeds M3), B1 captions, H checks. | as before |
 | 3 | Review loop (E). | as before |
@@ -115,6 +124,29 @@ fix what you saw**, before ears and captions:
 | 6 | Finish and learn (B6, F upload, E5 analytics). | as before |
 
 A2 (reaction map) moves up only as far as M3 needs it; the full "ears" work stays in phase 2.
+
+### 0.5 Phase 1b result (2026-10-24)
+
+What was built, against S1-S5, and what was not.
+
+| | Status | What exists |
+|---|---|---|
+| S1 scene map | **partly** | `editscene.py` finds the webcam box (cyan-bordered rectangle) in every frame and gives per-second spans per clip, with frame-accurate layout changes and an `unstable` marker for a sliding box. Hand-checked on 54 frames from both platforms (47 boxes, 7 full-cam scenes). **Not built:** classifying menus, maps, black screens, full-cam (no box is "no webcam"), the chat panel or HUD rectangles, and a whole-stream `scenes.json`: the map is made per clip during a render. |
+| S2 safe zoom | **done** | `editframe.safe_camera`: the window always holds the box (exact with the margin; 3 px at 1080p for a box flush with the source's edge), the zoom is capped only if the box would not fit; the pan changes between two frames at a layout change. Tested over 400 random boxes and through a real render. The webcam still zooms with the picture; the pivot moves a few percent towards it. |
+| S3 targeted punch | **not built** | Focus is still the authored (0.5, 0.5) plus the safe shift. No crosshair or face locator, so a full-cam zoom still crops the chat panel and the logo. Belongs with B2 (reaction framing) in phase 4. |
+| S4 verify | **done, stronger than planned** | `webcam in frame` reads frames of the *render* and runs the detector on them (not a plan-level geometry check), plus a contact sheet with the expected box drawn in magenta. A deliberately wrong camera fails it. |
+| S5 lower-thirds | **done** | `clear_of_webcam` moves an overlay that would sit on the box (sideways, else up or down), over the whole span the box occupies while the overlay is up; a warning says what moved. |
+
+Also found and fixed on the way: the corner-pivot bug above, and a detector false positive on a
+test pattern's cyan areas (filled areas and instants are now rejected).
+
+**Done-when check, measured on the Mish Mash re-render (v3, 47 zoomed clips):** `webcam in frame` passes on
+129 of 129 sampled frames. The same check run on the v2 render against the same expectations matches 30 of
+129 and finds a mismatch in 44 of 47 clips, the box displaced by a median 3.3% of the frame width (the
+corner pivot). The detector had to be loosened twice to read boxes back out of a render (see CLAUDE.md,
+editscene); the first run of the check on v3 reported 5 misses that were the detector's, not the camera's.
+**Caveat, said plainly:** no clip in the first episode changes layout mid-clip, so the mid-clip switch path is
+proven on a synthetic video only.
 
 ## 1. Where we are
 

@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-10-21.
+> 2026-10-24.
 
 ## What this actually is, right now
 
@@ -126,7 +126,7 @@ clipbot/
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
-                     edit {new,episode,validate,inspect,render,verify,deliver,thumbnail,list,clean,taste},
+                     edit {new,episode,validate,inspect,render,scenes,verify,deliver,thumbnail,list,clean,taste},
                      killfeed {scan,list}) - the last two groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
@@ -180,6 +180,13 @@ clipbot/
                      join-click score
   editcut.py         pause-aware cut points and level matching from a
                      workspace's audio.wav: find_cut(), prepare_lineup()
+  editscene.py       the scene map: find_cam_box() finds the webcam (a cyan-bordered
+                     rectangle) in a frame, spans_from_samples() turns samples into
+                     per-second spans, scan_segment()/scene_spans() read them from a
+                     cached source segment (numpy + ffmpeg)
+  editframe.py       camera moves that know the webcam: safe_camera() adjusts a
+                     clip's keys so the window always holds it, clear_of_webcam()
+                     moves an overlay off it - pure
   editqa.py          verify(): the checks run on a render + storyboard and
                      loudness-plot artefacts
   editdeliver.py     delivery package: platform variants, thumbnails, chapters,
@@ -288,6 +295,8 @@ tests/
   test_utils.py                 resolve_tool() incl. values that can't be paths
   test_editspec.py ... test_editcli.py   the edit engine, one file per module -
                                 see "Testing"
+  test_editscene.py, test_editframe.py, test_edit_framing.py   the webcam scene map,
+                                the safe camera, and both through a real render
   test_killfeed.py              kill-feed parsing rules + icon geometry
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
@@ -1226,7 +1235,18 @@ settings, preview=False, force=False, progress=NULL_PROGRESS, master=True) ->
 report` where `spec` is a path or a dict and `report` carries `output`,
 `duration`, `frames`, `clips`, `xfade`, `measured_input`, `pacing`, `warnings`,
 `render_seconds`, `cache`. Phases: prepare (open + probe every source) ->
-segments -> clips -> assemble -> mix -> master -> mux.
+segments -> framing -> clips -> assemble -> mix -> master -> mux.
+
+- **Framing** (`edit.safe_framing`, default on): for every clip that zooms or carries an
+  overlay, `editscene.scene_spans` reads the webcam box from the clip's cached segment (4
+  samples a second, plus frame-accurate refinement wherever two neighbours disagree; cached
+  in `work/_cache/edit/scenes/`), `map_to_clip` puts the spans on the clip's own output clock
+  through its retiming, and the result is stored as `entry["scene"]` (it is in the render's
+  `*.timeline.json`, which is how `verify` and `edit scenes` find it). `editframe.safe_camera`
+  then rewrites `entry["camera"]` so the visible window always contains the box, and
+  `clear_of_webcam` moves any overlay that would sit on it (sideways, else up or down; recorded
+  in `entry["moved_overlays"]`, which is part of the clip fingerprint). A scan failure is a
+  warning, not an error: the clip renders with its camera as authored.
 
 - **Segments**: each clip's `[in - pad, out + pad]` (`edit.segment_pad`, 0.6 s)
   is cut once into `work/_cache/edit/seg/<sha>.mp4` - x264 veryfast crf 12,
@@ -1694,6 +1714,46 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   node) and a final `trim=end_frame` (it comes out a frame long). Easing
   expressions (`ease_expr`, `keyed_expr`) have a test that evaluates them against
   `editspec.ease_value`. 30 ms audio fades at every cut (`audio_edges`).
+  **`camera_chain` spells the scaled size out in the crop** instead of reading it back as
+  `iw`/`ih`: with `scale=eval=frame` the frames change size but crop's `iw`/`ih` stay at
+  the size the link was configured with (the first, unzoomed frame's), so `iw-ow` was 0
+  and *every camera move since the engine was built pivoted on the top-left corner*,
+  whatever its x/y (found 2026-10-24 by measuring where a webcam box landed in a render;
+  pinned by `TestCameraPivot`, which fails against the old expression). The clip
+  fingerprint's `"v"` was bumped to 4 so no cached clip rendered with the old pivot is reused.
+- **editscene.py** - the scene map. `find_cam_box(rgb)` looks for the facecam as a
+  rectangle of *thin* cyan lines (hue 170-215, saturated; at most 2.5% of the frame tall,
+  which rejects a filled cyan area), top and bottom of one extent, sides border-coloured for
+  most of their height unless the box runs to the frame edge, 1.2-2.2 wide, 10-60% of the
+  frame wide: 54 of 54 hand-checked frames from two platforms, 47 boxes and 7 full-cam
+  scenes with none. Two findings from reading it back out of a *render*: the long lines are
+  bridged across breaks up to 3% of the frame wide (a line over foliage came out of the encoder
+  in three pieces), and a side needs only `SIDE_SAT` 0.35 saturation (a vertical border after a
+  zoom and an encode measured 0.52 against the 0.55 the long lines need); `DETECTOR_VERSION`
+  is part of the scene cache's name. It does not look for a face, so a **full-cam scene (no box) is "no
+  webcam"**, and nothing here classifies menus, maps, black screens, chat or the HUD.
+  `spans_from_samples` drops a box seen for under 0.4 s between two stretches with none
+  (a pattern in the picture that looked like one), fills a miss under 0.3 s between equal
+  boxes, merges boxes within 0.006 of each other (a span's box is the median) and marks an
+  interval with 4+ different boxes inside one sample step as `unstable` (the box is sliding
+  between layouts). Spans are `{t0, t1, cam: {x,y,w,h}|None[, unstable]}` in frame fractions;
+  `map_to_clip` converts them to the clip's output seconds. Measured on the 54 clips of the
+  first episode: ~33 ms a frame, 88 s cold for all of them (cached afterwards), and no clip
+  changed layout mid-clip - the mid-clip switch is tested on a synthetic video only.
+- **editframe.py** - `safe_view(zoom, x, y, box)`: the pan moved the least that keeps the
+  box plus `MARGIN` (0.008) in the window, the zoom capped only if the box would not fit
+  at all; `safe_camera(keys, spans, fps)` applies it to every key, gives the zoom-1.0 keys
+  the pan of the nearest zoomed key (their pan is free, and it is the one a zoom starts
+  from), and at a layout change inserts two keys `SWITCH_GAP` (1 ms) apart so the pan
+  changes between two frames; it returns notes for a capped zoom or a zoom held through a
+  sliding box. The webcam still zooms with the picture - what moves is the pivot, a few
+  percent towards the box. `violations()` is the invariant as a check (a box with MARGIN of
+  frame around it is held exactly, a test pins that over 400 random cases; one flush with the
+  source's own edge can lose up to `TOLERANCE`, 3 px at 1080p, mid-ease).
+  `clear_of_webcam(overlay, keys, spans, canvas)` clears the union of where the webcam lands
+  over the overlay's life; `overlay_collisions` reports. Not built: a targeted punch on the
+  action or the face (S3), a scene classifier, and anything for full-cam scenes, where a
+  centred zoom still crops the chat panel and the logo.
 - **editoverlay.py** - `render(item, canvas, out_path, font, icon)` draws a
   `text`/`callout`/`image` overlay to an RGBA PNG at 2x supersampling; the PNG is
   cached by `fingerprint()` (content + font + icon mtime). A callout is an accent
@@ -1714,8 +1774,12 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   passed `frozen picture`), **level at joins** (`join_jumps`: the loudest-40% level of
   1.5 s either side of a join, flagged past 9 dB; a join touching a card is skipped - on
   a real episode 6 dB flagged 29% of joins, mostly kill clips whose gunfire is the point),
-  clicks at joins, pacing. Writes `verify.json/.md`,
-  a `loudness.png` (short-term RMS with cuts and events marked), `joins_NN.jpg`
+  clicks at joins, pacing, **webcam in frame** (`webcam_in_frame`: for each clip that zooms
+  over a webcam it reads 1-3 frames of the *render* and runs the same detector; the box
+  must be within 0.02 of where the clip's scene map and camera keys put it, whole and not
+  cropped - a deliberately wrong camera fails it, tested). Writes `verify.json/.md`,
+  `webcam_NN.jpg` (one frame per zoomed clip with the expected box drawn in magenta; also
+  `clipbot edit scenes NAME`), a `loudness.png` (short-term RMS with cuts and events marked), `joins_NN.jpg`
   contact sheets (a frame just after every join) and `moments_NN.jpg` (a frame
   `MOMENT_LAG`=0.6 s after every marker, <= 64: where callouts are up). `ok` is false only on `fail`.
 - **editdeliver.py** - `build_package(...)`: `VARIANTS` (`shorts` 1080x1920 <= 180 s,
@@ -2216,7 +2280,9 @@ Sections and the values worth knowing without opening the file:
   (`1800`, how much video is decoded to PNGs at a time).
 - **`edit`** — `segment_pad` (`0.6` s cut either side of each clip so a zoom or
   ramp never runs out of picture), `min_source_height` (`720`: the floor for a
-  YouTube source in an edit, `0` turns it off), `thumbnails` (`3`).
+  YouTube source in an edit, `0` turns it off), `safe_framing` (`true`: the webcam scene map
+  and the camera/overlay adjustments above; `false` renders the camera as authored),
+  `thumbnails` (`3`).
 - **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
   posture above).
 
@@ -2360,7 +2426,14 @@ Sections and the values worth knowing without opening the file:
   synthetic media: length, A/V sync, loudness near target, **a re-render reuses
   every clip**, one changed clip re-encodes alone, a render never overwrites
   spec.json), `test_editcli` (incl. `edit episode` end to end on a synthetic wav),
-  `test_killfeed` (synthetic OCR words, icons). The
+  `test_killfeed` (synthetic OCR words, icons), `test_editscene` (the detector on synthetic
+  frames: boxes in both real layouts and against the edge, and what must NOT be one - a cyan
+  blob, a filled area, another colour, too small, tall, two sides; the span rules; a real
+  video whose box jumps at 1.0 s found to within a frame), `test_editframe` (the window
+  geometry, the safe pan over both layouts and 400 random boxes, layout switches, overlay
+  moves), `test_edit_framing` (real renders: the box where the geometry says before and after
+  a layout jump, the control that the centred zoom cuts it off, the pivot regression, verify
+  passing and failing, an overlay moved off the webcam). The
   ffmpeg-using tests skip when no ffmpeg resolves.
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
@@ -2457,6 +2530,10 @@ Sections and the values worth knowing without opening the file:
 - **Edit positions are source seconds, durations are output seconds** (see "The
   edit engine"). Anything hanging off another clip is an anchor, never an absolute
   time. Don't convert a position to "seconds into the video".
+- **A camera move never crops the webcam, and pivots where it says.** Safe framing
+  (`edit.safe_framing`) is what keeps the box in the window; the crop in `camera_chain` must
+  never read `iw`/`ih` back from a frame whose size changes (see the editfilters bullet).
+  Change the camera chain and `tests/test_edit_framing.py` (real ffmpeg) must still pass.
 - **A render never overwrites `spec.json`** - it writes `render/<name>.<tier>.spec.json`.
   (A preview once replaced the author's spec with its own 540p output block.)
 - **Graphs go to ffmpeg with `-/filter_complex <file>`, never

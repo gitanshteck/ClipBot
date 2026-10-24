@@ -16,6 +16,27 @@
   canvas size. `edit deliver --variants` re-frames the finished master for the rest
   (a second encode; audio is copied).
 
+## The webcam: zooms must keep it, and know where it is
+
+The stream's overlay is not fixed: the facecam is a cyan-bordered box that sits top-right on
+the YouTube layout, left-middle on Kick's, bottom-left on a privacy-policy page, and is absent
+in a full-cam scene - and the stream switches between them. A camera move that ignores that
+crops it.
+
+- The engine handles it (`edit.safe_framing`, on): it finds the box in the clip's footage,
+  second by second, and moves each zoom's pivot a few percent towards it so the window always
+  holds it; it also moves a lower-third or callout that would sit on it. You do not author
+  this - leave a camera key's `x`/`y` at the default unless you mean something else.
+- **Read the warnings**: `moved the overlay ... to keep it off the webcam` (fine, but a very
+  long title is better shortened), `zoom ... limited` (the box would not fit the window),
+  `webcam is moving between layouts ... while the picture is zoomed` (the layout is switching
+  inside a zoom: shorten the zoom or cut the clip at the switch), `the webcam could not be
+  located` (the scan failed: that clip's camera is as authored - look at it).
+- **Full-cam scenes have no box**, so nothing protects the chat panel or the logo there: a
+  1.07x zoom still crops their edges. Prefer no zoom, or a deliberate one aimed at the face.
+- Look at `verify/<tier>/webcam_NN.jpg` after every render: it is the only check that is a
+  picture, and the one that would have caught a camera that pivoted on the wrong corner.
+
 ## Grade
 
 - `gamer_pop` (default for game footage): a bit more saturation and bite, no

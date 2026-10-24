@@ -48,7 +48,9 @@ data -> spec -> validate -> preview -> verify + look -> fix -> final -> verify -
 5. **Verify and look.** `clipbot edit verify <name> --preview`, then *open the
    artefacts*: `verify/preview/joins_NN.jpg` (a frame after every join - wrong crops, bad
    framing) and `moments_NN.jpg` (a frame 0.6 s after every marker: callout text,
-   names, a callout covering the action) and
+   names, a callout covering the action), `webcam_NN.jpg` (one frame per zoomed clip with
+   the box where the webcam should be drawn in magenta: the magenta frame must be the
+   real one, and nothing may be cut off by the frame edge) and
    `loudness.png` (a level plot with cuts and events marked - look for dips and
    pumping). `verify` passing is necessary, not sufficient: it cannot see taste.
 6. **Final.** `clipbot edit render <name>`. Then `edit verify <name>` again and
@@ -68,6 +70,7 @@ clipbot edit episode NAME LINEUP.json [--no-snap] [--no-match] [--force]   # a r
 clipbot edit validate|inspect NAME
 clipbot edit render NAME [--preview] [--force] [--no-master] [--preset shorts_1080x1920]
 clipbot edit verify NAME [--preview] [--shallow]
+clipbot edit scenes NAME [--preview]       # where the webcam was in each zoomed clip, + the magenta sheet
 clipbot edit deliver NAME [--variants shorts,square,portrait] [--thumbs N]
 clipbot edit thumbnail NAME --at SECONDS --text "WORDS" [--side left|right] [--zoom 1.4 --focus X,Y] [--font fnt_ID]
 clipbot edit list | clean NAME [--segments] | taste list|add|retire

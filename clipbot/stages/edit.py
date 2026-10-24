@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .. import editaudio, editfilters as ef, editoverlay, editspec, edittimeline, library, ytsegments
+from .. import editaudio, editfilters as ef, editframe, editoverlay, editscene, editspec, edittimeline, library, ytsegments
 from ..config import Settings
 from ..ffrun import run_ffmpeg
 from ..progress import NULL_PROGRESS, Progress
@@ -306,7 +306,7 @@ def _clip_fingerprint(clip: Dict[str, Any], entry: Dict[str, Any], out: Dict[str
         "out": {k: out[k] for k in ("width", "height", "fps", "fit", "crf", "x264_preset", "bframes", "gop_seconds",
                                     "sample_rate")},
         "tier": tier, "src": src_tag, "seg": seg_key, "head": head, "tail": tail,
-        "png": [p["key"] for p in pngs], "assets": asset_stamp, "v": 3,
+        "png": [p["key"] for p in pngs], "assets": asset_stamp, "moved": entry.get("moved_overlays"), "v": 4,   # 4: camera moves pivot on their pan point (was the corner)
     }, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -388,6 +388,27 @@ def render_edit(
                    "tag": s.tag, "key": path.stem}
         progress.update(n + 1)
 
+    # ---- framing: where the webcam is, second by second, so no camera move crops it
+    if settings.get("edit.safe_framing", True):
+        progress.phase("framing", total=max(1, len(real)), unit="clips")
+        for k, entry in enumerate(clips):
+            progress.check_cancelled()
+            c = spec["clips"][k]
+            keys = entry.get("camera") or []
+            seg = segs.get(k)
+            if c["type"] != "clip" or seg is None or not (entry.get("overlays") or any(key["zoom"] > 1.0 + 1e-6 for key in keys)):
+                continue
+            try:
+                spans = editscene.scene_spans(settings, ffmpeg, seg["path"], seg["key"], seg["in_rel"],
+                                              seg["in_rel"] + (c["out"] - c["in"]))
+            except (StageError, OSError) as exc:
+                warnings.append("{0}: the webcam could not be located ({1}); its camera moves are not adjusted".format(c["id"], exc))
+                continue
+            entry["scene"] = editscene.map_to_clip(spans, c["in"] - seg["in_rel"], entry["pieces"], c["in"], c["out"])
+            entry["camera"], notes = editframe.safe_camera(keys, entry["scene"], fps)
+            warnings.extend("{0}: {1}".format(c["id"], note) for note in notes)
+            progress.update(k + 1, label=c["id"])
+
     # ---- clips
     progress.phase("clips", total=max(1, len(clips)), unit="clips")
     clip_files: List[Dict[str, Any]] = []
@@ -397,6 +418,26 @@ def render_edit(
         head = entry["transition_in"] if entry["index"] > 0 else None
         nxt = clips[n + 1]["transition_in"] if n + 1 < len(clips) else None
         pngs = _overlay_pngs(entry, c, out, work / "overlays", font, styles, assets)
+        if entry.get("scene"):
+            # an overlay that would sit on the webcam is moved clear of it (sideways, else up or down); the
+            # position goes into the clip's fingerprint, since the overlay's own times and PNG do not change
+            canvas = (out["width"], out["height"])
+            moved = []
+            for k, (o, p) in enumerate(zip(entry.get("overlays") or [], pngs)):
+                sized = dict(o, w=p["w"], h=p["h"], label=str(o.get("text") or o.get("kind", "")))
+                move = editframe.clear_of_webcam(sized, entry.get("camera") or [], entry["scene"], canvas)
+                if move is None:
+                    warnings.append("{0}: the overlay {1!r} covers the webcam from {2:.1f} to {3:.1f} s and no position clears it".format(
+                        c["id"], sized["label"], o["t0"], o["t1"]))
+                elif move["dx"] or move["dy"]:
+                    o["x"] = round(o["x"] + move["dx"] / canvas[0], 4)
+                    o["y"] = round(o["y"] + move["dy"] / canvas[1], 4)
+                    moved.append([k, o["x"], o["y"]])
+                    warnings.append("{0}: moved the overlay {1!r} {2:.0f} px {3} to keep it off the webcam".format(
+                        c["id"], sized["label"], abs(move["dx"] or move["dy"]),
+                        ("left" if move["dx"] < 0 else "right") if move["dx"] else ("up" if move["dy"] < 0 else "down")))
+            if moved:
+                entry["moved_overlays"] = moved
         seg = segs.get(n)
         asset_stamp = "|".join(sorted("{0}:{1}".format(e.get("asset", ""), assets.get(e.get("asset"), {}).get("path", ""))
                                       for e in (c.get("fx") or []) if e.get("asset")))

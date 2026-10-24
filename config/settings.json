@@ -212,6 +212,8 @@
     "segment_pad": 0.6,
     "_comment_min_source_height": "Refuse (after trying other YouTube player clients) to cut an edit from a YouTube source that only resolves below this many pixels of height. 0 turns the floor off. A flaky client once answered 640x360 and a whole chapter came out blurry.",
     "min_source_height": 720,
+    "_comment_safe_framing": "Find the stream's webcam box in each clip that zooms or carries an overlay, keep it inside every camera move's window and move overlays off it. false renders the camera as authored.",
+    "safe_framing": true,
     "_comment_thumbs": "Thumbnail candidates per delivery package.",
     "thumbnails": 3
   },

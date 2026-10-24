@@ -268,13 +268,18 @@ def camera_chain(g: Graph, lin: str, keys: List[Dict[str, Any]], size: Tuple[int
     cy = keyed_expr([(k["t"], k["y"], k["ease"]) for k in ks])
     if all(abs(k["zoom"] - 1.0) < 1e-6 for k in ks):
         return lin
+    # The scaled size is spelled out in the crop instead of read back as `iw`/`ih`: with
+    # eval=frame the frames change size, but crop's iw/ih stay at the size the link was
+    # configured with - the first frame's, which is the unzoomed one - so `iw-ow` was 0, the
+    # window clamped to (0, 0) and every zoom pivoted on the top-left corner, whatever its x/y.
+    sw = "trunc({0}*({1})/2)*2".format(W, zoom)
+    sh = "trunc({0}*({1})/2)*2".format(H, zoom)
     return g.chain(
         lin,
         "scale=w={w}:h={h}:eval=frame:flags=bicubic,crop={W}:{H}:x={x}:y={y}".format(
-            w=q("trunc({0}*({1})/2)*2".format(W, zoom)), h=q("trunc({0}*({1})/2)*2".format(H, zoom)),
-            W=W, H=H,
-            x=q("min(max(({0})*iw-ow/2,0),iw-ow)".format(cx)),
-            y=q("min(max(({0})*ih-oh/2,0),ih-oh)".format(cy))),
+            w=q(sw), h=q(sh), W=W, H=H,
+            x=q("min(max(({0})*({2})-{1}/2,0),({2})-{1})".format(cx, W, sw)),
+            y=q("min(max(({0})*({2})-{1}/2,0),({2})-{1})".format(cy, H, sh))),
         "cm")
 
 
