@@ -537,7 +537,7 @@ class TestExpandMoments(unittest.TestCase):
         self.assertEqual((c["in"], c["out"]), (3005.6, 3062.0))
         self.assertEqual([k["t"] for k in c["kills"]], [3020.0, 3055.0])
         self.assertEqual(c["kills"][0]["src"], "v1")
-        self.assertFalse(c["snap"])
+        self.assertEqual(c["snap"], "words")
         self.assertEqual(c["moment"], "m004")
 
     def test_the_icon_comes_from_the_kill_feed_when_it_has_one(self):

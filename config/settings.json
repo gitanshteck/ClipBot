@@ -216,6 +216,20 @@
     "merge_gap": 16.0
   },
 
+  "words": {
+    "_comment": "Word-level timing for the edit engine (`clipbot edit words`): only the windows an edit uses are transcribed again, with OpenAI whisper-1 (~$0.006/min, cached per workspace). Deliberately NOT transcribe.language: that pins Hindi, and on English speech inside a Hinglish stream Hindi-forced returned Devanagari nonsense (and 'Like share and subscribe' over loud game audio). `language` null = auto-detect; `prompt` is a short Roman-script Hinglish line that makes the recogniser write Hindi the way people type it. An empty prompt sends none. Changing any of these refetches the windows.",
+    "model": "whisper-1",
+    "language": null,
+    "prompt": "Yaar bhai, wait wait, ye kya ho gaya? Chal na, main reposition karta hoon. Oh my god, kya baat hai!"
+  },
+
+  "captions": {
+    "_comment": "On-screen Hinglish subtitles for an edit (`clipbot edit captions`): the model writes short chunks over a clip's recognised words and rates each with `conf`; a cue under `min_confidence` is kept in captions.json with off: true and not drawn - a wrong subtitle is worse than none. `concurrency` is parallel model calls (one per clip).",
+    "model": "claude-sonnet-5-5",
+    "min_confidence": 0.6,
+    "concurrency": 4
+  },
+
   "edit": {
     "_comment": "The edit engine (`clipbot edit ...`): multi-source timelines with retiming, camera moves, grade, overlays, transitions, music/SFX and loudness mastering. Output goes to work/_edits/<name>/; source segments are cached in work/_cache/edit/ and shared between edits.",
     "_comment_segment_pad": "Seconds of extra footage cut either side of each clip's [in, out] so a retimed or zoomed move never runs out of picture at its edges.",

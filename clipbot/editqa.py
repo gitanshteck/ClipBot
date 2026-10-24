@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import editaudio, editframe, editoverlay, editscene
+from . import editaudio, editframe, editoverlay, editscene, editwords
 from .utils import StageError, get_logger
 
 log = get_logger(__name__)
@@ -252,16 +252,32 @@ def webcam_in_frame(ffmpeg: str, render: Any, timeline: Dict[str, Any], per_clip
             z, x, y = editframe.camera_at(e["camera"], t)
             want = editframe.box_in_output(box, z, x, y)
             T = e["start"] + t
-            try:
-                _, frame = next(editscene.read_frames(ffmpeg, render, T, T + 0.15, 30.0))
-            except StopIteration:
+            # The webcam's border is a one-pixel line, which a low-quality encode (the 540p preview tier) smears on
+            # some frames and not the next: 14% of single frames of a preview came back "no box" with the webcam
+            # plainly on screen, and a short clip has only one sample. So a sample is judged on the few frames of
+            # its 0.15 s, each against where the camera has the box *at that frame*; a box found in the wrong
+            # place on every frame is still a miss, which is the failure this exists to catch.
+            frames = 0
+            hit = False
+            first_found = None
+            for k, (_, frame) in enumerate(editscene.read_frames(ffmpeg, render, T, T + 0.15, 30.0)):
+                frames += 1
+                found = editscene.find_cam_box(frame)
+                if found is None:
+                    continue
+                first_found = first_found or found
+                zk, xk, yk = editframe.camera_at(e["camera"], t + k / 30.0)
+                wk = editframe.box_in_output(box, zk, xk, yk)
+                if all(abs(found[a] - wk[a]) <= WEBCAM_TOL for a in ("x", "y", "w", "h")):
+                    hit = True
+                    break
+            if not frames:
                 continue
-            found = editscene.find_cam_box(frame)
             res["checked"] += 1
-            if found is not None and all(abs(found[k] - want[k]) <= WEBCAM_TOL for k in ("x", "y", "w", "h")):
+            if hit:
                 res["matched"] += 1
             else:
-                res["misses"].append((round(T, 2), found, {k: round(v, 3) for k, v in want.items()}))
+                res["misses"].append((round(T, 2), first_found, {k: round(v, 3) for k, v in want.items()}))
         if res["checked"]:
             out.append(res)
     return out
@@ -307,6 +323,79 @@ def webcam_sheet(ffmpeg: str, render: Any, timeline: Dict[str, Any], out_dir: Pa
         sheet.save(f, quality=82)
         sheets.append(str(f))
     return sheets
+
+
+def cuts_inside_words(timeline: Dict[str, Any], words_by_clip: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every clip edge that lands inside a spoken word, from the word timing `clipbot edit words` stored:
+    `{clip, kind, t, word, fix}` with `fix` the move that would clear it (None when no clean place is within 0.6 s).
+    A clip without words is not judged - no words is "unknown", not "fine"."""
+    out: List[Dict[str, Any]] = []
+    for e in timeline.get("clips", []):
+        words = (words_by_clip or {}).get(e["id"])
+        if e.get("type") != "clip" or not words:
+            continue
+        for kind, key in (("in", "in"), ("out", "out")):
+            t = e.get(key)
+            if t is None:
+                continue
+            r = editwords.word_snap(words, float(t), kind)
+            if r["inside"]:
+                out.append({"clip": e["id"], "kind": kind, "t": round(float(t), 2), "word": r["inside"],
+                            "fix": r["moved"] if r["snapped"] else None})
+    return out
+
+
+def strong_language(timeline: Dict[str, Any], words_by_clip: Dict[str, Any], first: float = 30.0) -> List[Dict[str, Any]]:
+    """Strong words in the finished video, with where they are heard (output seconds): `{t, clip, word}`, by time.
+    Read from the words stored for each clip (what was *said*, whatever the captions show) and mapped through each clip's
+    retiming. The first `first` seconds matter most - YouTube judges a video's advertiser-friendliness by its opening."""
+    from . import edittimeline
+
+    hits: List[Dict[str, Any]] = []
+    for e in timeline.get("clips", []):
+        words = (words_by_clip or {}).get(e["id"])
+        if e.get("type") != "clip" or not words:
+            continue
+        lo, hi = float(e.get("in", 0.0)), float(e.get("out", 0.0))
+        for w in words:
+            if w["e"] < lo or w["s"] > hi or not editwords.strong_words(w["w"]):
+                continue
+            hits.append({"t": round(e["start"] + edittimeline.src_to_out(e["pieces"], max(w["s"], lo)), 2), "clip": e["id"], "word": w["w"]})
+    return sorted(hits, key=lambda h: h["t"])
+
+
+def captions_on_screen(ffmpeg: str, render: Any, timeline: Dict[str, Any], per_clip: int = 1) -> List[Dict[str, Any]]:
+    """For every clip that was given captions, look at the middle of its first cue(s) in the *render*: is there text
+    - near-white or the highlight colour - in the box the captions are drawn in? Returns one
+    {clip, checked, drawn, small} per clip; `small` is True when the style's size is under 4.5% of the frame (hard to read
+    on a phone)."""
+    out: List[Dict[str, Any]] = []
+    for e in timeline.get("clips", []):
+        cap = e.get("captions")
+        if e.get("type") != "clip" or not cap or not cap.get("cues"):
+            continue
+        st = cap.get("style") or {}
+        x, y, wdt, size = st.get("x", 0.42), st.get("y", 0.915), st.get("width", 0.52), st.get("size", 0.058)
+        box = (x - wdt / 2.0, y - size * 1.9, x + wdt / 2.0, y + 0.012)       # one line, with room for the outline
+        hi = st.get("highlight", "#FFB300").lstrip("#")
+        hi_rgb = tuple(int(hi[i:i + 2], 16) for i in (0, 2, 4))
+        res = {"clip": e["id"], "checked": 0, "drawn": 0, "small": size < 0.045}
+        for cue in cap["cues"][:per_clip]:
+            T = e["start"] + (cue["s"] + cue["e"]) / 2.0
+            try:
+                _, frame = next(editscene.read_frames(ffmpeg, render, T, T + 0.15, 30.0))
+            except StopIteration:
+                continue
+            h, w = frame.shape[:2]
+            region = frame[int(box[1] * h):int(box[3] * h), int(box[0] * w):int(box[2] * w)].astype(int)
+            white = region.min(axis=2) > 225
+            near = (abs(region - hi_rgb).sum(axis=2) < 90)
+            res["checked"] += 1
+            if int(white.sum() + near.sum()) >= 150:
+                res["drawn"] += 1
+        if res["checked"]:
+            out.append(res)
+    return out
 
 
 def _extract_frame(ffmpeg: str, path: Any, t: float, out_png: Path, width: int) -> bool:
@@ -424,7 +513,7 @@ def waveform_png(samples, sample_rate: int, out_png: Path, markers: Sequence[Tup
 
 
 def verify(ffmpeg: str, ffprobe: str, render: Any, timeline: Optional[Dict[str, Any]], master: Optional[Dict[str, Any]],
-          out_dir: Path, deep: bool = True) -> Dict[str, Any]:
+          out_dir: Path, deep: bool = True, words: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run every check on a rendered file and write the inspection artefacts.
 
     Returns {ok, checks[{name, status, detail}], artifacts{...}}. Status is `pass`,
@@ -578,6 +667,33 @@ def verify(ffmpeg: str, ffprobe: str, render: Any, timeline: Optional[Dict[str, 
     if timeline:
         for issue in _pacing_checks(timeline):
             add(issue["name"], issue["status"], issue["detail"])
+        if words:
+            bad = cuts_inside_words(timeline, words)
+            if bad:
+                add("cuts inside words", "warn", "{0} clip edge(s) split a word, first {1} {2} at {3:.2f} s ({4}); "
+                    "`clipbot edit episode --words` moves them".format(
+                        len(bad), bad[0]["clip"], bad[0]["kind"], bad[0]["t"], "would move {0:+.2f} s".format(bad[0]["fix"])
+                        if bad[0]["fix"] is not None else "no clean place within 0.6 s"))
+            else:
+                add("cuts inside words", "pass", "no clip edge splits a word ({0} clip(s) with word timing)".format(len(words)))
+            hits = strong_language(timeline, words)
+            early = [h for h in hits if h["t"] < 30.0]
+            if early:
+                add("strong language", "warn", "{0} strong word(s) in the first 30 s, first at {1:.1f} s ({2}); {3} in all - "
+                    "an advertiser-friendly opening is the thing YouTube checks first".format(len(early), early[0]["t"], early[0]["clip"], len(hits)))
+            else:
+                add("strong language", "pass", "none in the first 30 s ({0} later in the video)".format(len(hits)))
+        if any((c.get("captions") or {}).get("cues") for c in timeline.get("clips", [])):
+            rows = captions_on_screen(ffmpeg, render, timeline, per_clip=2 if deep else 1)
+            missing = [r for r in rows if r["drawn"] == 0]
+            small = [r for r in rows if r["small"]]
+            if missing:
+                add("captions on screen", "fail", "{0} captioned clip(s) show no caption text where it should be: {1}".format(
+                    len(missing), ", ".join(r["clip"] for r in missing[:8])))
+            elif small:
+                add("captions on screen", "warn", "captions are drawn in {0} clip(s) but under 4.5% of the frame tall: hard to read on a phone".format(len(small)))
+            elif rows:
+                add("captions on screen", "pass", "caption text found in the render for all {0} captioned clip(s)".format(len(rows)))
         if any(c.get("scene") for c in timeline.get("clips", [])):
             sheets = webcam_sheet(ffmpeg, render, timeline, out_dir)
             if sheets:

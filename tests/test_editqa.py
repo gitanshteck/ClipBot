@@ -10,10 +10,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
-from clipbot import editaudio, editqa as Q, editspec as E, edittimeline as T
+from clipbot import editaudio, editframe, editqa as Q, editscene, editspec as E, edittimeline as T
 
 
 def _tools():
@@ -245,6 +246,115 @@ class TestJoinJumps(unittest.TestCase):
         tl = self.timeline(("a", "clip", 4), ("b", "clip", 4), ("c", "clip", 4))
         jumps = Q.join_jumps(samples, self.RATE, tl)
         self.assertEqual([j["clip"] for j in jumps], ["c", "b"])
+
+
+def _timeline(*clips):
+    """A minimal compiled timeline: clips are (id, start, in, out)."""
+    ents = []
+    for cid, start, a, b in clips:
+        spec = E.normalize({"name": "t", "sources": {"v": {"file": "D:/x.mp4"}}, "clips": [{"id": cid, "src": "v", "in": a, "out": b}]})
+        pieces = T.build_pieces(spec["clips"][0])
+        ents.append({"id": cid, "type": "clip", "start": start, "in": a, "out": b, "dur": b - a, "pieces": pieces})
+    return {"clips": ents}
+
+
+def _w(text, s, e):
+    return {"w": text, "s": s, "e": e, "vs": s, "ve": e}
+
+
+class TestWordChecks(unittest.TestCase):
+    words = {"a": [_w("main", 10.0, 10.4), _w("nahi", 10.5, 10.9), _w("chudi", 11.0, 11.6)],
+             "b": [_w("fuck", 50.0, 50.4), _w("it", 50.5, 50.7)]}
+
+    def test_an_edge_inside_a_word_is_reported_with_the_move_that_would_clear_it(self):
+        tl = _timeline(("a", 0.0, 10.7, 11.3))
+        bad = Q.cuts_inside_words(tl, self.words)
+        self.assertEqual([(b["kind"], b["word"]) for b in bad], [("in", "nahi"), ("out", "chudi")])
+        self.assertLess(bad[0]["fix"], 0)
+        self.assertGreater(bad[1]["fix"], 0)
+
+    def test_edges_in_gaps_are_clean_and_a_clip_without_words_is_not_judged(self):
+        tl = _timeline(("a", 0.0, 10.45, 10.95), ("z", 20.0, 5.0, 8.0))
+        self.assertEqual(Q.cuts_inside_words(tl, self.words), [])
+
+    def test_strong_words_are_found_where_they_are_heard_in_the_finished_video(self):
+        tl = _timeline(("a", 0.0, 10.0, 12.0), ("b", 100.0, 49.0, 52.0))
+        hits = Q.strong_language(tl, self.words)
+        self.assertEqual([(h["clip"], h["word"]) for h in hits], [("b", "fuck")])
+        self.assertAlmostEqual(hits[0]["t"], 101.0, places=1)              # clip b starts at 100 s, "fuck" is 1 s into it
+
+    def test_a_strong_word_outside_the_clips_window_is_not_in_the_video(self):
+        tl = _timeline(("b", 0.0, 51.0, 53.0))
+        self.assertEqual(Q.strong_language(tl, self.words), [])
+
+    def test_a_strong_word_early_is_found_early(self):
+        tl = _timeline(("b", 5.0, 49.0, 52.0))
+        self.assertLess(Q.strong_language(tl, self.words)[0]["t"], 30.0)
+
+    def test_strong_language_follows_the_retiming(self):
+        spec = E.normalize({"name": "t", "sources": {"v": {"file": "D:/x.mp4"}}, "clips": [
+            {"id": "b", "src": "v", "in": 48.0, "out": 53.0,
+             "speed": [{"at": 49.0, "rate": 1.0}, {"at": 49.5, "rate": 0.5}, {"at": 51.0, "rate": 0.5}, {"at": 51.5, "rate": 1.0}]}]})
+        tl = {"clips": [{"id": "b", "type": "clip", "start": 0.0, "in": 48.0, "out": 53.0, "dur": 7.0, "pieces": T.build_pieces(spec["clips"][0])}]}
+        plain = Q.strong_language(_timeline(("b", 0.0, 48.0, 53.0)), self.words)[0]["t"]
+        slowed = Q.strong_language(tl, self.words)[0]["t"]
+        self.assertGreater(slowed, plain)                                  # the slow-motion before it pushes it later in the video
+
+
+class TestWebcamSampleFrames(unittest.TestCase):
+    """`webcam_in_frame` judges a sample on the few frames of its 0.15 s: a smeared border on one frame of a low-quality
+    encode is not a missing webcam, but a box in the wrong place on every frame still is."""
+
+    BOX = {"t0": 0.0, "t1": 3.0, "cam": {"x": 0.70, "y": 0.10, "w": 0.28, "h": 0.28}}
+
+    def entry(self):
+        return {"id": "c1", "type": "clip", "start": 10.0, "dur": 3.0, "scene": [dict(self.BOX)],
+                "camera": [{"t": 0.0, "zoom": 1.0, "x": 0.5, "y": 0.5, "ease": "linear"}, {"t": 1.0, "zoom": 1.3, "x": 0.5, "y": 0.5, "ease": "linear"},
+                           {"t": 3.0, "zoom": 1.3, "x": 0.5, "y": 0.5, "ease": "linear"}]}
+
+    def run_with(self, finds):
+        """`finds` is the detector's answer per frame: None, 'right' or 'wrong'."""
+        entry = self.entry()
+        z, x, y = editframe.camera_at(entry["camera"], 1.5)
+        right = editframe.box_in_output(editscene.box_at(entry["scene"], 1.5), z, x, y)
+        wrong = dict(right, x=right["x"] + 0.2)
+        answers = iter(finds)
+        frames = [(0.0, object()) for _ in finds]
+        with mock.patch.object(editscene, "read_frames", return_value=iter(frames)), \
+                mock.patch.object(editscene, "find_cam_box", side_effect=lambda f: {"right": right, "wrong": wrong, None: None}[next(answers)]), \
+                mock.patch.object(Q, "_webcam_times", return_value=[1.5]):
+            return Q.webcam_in_frame("ffmpeg", "x.mp4", {"clips": [entry]}, per_clip=1)
+
+    def test_a_box_smeared_on_the_first_frames_but_found_on_a_later_one_is_a_match(self):
+        rows = self.run_with([None, None, "right"])
+        self.assertEqual((rows[0]["checked"], rows[0]["matched"]), (1, 1))
+
+    def test_a_box_that_is_never_found_is_a_miss(self):
+        rows = self.run_with([None, None, None, None])
+        self.assertEqual((rows[0]["checked"], rows[0]["matched"]), (1, 0))
+
+    def test_a_box_in_the_wrong_place_on_every_frame_is_a_miss_and_says_where_it_was_found(self):
+        rows = self.run_with(["wrong", "wrong", "wrong"])
+        self.assertEqual((rows[0]["checked"], rows[0]["matched"]), (1, 0))
+        self.assertIsNotNone(rows[0]["misses"][0][1])
+
+    def test_a_clip_with_no_frames_to_read_is_not_counted(self):
+        self.assertEqual(self.run_with([]), [])
+
+    def test_each_frame_is_judged_against_where_the_camera_is_at_that_frame(self):
+        entry = self.entry()
+        entry["camera"] = [{"t": 0.0, "zoom": 1.1, "x": 0.5, "y": 0.5, "ease": "linear"}, {"t": 1.5, "zoom": 1.1, "x": 0.5, "y": 0.5, "ease": "linear"},
+                           {"t": 1.7, "zoom": 1.9, "x": 0.5, "y": 0.5, "ease": "linear"}, {"t": 3.0, "zoom": 1.9, "x": 0.5, "y": 0.5, "ease": "linear"}]
+        cam = editscene.box_at(entry["scene"], 1.5)
+        early = editframe.box_in_output(cam, *editframe.camera_at(entry["camera"], 1.5))
+        late = editframe.box_in_output(cam, *editframe.camera_at(entry["camera"], 1.5 + 3 / 30.0))
+        self.assertGreater(abs(late["x"] - early["x"]), Q.WEBCAM_TOL)          # the zoom really moves the box in 3 frames
+        answers = iter([None, None, None, late])
+        with mock.patch.object(editscene, "read_frames", return_value=iter([(0.0, object())] * 4)), \
+                mock.patch.object(editscene, "find_cam_box", side_effect=lambda f: next(answers)), \
+                mock.patch.object(Q, "_webcam_times", return_value=[1.5]):
+            rows = Q.webcam_in_frame("ffmpeg", "x.mp4", {"clips": [entry]}, per_clip=1)
+        self.assertEqual((rows[0]["checked"], rows[0]["matched"]), (1, 1))
 
 
 if __name__ == "__main__":

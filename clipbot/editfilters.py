@@ -284,6 +284,26 @@ def camera_chain(g: Graph, lin: str, keys: List[Dict[str, Any]], size: Tuple[int
 
 
 # --------------------------------------------------------------------------
+# video: captions
+# --------------------------------------------------------------------------
+
+
+def filter_path(path: Any) -> str:
+    """A file path for use inside a single-quoted filter option on Windows: forward slashes, and the drive
+    colon escaped (`D\:/dir/x.ass`). Found by trying it: the unquoted form is a parse error in ffmpeg 8."""
+    return str(path).replace("\\", "/").replace(":", "\:")
+
+
+def captions_chain(g: Graph, lin: str, ass_path: Any, fonts_dir: Optional[Any] = None) -> str:
+    """Burn an .ass file into the picture with libass. Cue times in the file are this clip's own seconds (the clip's
+    graph starts at t=0), `fontsdir` is where libass looks for the brand font by family name."""
+    opt = "filename={0}".format(q(filter_path(ass_path)))
+    if fonts_dir:
+        opt += ":fontsdir={0}".format(q(filter_path(fonts_dir)))
+    return g.chain(lin, "ass=" + opt, "cap")
+
+
+# --------------------------------------------------------------------------
 # video: overlays
 # --------------------------------------------------------------------------
 
@@ -848,6 +868,9 @@ def build_clip_graph(
         chains, vl = fxspec.build_overlay_chains(plan, vl, W, H)
         for line in chains:
             g.add(line)
+    if clip["type"] == "clip" and entry.get("caption_ass"):
+        vl = captions_chain(g, vl, entry["caption_ass"], entry.get("caption_fonts"))
+    if plan:
         chains, vl = fxspec.build_tail_chains(plan, vl)
         for line in chains:
             g.add(line)

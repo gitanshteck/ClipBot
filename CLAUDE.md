@@ -126,7 +126,7 @@ clipbot/
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
-                     edit {new,episode,validate,inspect,render,scenes,verify,deliver,thumbnail,list,clean,taste},
+                     edit {new,episode,validate,inspect,render,scenes,words,captions,verify,deliver,thumbnail,list,clean,taste},
                      killfeed {scan,list}, moments {build,list,show,sheet,pool,coverage}) - the last three groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
@@ -190,6 +190,13 @@ clipbot/
   editmoment.py      the moment engine: arcs_from_kills() (lead-up + kills +
                      aftermath), score_arc(), coverage(), evidence_sheet() (a contact
                      sheet per arc); writes <workspace>/moments.json
+  editwords.py       word-level timing for the edit engine: fetch_window()/words_for()
+                     (whisper-1 on only the windows an edit uses, cached per workspace
+                     under work/_cache/edit/words/), repair(), voiced_spans(),
+                     inside_word(), word_snap(), strong_words()
+  editcaptions.py    on-screen Hinglish subtitles: generate() (one model call per clip
+                     -> chunks with a confidence), cues_from_chunks(), to_output(),
+                     ass_document() (libass karaoke); the artefact is captions.json
   editqa.py          verify(): the checks run on a render + storyboard and
                      loudness-plot artefacts
   editdeliver.py     delivery package: platform variants, thumbnails, chapters,
@@ -1257,7 +1264,7 @@ settings, preview=False, force=False, progress=NULL_PROGRESS, master=True) ->
 report` where `spec` is a path or a dict and `report` carries `output`,
 `duration`, `frames`, `clips`, `xfade`, `measured_input`, `pacing`, `warnings`,
 `render_seconds`, `cache`. Phases: prepare (open + probe every source) ->
-segments -> framing -> clips -> assemble -> mix -> master -> mux.
+segments -> framing -> captions -> clips -> assemble -> mix -> master -> mux.
 
 - **Framing** (`edit.safe_framing`, default on): for every clip that zooms or carries an
   overlay, `editscene.scene_spans` reads the webcam box from the clip's cached segment (4
@@ -1269,6 +1276,13 @@ segments -> framing -> clips -> assemble -> mix -> master -> mux.
   `clear_of_webcam` moves any overlay that would sit on it (sideways, else up or down; recorded
   in `entry["moved_overlays"]`, which is part of the clip fingerprint). A scan failure is a
   warning, not an error: the clip renders with its camera as authored.
+- **Captions** (spec has a `captions` block with `enabled`): for each clip with cues in the
+  author's `captions.json` (and not `captions: false`, and without a `kill` marker unless
+  `captions: true`), the cues are put on the clip's output clock (`editcaptions.to_output`) and
+  one `.ass` per clip is written to `cache/<final|preview>/filters/<id>.ass`; `entry["caption_ass"]`,
+  `["caption_fonts"]` and `["captions"]` (also in the timeline, which `verify` reads) carry it
+  to `editfilters.captions_chain`. The brand font comes from `_caption_font()`. A missing
+  `captions.json` is a warning naming the two commands to run, not an error.
 
 - **Segments**: each clip's `[in - pad, out + pad]` (`edit.segment_pad`, 0.6 s)
   is cut once into `work/_cache/edit/seg/<sha>.mp4` - x264 veryfast crf 12,
@@ -1302,7 +1316,7 @@ segments -> framing -> clips -> assemble -> mix -> master -> mux.
   removed in ffmpeg 8** and a 40-piece graph is far over any argv limit.
 - Layout of `work/_edits/<name>/`: `spec.json` (the author's - **a render never
   overwrites it**; `edit new --force` keeps the old as `spec.previous.json`),
-  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles; an episode's holds its own `titles`, `fact_lines`, `credits`, `hashtags` and `notes` instead), `lineup.json` + `cuts.json` (an episode: the lineup *after* `edit episode` snapped its cuts, and where each one moved), `render/<name>.mp4`,
+  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles; an episode's holds its own `titles`, `fact_lines`, `credits`, `hashtags` and `notes` instead), `lineup.json` + `cuts.json` (an episode: the lineup *after* `edit episode` snapped its cuts, and where each one moved), `words.json` (every clip's words, from `edit words`; read by `verify`), `captions.json` (the author's subtitles, from `edit captions`), `render/<name>.mp4`,
   `render/<name>.preview.mp4`, `render/<name>.<final|preview>.spec.json` (what that
   render used - a preview's 540p output block lives here, not in spec.json) and
   `.timeline.json`, `verify/<final|preview>/`, `deliver/`, `cache/`. Underscore-
@@ -1707,7 +1721,14 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   `to_json` output loads back unchanged (a test pins it; the output block's
   `faststart`/`preview` keys are accepted and ignored for that reason). Clips are
   `type: clip` (`src,in,out,speed,interp,freezes,camera,grade,fx,overlays,markers,
-  audio,framing,transition_in,tags`) or `type: card` (`dur,bg,overlays`). `fx`
+  audio,framing,transition_in,tags,captions`) or `type: card` (`dur,bg,overlays`). A
+  clip's `captions` is a bool, written only when given (`false`: none here; `true`: even over
+  a kill callout). The spec-level `captions` block (`CAPTION_DEFAULTS`: `enabled, font, size,
+  color, highlight, outline, x, y, width, karaoke, censor`) is emitted only when the spec has
+  one, so a spec without captions round-trips unchanged; its text comes from
+  `work/_edits/<name>/captions.json` (see "Captions"), and `x`/`width` default to a box left
+  of centre (0.42, 0.52) because the stream's chat panel sits bottom-right and its minimap
+  bottom-left. `fx`
   reuses fxspec's effect shapes but only `FX_ALLOWED=(punch, shake, flash, sfx,
   sticker, text)`; ids are auto-assigned. Limits: 400 clips, 12 speed keys, **24
   camera keys** (raised from 12: a four-kill run needs ~16), 24 overlays, 24
@@ -1797,9 +1818,22 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   1.5 s either side of a join, flagged past 9 dB; a join touching a card is skipped - on
   a real episode 6 dB flagged 29% of joins, mostly kill clips whose gunfire is the point),
   clicks at joins, pacing, **webcam in frame** (`webcam_in_frame`: for each clip that zooms
-  over a webcam it reads 1-3 frames of the *render* and runs the same detector; the box
+  over a webcam it reads 1-3 samples of the *render* and runs the same detector; the box
   must be within 0.02 of where the clip's scene map and camera keys put it, whole and not
-  cropped - a deliberately wrong camera fails it, tested). Writes `verify.json/.md`,
+  cropped - a deliberately wrong camera fails it, tested. A sample is judged on the frames of
+  its 0.15 s, each against where the camera is *at that frame*: the border is a 1-px line that
+  a 540p preview encode smears on some frames - 14% of single frames of a preview found no box
+  with the webcam plainly on screen, and two short clips (one sample each) failed `verify` for
+  it; trying the frames of the sample took that to 5%. A box found in the wrong place on every
+  frame is still a miss. Preview-tier misses are warnings, the final render is the check), and
+  three that need the author's
+  `words.json` / `captions.json` (`verify(..., words=None)`; skipped when absent): **cuts
+  inside words** (`cuts_inside_words`: a clip edge where `editwords.word_snap` finds the
+  signal up inside a word; `warn`), **strong language** (`strong_language`: strong words in
+  the first 30 s of the *output*, from the word timing; `warn`) and **captions on screen**
+  (`captions_on_screen`: reads a render frame in the middle of each captioned clip's first
+  cue and looks for near-white or highlight-coloured pixels in the caption box; fails where
+  text should be and is not, warns when the size is under 4.5% of the frame). Writes `verify.json/.md`,
   `webcam_NN.jpg` (one frame per zoomed clip with the expected box drawn in magenta; also
   `clipbot edit scenes NAME`), a `loudness.png` (short-term RMS with cuts and events marked), `joins_NN.jpg`
   contact sheets (a frame just after every join) and `moments_NN.jpg` (a frame
@@ -1877,6 +1911,54 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   ~0.1-0.3 s, but a snap computed on one context window can differ from another's, and
   one landed 0.5 s inside the last word of a line - so a cut that matters to the words is
   pinned with `"snap": false` after checking it against the envelope.
+  `prepare_lineup(..., words_for=)` adds the word-aware pass: a clip's `snap` is `true` (pause
+  snap, then word snap), `"words"` (word snap only - what `expand_moments` sets, since an
+  arc's edges were already moved into pauses) or `false`; the word snap runs whenever
+  `words_for` is given and only ever moves an `in` earlier or an `out` later (<= 0.6 s), so a
+  clip only grows. Report rows carry `inside_in`/`inside_out`.
+- **editwords.py** - where each spoken word starts and ends, for cuts, captions and the
+  strong-language check. `words_for(settings, ws, a, b, fetch=True)` returns the words in
+  [a, b], transcribing a window `PAD`=2 s either side with OpenAI `whisper-1`
+  (`timestamp_granularities=["word"]`, ~$0.006/min) only when no stored window covers it;
+  store: `work/_cache/edit/words/<workspace slug>.json`, shared between edits.
+  **Language is not `transcribe.language`**: `words.language` (default auto) and
+  `words.prompt` (`HINGLISH_PROMPT`, a Roman-script Hinglish line). Measured on real clips:
+  Hindi-forced wrote Devanagari nonsense over English speech and "Like share and subscribe" over
+  game noise; auto + the prompt writes Hinglish the way people type it and cut the
+  captions the model was unsure of from 48% to 23%. A window records a `sig` (hash of
+  model/language/prompt); one fetched under other settings is not reused and is replaced.
+  Known cost: a window of real but quiet speech can come back as emoji (`🔥🔥🔥`) where
+  Hindi-forced found words - symbol-only tokens are dropped, and `edit words` names the clips
+  that ended up with none (`NO WORDS HEARD`). A window whose text is the prompt itself
+  (`echoes_prompt`) is treated as no speech. `repair` spreads a run of words given the same
+  instant (marks them `est`); `voiced_spans` adds `vs`/`ve` (outer edge) and `vi` (runs) from
+  the audio envelope (threshold = floor + 0.35 x (peak - floor)), and a word with under 60 ms
+  voiced is `silent`; `inside_word(words, t)` is true only where the sound is up
+  (a pause inside a long word is a legitimate cut); `word_snap(words, t, kind)` finds where
+  to move. `strong_words(text)`: whole-word matching for short Latin words ("chut" is in
+  "parachute") plus Devanagari substrings. Measured on a real episode: 17 of 106 cut points
+  split a word; 6 after word-snap (the rest are pinned clips or have no clean place within 0.6 s).
+- **editcaptions.py** - what is said, on screen. The recogniser's text is not fit to show,
+  so the on-screen text is written: `generate(settings, clips)` sends each clip's numbered
+  words to `captions.model` (default `claude-sonnet-5-5`; one call per clip,
+  `captions.concurrency`) and gets *chunks* `{from, to, text, conf}` - 2 to 7 words, at most
+  `MAX_CHARS`=34 - because the model's words cannot be matched one to one with the
+  recogniser's, but a chunk's start and end can be taken from the words it covers. `conf` is
+  the model's own rating of whether the text is what was *said*; a cue under
+  `captions.min_confidence` (0.6) is kept in `captions.json` with `off: true` and not drawn:
+  a wrong subtitle is worse than none. A reply that cannot be parsed falls back to the
+  recogniser's own words (`fallback: true`, said at the end of `edit captions`).
+  `captions.json` (`work/_edits/<name>/`, schema 1) is the author's: cues in the *stream's*
+  seconds, hand-editable (flip `off`, fix `text`), and `edit captions --clips a,b` redoes only
+  those clips and keeps the rest. At render time (`stages/edit.py`, after framing) each
+  captioned clip's cues are mapped through its retiming (`to_output`) and written as one
+  `.ass` (`ass_document`, karaoke `\k` tags, brand font via `fontsdir`, `\fad` 70/50 ms,
+  highlight = the spec's `highlight`) burned in by `editfilters.captions_chain` after the
+  overlays; `censor` (default on) masks strong words in the text (`f**k`). A word is
+  highlighted at most `MAX_WORD`=1.1 s (the recogniser stretches words over pauses). A clip
+  with a `kill` marker gets no captions unless its `captions` is `true`: the callouts live
+  where captions would. A clip fingerprint gains a `caps` part only when a clip has captions, so
+  an uncaptioned render is byte-identical to before.
 - **edittemplates.py** - `kill_montage(kills, sources, ...)` -> spec dict.
   `kills_from_killfeed(data, alias, root)` adapts `killfeed.json`. Kills within
   12 s share a clip; clips are chaptered HEADSHOTS -> 50 m+ -> 100 m+ -> MULTI-KILLS
@@ -2345,6 +2427,14 @@ Sections and the values worth knowing without opening the file:
   and the camera/overlay adjustments above; `false` renders the camera as authored),
   `thumbnails` (`3`).
 - **`moments`** — `lead` (`14.0`), `tail` (`7.0`), `merge_gap` (`16.0`): the arc policy above.
+- **`words`** — `model` (`"whisper-1"`: the only OpenAI model whose response carries word
+  timestamps), `language` (`null` = auto-detect; **not** `transcribe.language`, see
+  `editwords.py` for why) and `prompt` (a short Roman-script Hinglish line; `""` sends none).
+  Changing any of the three refetches the windows.
+- **`captions`** — `model` (`"claude-sonnet-5-5"`), `min_confidence` (`0.6`: a cue the
+  model rates lower is written to `captions.json` as `off` and not drawn), `concurrency`
+  (`4` parallel calls, one per clip). The look (size, colours, position) is the *spec's*
+  `captions` block, not a setting.
 - **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
   posture above).
 
@@ -2488,6 +2578,17 @@ Sections and the values worth knowing without opening the file:
   synthetic media: length, A/V sync, loudness near target, **a re-render reuses
   every clip**, one changed clip re-encodes alone, a render never overwrites
   spec.json), `test_editcli` (incl. `edit episode` end to end on a synthetic wav),
+  `test_editwords` (repair of collapsed words, voiced spans on synthetic audio, `inside_word` /
+  `word_snap`, whole-word strong-language matching, the fetch against a fake client: no
+  language pin, the prompt sent, symbol-only tokens dropped, a prompt echo treated as no
+  speech, a window from other settings neither reused nor kept; mutation-checked on each),
+  `test_editcaptions` (chunk parsing incl. a reply with prose after the JSON, confidence
+  gating, cue timing from word spans, stretched words capped, `to_output` through a ramp,
+  the `.ass` text and karaoke tags, the censor), `test_edit_captions_render` (real ffmpeg:
+  the caption is up while its cue is and not before or after, the highlight colour appears as
+  words are spoken, no captions block / `captions: false` / a kill callout draw nothing, a
+  changed cue re-renders only that clip, a missing `captions.json` is a warning, and `verify`
+  both finds the text and fails when the timeline promises captions the render lacks),
   `test_killfeed` (synthetic OCR words, icons, and the popup: the real misreadings of one
   clip, a shop that says "confirm" is not a kill, runs, the merge with feed rows),
   `test_editmoment` (each arc rule, the ranking parts, coverage verdicts, `build` on a temp
@@ -2602,6 +2703,12 @@ Sections and the values worth knowing without opening the file:
   Change the camera chain and `tests/test_edit_framing.py` (real ffmpeg) must still pass.
 - **A render never overwrites `spec.json`** - it writes `render/<name>.<tier>.spec.json`.
   (A preview once replaced the author's spec with its own 540p output block.)
+- **Words are fetched with auto-detected language and a Hinglish prompt, never
+  `transcribe.language`.** A Hindi-forced window returned Devanagari nonsense over English
+  speech (measured, `editwords.py`); the stream's own transcript is still Hindi-pinned.
+- **A caption the model is unsure of is not drawn.** `captions.min_confidence` gates it into
+  `off: true`; the cue stays in `captions.json` for the author to fix. Don't lower the gate to
+  raise coverage - on this channel's Hinglish about a fifth of the lines are not recoverable.
 - **Graphs go to ffmpeg with `-/filter_complex <file>`, never
   `-filter_complex_script`** (removed in ffmpeg 8, the vendored build). The edit
   engine and `stages/reel.py`'s `_maybe_script_filter` both follow this; a graph in a
@@ -2701,6 +2808,12 @@ Sections and the values worth knowing without opening the file:
   (`editcut.py`) and matches levels, then the usual validate -> preview -> verify ->
   final -> deliver. `edit deliver` takes the title/description/credits from the
   lineup's fields, so a title that is not chosen yet stays a placeholder.
+- ...caption an edit, or stop a cut splitting a word → `clipbot edit words <name>` (fetches
+  word timing, ~$0.006/min, lists the cuts that land inside a word; `edit episode --words`
+  moves them) then `clipbot edit captions <name>` (writes `captions.json`, which you edit),
+  and give the spec a `captions` block. `edit verify` then checks cuts-inside-words, strong
+  language in the first 30 s, and that the captions are on screen. Read `editwords.py`'s
+  docstring before touching the language/prompt settings.
 - ...add a new kind of edit template → `clipbot/edittemplates.py` (a pure function
   returning a spec dict; validate it with `editspec.normalize` in a test and compile
   it with `edittimeline.compile_timeline` + `pacing`) + a `--template` choice in

@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import editcut, editdeliver, editmoment, library, editqa, editspec, edittaste, edittemplates, edittimeline
+from . import editcaptions, editcut, editdeliver, editmoment, editwords, library, editqa, editspec, edittaste, edittemplates, edittimeline
 from .config import Settings
 from .progress import Progress
 from .specerror import SpecError
@@ -343,7 +343,16 @@ def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
         print("moment: " + line)
     for style_id, style in ((lineup.get("brand") or {}).get("styles") or {}).items():
         library.save_text_style(settings, style_id, style)     # the brand's typefaces, idempotently
-    report = editcut.prepare_lineup(lineup, wav_for, snap=not args.no_snap, match=not args.no_match)
+    words_cb = None
+    if getattr(args, "words", False):
+        def words_cb(alias: str, a: float, b: float) -> Any:
+            src = lineup["sources"].get(alias) or {}
+            if "workspace" not in src:
+                return None
+            return editwords.words_for(settings, _workspace(settings, src["workspace"]), a, b, fetch=True)
+
+        print("words: fetching word timing where it is not already stored (OpenAI whisper-1, about $0.006 a minute)")
+    report = editcut.prepare_lineup(lineup, wav_for, snap=not args.no_snap, match=not args.no_match, words_for=words_cb)
     facts: Dict[str, Any] = {}
     spec = editspec.normalize(edittemplates.episode(lineup, facts=facts))
     root.mkdir(parents=True, exist_ok=True)
@@ -360,6 +369,11 @@ def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
     print(path)
     print("cuts: {0} clip(s) moved, {1} cut point(s) left as authored (no pause within reach)".format(
         report["moved"], report["unsnapped"]))
+    for r in report["clips"]:
+        for kind in ("in", "out"):
+            if r.get("inside_" + kind):
+                print("INSIDE A WORD: {0} {1} {2:.2f}s splits {3!r} and no clean place is within 0.6 s".format(
+                    r["src"], kind, r[kind], r["inside_" + kind]))
     issues = edittemplates.context_issues(lineup)
     for issue in issues:
         print("CONTEXT: " + issue)
@@ -427,8 +441,12 @@ def cmd_edit_verify(args: argparse.Namespace, settings: Settings) -> int:
     spec_file = _rendered_spec(paths["root"], name, args.preview)
     if spec_file is not None:
         master = editspec.load(spec_file)["master"]
+    words = None
+    wf = paths["root"] / "words.json"
+    if wf.is_file():
+        words = json.loads(wf.read_text(encoding="utf-8")).get("clips")
     result = editqa.verify(ffmpeg, ffprobe, paths["video"], timeline, master, paths["root"] / "verify" /
-                           ("preview" if args.preview else "final"), deep=not args.shallow)
+                           ("preview" if args.preview else "final"), deep=not args.shallow, words=words)
     print(editqa.render_markdown(result))
     return 0 if result["ok"] else 1
 
@@ -459,6 +477,133 @@ def cmd_edit_scenes(args: argparse.Namespace, settings: Settings) -> int:
         sheets = editqa.webcam_sheet(ffmpeg, paths["video"], timeline, paths["root"] / "verify" / ("preview" if args.preview else "final"))
         for f in sheets:
             print("sheet: " + f)
+    return 0
+
+
+def _spec_clip_windows(settings: Settings, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every clip of a spec that has a workspace source, with that workspace: [{id, ws, in, out}]."""
+    out = []
+    for c in spec["clips"]:
+        if c["type"] != "clip":
+            continue
+        src = spec["sources"].get(c["src"]) or {}
+        if "workspace" not in src:
+            continue
+        root = Path(settings.work_root) / src["workspace"]
+        if root.is_dir():
+            out.append({"id": c["id"], "ws": Workspace.open(root), "in": float(c["in"]), "out": float(c["out"])})
+    return out
+
+
+def cmd_edit_words(args: argparse.Namespace, settings: Settings) -> int:
+    """Fetch word timing for every clip of an edit (once; shared between edits), then report every cut that
+    would split a word. The only network call is OpenAI whisper-1 on the clips' own audio, at about
+    $0.006 a minute - the same model the transcribe stage uses by default."""
+    spec = editspec.load(_spec_path(settings, args.spec))
+    name = spec["name"]
+    clips = _spec_clip_windows(settings, spec)
+    if not clips:
+        raise StageError("{0} has no clip with a workspace source to take words from".format(name))
+    seconds = sum(c["out"] - c["in"] + 2 * editwords.PAD for c in clips)
+    print("{0} clip(s), about {1:.1f} min of audio: about ${2:.2f} on {3} (already-fetched windows are free)".format(
+        len(clips), seconds / 60.0, editwords.estimate_cost(seconds), settings.get("words.model", "whisper-1")))
+    words_by_clip: Dict[str, Any] = {}
+    inside = []
+    for c in clips:
+        words = editwords.words_for(settings, c["ws"], c["in"], c["out"], fetch=not args.check_only)
+        if words is None:
+            print("  {0}: not fetched (--check-only)".format(c["id"]))
+            continue
+        words_by_clip[c["id"]] = words
+        for kind, t in (("in", c["in"]), ("out", c["out"])):
+            snap = editwords.word_snap(words, t, kind)
+            if snap["inside"]:
+                inside.append((c["id"], kind, t, snap))
+    root = edit_stage.edit_dir(settings, name)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "words.json").write_text(json.dumps({"version": 1, "clips": words_by_clip}, ensure_ascii=False), encoding="utf-8")
+    n_words = sum(len(v) for v in words_by_clip.values())
+    print("{0} words in {1} clip(s) -> {2}".format(n_words, len(words_by_clip), root / "words.json"))
+    silent = [cid for cid, v in words_by_clip.items() if not v]
+    if silent:
+        print("NO WORDS HEARD in {0}: the recogniser found no speech there (game noise, or speech it would not write); "
+              "write its captions into captions.json by hand if there are any".format(", ".join(silent)))
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    for cid, kind, t, snap in inside:
+        print("INSIDE A WORD: {0} {1} at {2:.2f}s splits {3!r}; {4}".format(
+            cid, kind, t, snap["inside"], "would move {0:+.2f}s".format(snap["moved"]) if snap["snapped"] else "no clean place within 0.6 s"))
+    print("{0} of {1} cut point(s) land inside a word".format(len(inside), 2 * len(words_by_clip)))
+    return 0
+
+
+def _output_clock(timeline: Dict[str, Any], clip_id: str, cue: Dict[str, Any]) -> float:
+    """Where in the finished video (seconds) a cue given in the stream's seconds is heard."""
+    e = next(c for c in timeline["clips"] if c["id"] == clip_id)
+    return e["start"] + edittimeline.src_to_out(e["pieces"], cue["s"])
+
+
+def cmd_edit_captions(args: argparse.Namespace, settings: Settings) -> int:
+    """Write the captions for an edit: each clip's words -> Hinglish subtitle chunks (one model call per clip) ->
+    work/_edits/<name>/captions.json, which is yours to edit before rendering. Needs `edit words` first and
+    ANTHROPIC_API_KEY (the same key `analyze` uses; `captions.model`, a few cents for an episode)."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    spec = editspec.load(_spec_path(settings, args.spec))
+    name = spec["name"]
+    root = edit_stage.edit_dir(settings, name)
+    path = root / "captions.json"
+    old_doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    want = set(args.clips.split(",")) if args.clips else None
+    if old_doc and want is None and not args.force:
+        raise StageError("{0} exists (it may hold your edits); pass --force to rewrite all of it, or --clips c1,c2 to redo some".format(path))
+    clips: Dict[str, Dict[str, Any]] = {}
+    for c in _spec_clip_windows(settings, spec):
+        if want is not None and c["id"] not in want:
+            continue
+        words = editwords.words_for(settings, c["ws"], c["in"], c["out"], fetch=False)
+        if words is None:
+            print("  {0}: no words stored (run: clipbot edit words {1})".format(c["id"], name))
+            continue
+        if not words:
+            print("  {0}: no speech heard, so no captions (add some to captions.json by hand if there is any)".format(c["id"]))
+            continue
+        clips[c["id"]] = {"words": words, "in": c["in"], "out": c["out"]}
+    if not clips:
+        raise StageError("no clip has words to caption; run: clipbot edit words {0}".format(name))
+    if args.no_model:
+        doc = {"version": editcaptions.SCHEMA, "model": None, "clips": {
+            cid: {"cues": editcaptions.cues_from_chunks(editcaptions.fallback_chunks(c["words"]), c["words"], c["in"], c["out"]),
+                  "chunks": 0, "fallback": True} for cid, c in clips.items()}}
+    else:
+        print("captions: {0} clip(s), {1} words, one model call each".format(len(clips), sum(len(c["words"]) for c in clips.values())))
+        doc = editcaptions.generate(settings, clips)
+    if old_doc and want is not None:                 # redo some clips, keep the rest (and any hand edits to them)
+        merged = dict(old_doc.get("clips") or {})
+        merged.update(doc["clips"])
+        doc["clips"] = merged
+    root.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8")
+    timeline = edittimeline.compile_timeline(spec)
+    cues = [(cid, q) for cid, v in doc["clips"].items() for q in v["cues"]]
+    fell = [cid for cid, v in doc["clips"].items() if v.get("fallback")]
+    print("{0} cue(s) in {1} clip(s) -> {2}".format(len(cues), len(doc["clips"]), path))
+    if fell:
+        print("FELL BACK to the recogniser's own text (no model answer): {0}".format(", ".join(fell)))
+    if cues:
+        longest = max(len(q["text"]) for _, q in cues)
+        print("longest cue {0} characters (limit {1})".format(longest, editcaptions.MAX_CHARS))
+    hits = []
+    for cid, q in cues:
+        found = editwords.strong_words(q["text"])
+        if found:
+            hits.append((_output_clock(timeline, cid, q), cid, q["text"], found))
+    for t, cid, text, found in sorted(hits)[:20]:
+        flag = "IN THE FIRST 30 s: " if t < 30.0 else ""
+        print("{0}strong language at {1}:{2:04.1f} ({3}): {4!r}  [{5}]".format(
+            flag, int(t // 60), t % 60, cid, text, ", ".join(found)))
+    if not hits:
+        print("no strong language in the captions")
     return 0
 
 
@@ -685,8 +830,9 @@ def add_parsers(sub: Any) -> None:
     p = ed.add_parser("episode", help="build an episode (cold open, sting, chapters, end card) from a lineup .json")
     p.add_argument("name", help="edit name (a folder under work/_edits/)")
     p.add_argument("lineup", help="the lineup file (see edittemplates.episode)")
-    p.add_argument("--no-snap", action="store_true", help="keep every in/out exactly as written (no pause snapping)")
+    p.add_argument("--no-snap", action="store_true", help="no pause snapping (clips keep their in/out); `--words` still moves a cut that splits a word")
     p.add_argument("--no-match", action="store_true", help="do not match the clips' levels")
+    p.add_argument("--words", action="store_true", help="also move a cut that would split a word to the word's edge (fetches word timing; ~$0.006/min)")
     p.add_argument("--force", action="store_true", help="overwrite an existing spec")
     p.set_defaults(func=cmd_edit_episode)
 
@@ -716,6 +862,18 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("spec", help=SPEC_HELP)
     p.add_argument("--preview", action="store_true")
     p.set_defaults(func=cmd_edit_scenes)
+
+    p = ed.add_parser("words", help="word timing for every clip (OpenAI whisper-1, ~$0.006/min, cached) and the cuts that split a word")
+    p.add_argument("spec", help=SPEC_HELP)
+    p.add_argument("--check-only", action="store_true", help="use only what is already fetched; send nothing")
+    p.set_defaults(func=cmd_edit_words)
+
+    p = ed.add_parser("captions", help="Hinglish subtitles per clip from its words (one model call each) -> captions.json to edit")
+    p.add_argument("spec", help=SPEC_HELP)
+    p.add_argument("--force", action="store_true", help="rewrite captions.json even if it exists")
+    p.add_argument("--clips", help="redo only these clip ids (comma list), keeping the rest of captions.json")
+    p.add_argument("--no-model", action="store_true", help="use the recogniser's own text (no API call)")
+    p.set_defaults(func=cmd_edit_captions)
 
     p = ed.add_parser("deliver", help="variants, thumbnails, chapters and post text for a finished render")
     p.add_argument("spec", help=SPEC_HELP)

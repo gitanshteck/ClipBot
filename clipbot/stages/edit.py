@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .. import editaudio, editfilters as ef, editframe, editoverlay, editscene, editspec, edittimeline, library, ytsegments
+from .. import editaudio, editcaptions, editfilters as ef, editframe, editoverlay, editscene, editspec, edittimeline, library, ytsegments
 from ..config import Settings
 from ..ffrun import run_ffmpeg
 from ..progress import NULL_PROGRESS, Progress
@@ -289,6 +289,29 @@ def _overlay_pngs(entry: Dict[str, Any], clip: Dict[str, Any], out: Dict[str, An
     return pngs
 
 
+def _caption_font(settings: Settings, cfg: Dict[str, Any], assets: Dict[str, Any], fallback: Optional[str]) -> Tuple[Optional[str], str]:
+    """(font file, family name libass will find it by) for the captions: the spec's `font` (a library asset id), else
+    the library's Anton (the brand's display face), else the fallback system font. The family comes from the file."""
+    path = None
+    want = cfg.get("font")
+    if want and want in assets:
+        path = str(assets[want]["path"])
+    if path is None:
+        for a in assets.values():
+            if a.get("kind") == "font" and str(a.get("name", "")).lower() == "anton":
+                path = str(a["path"])
+                break
+    path = path or fallback
+    if not path:
+        return None, "Arial"
+    try:
+        from PIL import ImageFont
+
+        return path, ImageFont.truetype(path, 20).getname()[0]
+    except Exception:  # noqa: BLE001 - a font Pillow cannot name is still a file libass may read
+        return path, Path(path).stem
+
+
 def _write_filter(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -298,7 +321,7 @@ def _write_filter(path: Path, text: str) -> Path:
 def _clip_fingerprint(clip: Dict[str, Any], entry: Dict[str, Any], out: Dict[str, Any], tier: str, src_tag: str,
                       seg_key: str, head: Optional[Dict[str, Any]], tail: Optional[Dict[str, Any]],
                       pngs: List[Dict[str, Any]], asset_stamp: str) -> str:
-    blob = json.dumps({
+    parts = {
         "clip": clip, "dur": entry["dur"], "frames": entry["frames"],
         "pieces": [[round(p["s0"], 4), round(p["s1"], 4), round(p["rate"], 4), p["kind"]] for p in entry["pieces"]],
         "fx": entry.get("fx"), "cam": entry.get("camera"), "gw": entry.get("grade_window"),
@@ -307,7 +330,10 @@ def _clip_fingerprint(clip: Dict[str, Any], entry: Dict[str, Any], out: Dict[str
                                     "sample_rate")},
         "tier": tier, "src": src_tag, "seg": seg_key, "head": head, "tail": tail,
         "png": [p["key"] for p in pngs], "assets": asset_stamp, "moved": entry.get("moved_overlays"), "v": 4,   # 4: camera moves pivot on their pan point (was the corner)
-    }, sort_keys=True, default=str)
+    }
+    if entry.get("captions"):                # only when present, so a clip without captions keeps its fingerprint
+        parts["caps"] = entry["captions"]
+    blob = json.dumps(parts, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -408,6 +434,37 @@ def render_edit(
             entry["camera"], notes = editframe.safe_camera(keys, entry["scene"], fps)
             warnings.extend("{0}: {1}".format(c["id"], note) for note in notes)
             progress.update(k + 1, label=c["id"])
+
+    # ---- captions: the author's captions.json, drawn with libass (one .ass per clip, in the clip's own seconds)
+    caps_cfg = spec.get("captions")
+    if caps_cfg and caps_cfg["enabled"]:
+        cap_file = root / "captions.json"
+        if not cap_file.is_file():
+            warnings.append("captions are on but {0} does not exist; run: clipbot edit words {1}; clipbot edit captions {1}".format(
+                cap_file.name, name))
+        else:
+            doc = json.loads(cap_file.read_text(encoding="utf-8"))
+            font_path, family = _caption_font(settings, caps_cfg, assets, font)
+            fonts_dir = str(Path(font_path).parent) if font_path else None
+            style = {k: v for k, v in caps_cfg.items() if k not in ("enabled", "font")}
+            drawn = 0
+            for k, entry in enumerate(clips):
+                c = spec["clips"][k]
+                got = (doc.get("clips") or {}).get(c["id"])
+                if c["type"] != "clip" or not got or not got.get("cues") or c.get("captions") is False:
+                    continue
+                if c.get("captions") is None and any(m["name"] == "kill" for m in entry.get("markers") or []):
+                    continue                 # the kill callouts live where captions would: a clip with kills has none unless asked
+                out_cues = editcaptions.to_output(got["cues"], entry["pieces"], entry["dur"])
+                if not out_cues:
+                    continue
+                ass = work / "filters" / "{0}.ass".format(c["id"])
+                ass.parent.mkdir(parents=True, exist_ok=True)
+                ass.write_text(editcaptions.ass_document(out_cues, style, (out["width"], out["height"]), family), encoding="utf-8")
+                entry["caption_ass"], entry["caption_fonts"] = str(ass), fonts_dir
+                entry["captions"] = {"cues": out_cues, "style": style, "font": family}
+                drawn += 1
+            log.info("captions: %d clip(s)", drawn)
 
     # ---- clips
     progress.phase("clips", total=max(1, len(clips)), unit="clips")

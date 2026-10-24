@@ -392,6 +392,35 @@ def _grade(raw: Any, path: str) -> Optional[Dict[str, Any]]:
     return out
 
 
+CAPTION_DEFAULTS = {"enabled": True, "font": None, "size": 0.058, "color": "#FFFFFF", "highlight": "#FFB300", "outline": 0.0055,
+                    "x": 0.42, "y": 0.915, "width": 0.52, "karaoke": True, "censor": True}
+
+
+def _captions(raw: Any, path: str) -> Optional[Dict[str, Any]]:
+    """The spec-level caption style, or None when the spec has none. See `editcaptions`: the text comes from
+    `work/_edits/<name>/captions.json`; this block says whether and how it is drawn. `x`/`width` default to a
+    box left of centre because the stream's chat panel sits bottom-right and its minimap bottom-left."""
+    if raw is None:
+        return None
+    d = _dict(raw, path, tuple(CAPTION_DEFAULTS))
+    out = dict(CAPTION_DEFAULTS)
+    out["enabled"] = _bool(d.get("enabled", True), path + ".enabled")
+    if d.get("font") is not None:
+        out["font"] = _str(d["font"], path + ".font", 64)
+    out["size"] = _num(d.get("size", out["size"]), path + ".size", 0.03, 0.12)
+    out["color"] = _color(d.get("color", out["color"]), path + ".color")
+    out["highlight"] = _color(d.get("highlight", out["highlight"]), path + ".highlight")
+    out["outline"] = _num(d.get("outline", out["outline"]), path + ".outline", 0.0, 0.02)
+    out["x"] = _num(d.get("x", out["x"]), path + ".x", 0.2, 0.8)
+    out["y"] = _num(d.get("y", out["y"]), path + ".y", 0.4, 1.0)
+    out["width"] = _num(d.get("width", out["width"]), path + ".width", 0.2, 0.9)
+    out["karaoke"] = _bool(d.get("karaoke", out["karaoke"]), path + ".karaoke")
+    out["censor"] = _bool(d.get("censor", out["censor"]), path + ".censor")
+    if out["x"] - out["width"] / 2.0 < 0.0 or out["x"] + out["width"] / 2.0 > 1.0:
+        _fail(path, "the caption box (x {0}, half-width {1}) runs off the frame".format(out["x"], out["width"] / 2.0))
+    return out
+
+
 def _framing(raw: Any, path: str) -> Optional[Dict[str, Any]]:
     if raw is None:
         return None
@@ -516,7 +545,7 @@ def _marker(raw: Any, path: str) -> Dict[str, Any]:
 
 CLIP_KEYS = (
     "id", "type", "src", "in", "out", "label", "speed", "interp", "freezes", "camera", "grade",
-    "fx", "overlays", "markers", "audio", "framing", "transition_in", "tags",
+    "fx", "overlays", "markers", "audio", "framing", "transition_in", "tags", "captions",
 )
 
 # How slowed footage fills the frames between source frames. `dup` repeats frames
@@ -542,6 +571,8 @@ def _clip(raw: Any, path: str, sources: Dict[str, Any], default_trans: float) ->
     out: Dict[str, Any] = {"id": cid, "type": kind, "label": str(d.get("label", cid))[:80],
                            "tags": [str(t)[:24] for t in _list(d.get("tags", []), path + ".tags", 12)]}
     out["audio"] = _clip_audio(d.get("audio"), path + ".audio")
+    if "captions" in d and kind == "clip":
+        out["captions"] = _bool(d["captions"], path + ".captions")      # false: none here; true: even over a kill callout
     out["transition_in"] = _transition(d.get("transition_in"), path + ".transition_in", default_trans)
     out["overlays"] = [_overlay(o, "{0}.overlays[{1}]".format(path, i))
                        for i, o in enumerate(_list(d.get("overlays", []), path + ".overlays", MAX_OVERLAYS))]
@@ -729,7 +760,7 @@ def normalize(spec: Any) -> Dict[str, Any]:
     decide which cached clips are still good.
     """
     d = _dict(spec, "spec", ("version", "name", "profile", "output", "sources", "clips", "tracks", "master",
-                              "defaults", "notes"))
+                              "defaults", "notes", "captions"))
     version = d.get("version", VERSION)
     if version != VERSION:
         _fail("spec.version", "this build reads version {0}, the spec says {1}".format(VERSION, version))
@@ -779,7 +810,7 @@ def normalize(spec: Any) -> Dict[str, Any]:
                 for i, s in enumerate(_list(tracks.get("sfx", []), "spec.tracks.sfx", 400))],
     }
 
-    return {
+    result = {
         "version": VERSION,
         "name": name,
         "profile": profile,
@@ -791,6 +822,10 @@ def normalize(spec: Any) -> Dict[str, Any]:
         "tracks": norm_tracks,
         "master": _master(d.get("master"), "spec.master"),
     }
+    caps = _captions(d.get("captions"), "spec.captions")
+    if caps is not None:                     # only when the spec has one: a spec without captions round-trips unchanged
+        result["captions"] = caps
+    return result
 
 
 def load(path: Any) -> Dict[str, Any]:

@@ -170,5 +170,72 @@ class TestLevelsAndLineup(unittest.TestCase):
         self.assertNotIn("gain_db", lu["chapters"][0]["clips"][0])
 
 
+class TestWordSnapInLineup(unittest.TestCase):
+    """prepare_lineup(words_for=...): a cut that still splits a word moves to the word's edge - clips only grow."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.a = Path(self.tmp.name) / "a.wav"
+        write_wav(self.a, talk(("s", 30.0)))               # one long unbroken stretch: the pause snap finds nothing
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def words(alias, a, b):
+        ws = [("main", 10.0, 10.4), ("nahi", 10.5, 10.9), ("chudi", 11.0, 11.6), ("thi", 11.7, 12.0)]
+        return [{"w": t, "s": s, "e": e, "vs": s, "ve": e} for t, s, e in ws]
+
+    def lineup(self, **clip):
+        return {"chapters": [{"title": "x", "clips": [dict({"src": "a", "in": 10.7, "out": 11.3}, **clip)]}]}
+
+    def run_prepare(self, lu, words_for=None):
+        return C.prepare_lineup(lu, lambda alias: self.a, snap=True, match=False, words_for=words_for or self.words)
+
+    def test_an_in_inside_a_word_moves_before_it_and_an_out_moves_past_its_word(self):
+        lu = self.lineup()
+        self.run_prepare(lu)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertLess(c["in"], 10.5)                    # was inside "nahi"
+        self.assertGreater(c["out"], 11.6)                # was inside "chudi"
+        self.assertLessEqual(c["in"], 10.7)
+        self.assertGreaterEqual(c["out"], 11.3)           # the clip only grew
+
+    def test_a_clip_with_kills_is_word_snapped_even_though_its_window_is_kept(self):
+        lu = self.lineup(kills=[{"t": 11.0}])
+        self.run_prepare(lu)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertGreater(c["out"], 11.6)
+        self.assertLessEqual(c["in"], 10.7)
+
+    def test_snap_false_pins_the_clip_completely(self):
+        lu = self.lineup(snap=False)
+        self.run_prepare(lu)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertEqual((c["in"], c["out"]), (10.7, 11.3))
+
+    def test_snap_words_does_the_word_snap_and_no_pause_snap(self):
+        write_wav(self.a, talk(("s", 5.0), ("p", 1.0), ("s", 25.0)))
+        lu = self.lineup(snap="words", **{"in": 5.7, "out": 9.0})
+        self.run_prepare(lu, words_for=lambda alias, a, b: [])
+        c = lu["chapters"][0]["clips"][0]
+        self.assertEqual((c["in"], c["out"]), (5.7, 9.0))   # no words -> nothing moved, and no pause snap either
+
+    def test_a_cut_with_no_clean_place_stays_and_the_word_is_named(self):
+        long_word = lambda alias, a, b: [{"w": "laaaambaa", "s": 10.0, "e": 14.0, "vs": 10.0, "ve": 14.0}]
+        lu = self.lineup(**{"in": 12.0, "out": 13.0})
+        report = self.run_prepare(lu, words_for=long_word)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertEqual((c["in"], c["out"]), (12.0, 13.0))
+        row = report["clips"][0]
+        self.assertEqual((row["inside_in"], row["inside_out"]), ("laaaambaa", "laaaambaa"))
+
+    def test_without_a_words_callback_nothing_changes(self):
+        lu = self.lineup()
+        C.prepare_lineup(lu, lambda alias: self.a, snap=True, match=False)
+        c = lu["chapters"][0]["clips"][0]
+        self.assertEqual((c["in"], c["out"]), (10.7, 11.3))
+
+
 if __name__ == "__main__":
     unittest.main()

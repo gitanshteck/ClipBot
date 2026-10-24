@@ -96,7 +96,9 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     *Origin:* one snapped `out` landed 0.5 s inside the last word of a one-liner and
     another 0.1 s into a swear word the author meant to leave out. Found only by
     listing the pauses around each cut (`cuts.json` says what moved and what did not);
-    pin those with `"snap": false` and a time read from the envelope.
+    pin those with `"snap": false` and a time read from the envelope. `edit words` is the
+    check that names them (17 of 106 cut points in the first episode split a word; 6 are left
+    after the word snap) and `edit episode --words` moves what can be moved.
 31. **Match the clips' levels across sources.** `edit episode` sets a `gain_db` per
     clip (<= 8 dB) toward the lineup's median. *Origin:* clips from one lineup
     measured -22 to -35 dB loud-part level; unmatched, the quiet ones sit 10 dB under
@@ -153,6 +155,19 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     its surroundings* (`clipbot moments sheet --range`) before a clip goes in; a kill clip
     needs its lead-up and aftermath (`edit episode` flags it); and "no kills found" on a
     stream you know had a fight means *unreadable*, not *none* (`moments coverage`).
+41. **Do not force the recogniser's language, and do not draw a caption it is unsure of.**
+    *Origin:* word timing fetched with `language=hi` (the stream transcript's pin) wrote Devanagari
+    nonsense over English speech and "Like share and subscribe" over game noise; 48% of the
+    captions written from it were rated unsure. Auto-detect plus a Roman-script Hinglish prompt
+    (`words.prompt`) cut that to 23%, and what is left is mostly rap lyrics and shouting over
+    gunfire. A wrong subtitle is worse than none: `captions.min_confidence` leaves the unsure
+    ones off, and you read `captions.json` before a render because nothing here can hear the
+    clip. (One cost: a quiet window of real speech came back as emoji - `edit words` names such
+    clips; their captions are written by hand or left out.)
+42. **Know what is said in the first 30 seconds.** `edit captions` and `verify` list strong
+    language there (the cold open of the first episode said "bastard" at 0:11). It is a
+    decision for the author - bleep it, cut it, or keep it - not something to hide or to
+    leave unmentioned in the report.
 
 ## Delivery
 

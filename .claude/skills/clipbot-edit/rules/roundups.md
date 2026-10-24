@@ -63,8 +63,12 @@ work.
 
 ## Before you present
 
-- Strong language: count it per clip from the transcript and list the chapters; the
-  first 30 s of the video matters most to the platform. Say what you could not hear.
+- Strong language: `edit captions` and `verify` list it from the word timing (not the
+  Hindi-pinned transcript, which misreads English); the first 30 s of the video matters most
+  to the platform. Say what you could not hear.
+- Captions: say how many cues were left off as unsure and which clips have none (`edit
+  words` names a clip with no speech heard). Kill clips carry callouts, not captions, unless
+  asked.
 - Music inside a clip (a song someone sings, an outro track) can draw a Content ID claim:
   say so in the notes.
 - Source mix: Kick is 720p60, YouTube is 1080p60 - state the share that is upscaled.

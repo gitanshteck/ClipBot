@@ -40,6 +40,14 @@ data -> spec -> validate -> preview -> verify + look -> fix -> final -> verify -
    music/SFX by library id or file). For anything else write the spec by hand to
    `work/_edits/<name>/spec.json`. Treat generated specs as drafts: open them,
    change what your judgement says.
+2b. **Words and captions** (a talking edit). `edit words <name>` fetches the words and lists
+   every cut that lands inside one; `edit episode ... --words` moves those cuts (a clip only
+   grows). `edit captions <name>` writes `captions.json` and names any strong language and any
+   clip with no speech heard. **Read `captions.json` before rendering**: the model rates each
+   cue (`conf`) and cues under `captions.min_confidence` are `off`; neither the model nor you
+   can hear the clip, so a cue that reads wrong in context is wrong - fix the text or leave it
+   off. Then give the spec a `captions` block (`{}` takes the defaults; `highlight` = the brand
+   accent). See HARD-RULES 41-42.
 3. **Validate.** `clipbot edit validate <name>` prints duration, chapters and the
    pacing verdict. Fix every `dead stretch` before rendering: the gate is cheap
    here and expensive after a render.
@@ -66,7 +74,9 @@ clipbot killfeed list --workspace W
 clipbot edit new NAME --killfeed W [W...] [--game G] [--profile punchy|balanced|restrained]
         [--order chapters|chronological|score] [--max-clips N] [--slowmo none|nade|special|all]
         [--music mus_ID|FILE] [--sfx-hit sfx_ID|FILE] [--sfx-nade ...] [--sfx-headshot ...] [--preset ...]
-clipbot edit episode NAME LINEUP.json [--no-snap] [--no-match] [--force]   # a roundup: see rules/roundups.md
+clipbot edit episode NAME LINEUP.json [--no-snap] [--no-match] [--words] [--force]   # a roundup: see rules/roundups.md
+clipbot edit words NAME [--check-only]     # word timing per clip (~$0.006/min, cached): cuts that split a word, clips with no speech heard
+clipbot edit captions NAME [--clips a,b] [--no-model] [--force]   # captions.json (yours to edit): Hinglish chunks + confidence; prints strong language
 clipbot edit validate|inspect NAME
 clipbot edit render NAME [--preview] [--force] [--no-master] [--preset shorts_1080x1920]
 clipbot edit verify NAME [--preview] [--shallow]

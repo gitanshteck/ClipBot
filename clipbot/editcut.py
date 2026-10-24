@@ -178,7 +178,7 @@ def _lineup_clips(lineup: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def prepare_lineup(lineup: Dict[str, Any], wav_for: Any, snap: bool = True, match: bool = True,
-                   window: float = 0.8) -> Dict[str, Any]:
+                   window: float = 0.8, words_for: Any = None) -> Dict[str, Any]:
     """Snap every clip's cut points into pauses and match the clips' levels, in place.
 
     `wav_for(alias)` returns the `audio.wav` of a clip's source, or None when it has none
@@ -186,19 +186,39 @@ def prepare_lineup(lineup: Dict[str, Any], wav_for: Any, snap: bool = True, matc
     callouts hang off kill times inside it - and a clip with `"snap": false` is left
     alone. A clip that already has `gain_db` keeps it. Returns a report:
     {clips: [{src, in, out, in_was, out_was, snapped_in, snapped_out, level, gain_db}], unsnapped, moved}.
+
+    `words_for(alias, a, b)` (optional) returns the words spoken in [a, b] (`editwords`), or None. After the
+    pause snap, a cut that still lands *inside* a word is moved to the edge of that word - an in earlier, an out
+    later, so a clip only ever grows by it - if that is within 0.6 s; otherwise it stays and the report names the
+    word (`inside_in` / `inside_out`). This also applies to a clip with kills, whose window the pause snap leaves
+    alone (a longer clip keeps every kill inside it); `"snap": "words"` is that and nothing else - a clip built from a
+    moment, whose edges are already in pauses - and `"snap": false` pins a clip entirely.
     """
+    from . import editwords
+
     rows: List[Dict[str, Any]] = []
     for c in _lineup_clips(lineup):
         wav = wav_for(c["src"])
         row: Dict[str, Any] = {"src": c["src"], "in_was": float(c["in"]), "out_was": float(c["out"]),
                                "snapped_in": False, "snapped_out": False, "level": None, "gain_db": None,
-                               "note": c.get("note", "")}
-        if wav is not None and snap and not c.get("kills") and c.get("snap", True):
+                               "inside_in": None, "inside_out": None, "note": c.get("note", "")}
+        mode = c.get("snap", True)
+        if wav is not None and snap and not c.get("kills") and mode is True:
             new_in = find_cut(wav, float(c["in"]), "in", window)
             new_out = find_cut(wav, float(c["out"]), "out", window)
             if new_out["t"] - new_in["t"] >= 1.0:           # never snap a clip down to nothing
                 c["in"], c["out"] = new_in["t"], new_out["t"]
                 row["snapped_in"], row["snapped_out"] = new_in["snapped"], new_out["snapped"]
+        if words_for is not None and mode in (True, "words"):
+            words = words_for(c["src"], float(c["in"]), float(c["out"]))
+            if words:
+                for kind, key in (("in", "in"), ("out", "out")):
+                    r = editwords.word_snap(words, float(c[key]), kind)
+                    if r["snapped"]:
+                        c[key] = r["t"]
+                        row["snapped_" + key] = True
+                    elif r["inside"]:
+                        row["inside_" + key] = r["inside"]
         row["in"], row["out"] = float(c["in"]), float(c["out"])
         if wav is not None and match:
             row["level"] = clip_level(wav, float(c["in"]), float(c["out"]))

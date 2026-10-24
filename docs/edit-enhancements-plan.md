@@ -172,6 +172,42 @@ framing on the webcam, B2, needs a face and a higher-resolution cam than the 510
 weights; the scoreboard check; transcripts are still the only way to find a non-kill moment, and they point at *talk about*
 the moment.
 
+### 0.7 Phase 2 result (2026-10-24)
+
+| | Status | What exists |
+|---|---|---|
+| A1 word timestamps | **done** | `editwords.py`: whisper-1 on only the windows an edit uses (14.7 min of audio for the 53 clips of the first episode, $0.09, cached per workspace), then **corrected against the sound** - collapsed words (several given one instant) are spread, and each word gets the stretches where the signal is actually up, because whisper holds a short word over a pause (a three-letter word for 1.4 s). A cut is "inside a word" only where the sound is up. On the first episode 17 of 106 cut points split a word; `edit episode --words` moved what could be moved (a clip only grows, <= 0.6 s) and 6 remain (pinned clips, or no clean place within reach). |
+| B1 captions | **done, with a measured limit** | `editcaptions.py`: the model writes Hinglish chunks over the numbered words and rates each (`conf`); cues come out timed from the words they cover, drawn with libass karaoke (the word being said lights up), brand font, in a box left of centre so the chat panel (bottom right) and minimap (bottom left) stay clear. `captions.json` is yours to edit. Cues under `captions.min_confidence` are kept but not drawn. Clips with kill callouts get none unless asked. |
+| H checks | **done** | `verify` gains **cuts inside words**, **strong language** (first 30 s of the output) and **captions on screen** (reads the render). `edit captions` prints strong language with its timestamp. On the first episode the cold open says "bastard" at 0:11, which is a decision for you. |
+| A2 reaction map | **not built, deliberately** | It needs a ~300 MB third-party audio-tagging checkpoint downloaded from a model host. That is an untrusted download I should not make unasked; and nothing in the moment engine's measured results needed it (kills carry the value). Ask before fetching. |
+
+**The finding that changed the work: the language pin.** The first captions came out 48% unsure (176 of 365 cues) and
+only 9 of 53 clips were fully captioned. The cause was not the caption model: word timing had been fetched with
+`language=hi`, the pin the stream's own transcript uses. A Hinglish streamer switches to English in mid-sentence, and
+on those windows Hindi-forced returned Devanagari nonsense (`इ कि जो हुड़ा है भे मुझे पинки मर`) where auto-detect
+returned `wait bro wait, stop doing that bro`; over loud game audio it returned "Like share and subscribe". Ten real
+windows, three modes: Hindi-forced, auto, and auto with a Roman-script Hinglish prompt. The prompted mode was right or
+better on 8, equal on 2, and wrote the Hindi as people type it (`mere pe mortar gir gaya, bro bro, help!`). Switched
+(`words.language` null, `words.prompt`), windows refetched ($0.09): **23% of cues unsure (96 of 410), 14 clips fully
+captioned, 2 with none.** What is left unsure is mostly rap lyrics and speech under gunfire.
+**One cost:** a quiet window of real speech (c7_44, "I got one, I got two") came back as emoji where Hindi-forced had
+found the words; symbol-only tokens are dropped and `edit words` names such clips. `gpt-4o-transcribe` was also tried
+and is not usable: it returns a fragment of the speech and no word times.
+
+**A false failure found on the way, and what it was.** The first preview verify of the captioned episode said
+`webcam in frame` FAILED for two clips, and the webcam was on screen in both. I suspected the burned-in captions;
+an A/B on the same 224 sampled instants of the same clips rendered with and without captions found the box in
+190 vs 192: not the captions. It was the detector on the 540p `ultrafast` preview: the webcam's border is a
+one-pixel line and a low-quality encode smears it on some frames (14% of single frames), and two short clips
+had a single sample each. A sample is now judged on the frames of its 0.15 s (each against where the camera is at
+that frame); a box in the wrong place on every frame is still a miss. Misses fell to 5% and the verify passes.
+Final-tier renders had passed 129 of 129 before, so preview misses remain warnings.
+
+**Not fixed, and said plainly:** the project's own stage-3 transcript is still Hindi-pinned. It feeds clip finding
+(`analyze`), so the same English-as-nonsense problem is in what picks the moments. Re-transcribing a stream costs
+about $1.66; I have not done it. It is a decision for you (see section 5). Nothing here can hear a clip, so a caption
+the model rates as sure can still be wrong - read `captions.json`.
+
 ## 1. Where we are
 
 What the engine does well today (measured on Mish Mash #1, 10:07, 1080p60):
@@ -350,6 +386,8 @@ Every phase ends with the same proof:
 4. **Optional paid or external services:** a Gemini API key for audio second opinions (A6)? Resolve Studio for NLE finishing?
 5. **YouTube Analytics scope:** OK to add a read-only analytics permission to the existing upload login, for the learning loop?
 6. **Mish Mash #1:** keep it as the test bed and re-cut it at the end of each phase, or publish v1 now and use #2 for the next phase?
+7. **Re-transcribe streams with auto-detected language** (section 0.7)? The stage-3 transcript is Hindi-pinned and reads English as nonsense; it feeds `analyze`'s clip picking. About $1.66 per 4.6 h stream on whisper-1, and the existing `transcript.json` would be replaced (`transcribe --force`), so candidates found from it would need a re-run.
+8. **A2 reaction map:** OK to download a ~300 MB audio-tagging checkpoint from a third-party model host? Nothing built so far needs it.
 
 ## 6. Known limits (said up front)
 
