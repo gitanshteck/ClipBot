@@ -31,7 +31,7 @@ still, the chapter markers and the sound.
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import editspec, killfeed
+from . import editbeats, edithud, editspec, killfeed
 
 # A fifth zoom pulse in one clip is noise, and each camera key costs the renderer a nested
 # expression: punch the first few kills of a run and let the callouts carry the rest.
@@ -427,6 +427,16 @@ def expand_moments(lineup: Dict[str, Any], moments_for: Any, kills_for: Any) -> 
     for title, clips in _lineup_clip_lists(lineup):
         for i, c in enumerate(clips, start=1):
             mid = c.get("moment")
+            if not mid and c.get("kill_ids"):
+                # a window chosen by hand around kills named by id (`killfeed.json` ids): the kills come from the feed,
+                # with their weapon icons, so a clip that is not a whole arc still gets its contact plates
+                known = kills_for(c.get("src")) or {}
+                missing = [k for k in c["kill_ids"] if k not in known]
+                if missing:
+                    raise editspec.SpecError("{0!r} clip {1}: no kill {2} in {3}'s killfeed.json".format(title, i, ", ".join(missing), c.get("src")))
+                c["kills"] = [dict(known[k], src=c["src"]) for k in c["kill_ids"]]
+                done.append("{0!r} clip {1}: {2} {3} -> {4} kill(s) by id".format(title, i, c["src"], "-".join(c["kill_ids"]), len(c["kills"])))
+                continue
             if not mid:
                 continue
             alias = c.get("src")
@@ -453,7 +463,7 @@ def expand_moments(lineup: Dict[str, Any], moments_for: Any, kills_for: Any) -> 
     return done
 
 
-def _ambient_camera(lo: float, hi: float, prof: Dict[str, Any], punches: List[float]) -> List[Dict[str, Any]]:
+def _ambient_camera(lo: float, hi: float, prof: Dict[str, Any], punches: List[Any]) -> List[Dict[str, Any]]:
     """Camera life for a clip with no kill in it: a slow push-in across the whole clip
     (so a talking head over a map never sits still for longer than the profile's gap)
     and a snap-in on each beat in `punches` (source seconds - the punchline, the reveal).
@@ -470,8 +480,9 @@ def _ambient_camera(lo: float, hi: float, prof: Dict[str, Any], punches: List[fl
         return 1.0 + (top - 1.0) * min(max((t - lo) / dur, 0.0), 1.0)
 
     keys: List[Tuple[float, float, str]] = [(lo + dur * j / n, base(lo + dur * j / n), "inout2") for j in range(n + 1)]
-    pop = prof["punch"] - 1.0
-    for p in sorted(punches):
+    pop_default = prof["punch"] - 1.0
+    for item in sorted(punches, key=lambda x: x[0] if isinstance(x, tuple) else x):
+        p, pop = item if isinstance(item, tuple) else (item, pop_default)       # (second, extra zoom) or just a second
         if not (lo + 0.3 < p < hi - 0.3):
             continue
         end = min(p + 1.0, hi)
@@ -540,8 +551,11 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
                   music: {asset|file, gain_db} | None, clips: [...]}],
       end: {dur, music: {...}} | None,
       sfx: {"sting": {...}, "chapter": {...}}, kill_sfx: {"hit": {...}, ...}, slowmo,
-      brand: {accent, label_style, title_style, styles {id: text style}}, glue (default True) }
-    A clip is {src, in, out, note, label (a lower-third line), punch [source seconds],
+      brand: {accent, label_style, title_style, styles {id: text style}}, glue (default True),
+      beat_sfx: {"hit"|"whoosh"|"glitch"|"scratch": {asset|file, gain_db}}, beat_stickers: {role: asset id} }
+    A chapter may carry `transition`: whip | glitch | zoom_through | flash | dip | crossfade (editbeats).
+    A clip is {src, in, out, note, label (a lower-third line), punch [source seconds], beats [{do, at, ...}] (named moves,
+    editbeats: freeze_zoom, impact, caption_pop, replay),
     kills [killfeed events - the clip then gets callouts, punches and a slow-mo ramp like
     a montage], gain_db, speed, ambient (default True)}. Positions are source seconds,
     as everywhere in the engine. `facts` (if a dict) is filled with what the edit
@@ -557,9 +571,44 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     sfx_items: List[Dict[str, Any]] = []
     music_items: List[Dict[str, Any]] = []
     chapter_list: List[Dict[str, Any]] = []
-    counter = {"n": 0}
+    counter = {"n": 0, "contact": 0}
 
-    def clip_from(c: Dict[str, Any], prefix: str, title: Optional[str], chapter_label: bool, whoosh: bool) -> Dict[str, Any]:
+    warnings: List[str] = []
+
+    # the HUD look (edithud): motion graphics in place of the stills; the lineup's `hud_sfx` names the sounds
+    hud = lineup.get("look") == "hud"
+    hud_sfx = lineup.get("hud_sfx") or {}
+    all_kills = [k for _, cl in _lineup_clip_lists(lineup) for c in cl for k in (c.get("kills") or [])]
+    kills_by_op: Dict[int, List[Dict[str, Any]]] = {}
+
+    def hud_contacts(cid: str, c: Dict[str, Any], ramp: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """A contact plate (and the sound that lands with it) for every kill of a clip. Two kills closer than a plate's
+        life stack one under the other; the clip's `hero` kill (default: its longest) gets the large plate."""
+        ov: List[Dict[str, Any]] = []
+        snd: List[Dict[str, Any]] = []
+        kills = c["kills"]
+        hero = None
+        if c.get("hero"):
+            hero = max(range(len(kills)), key=lambda j: kills[j].get("dist_m") or 0)
+        prev_t, row, chain = None, 0, 0
+        for i, k in enumerate(kills):
+            counter["contact"] += 1
+            gap = None if prev_t is None else k["t"] - prev_t
+            # DOUBLE KILL / TRIPLE KILL only for kills a few seconds apart: seven seconds apart is a run, not a double
+            chain = chain + 1 if gap is not None and gap <= edithud.MULTI_WINDOW else 1
+            head, _sub, accent = _label(k, chain)
+            # a slow-motion ramp stretches the output gap beyond the source gap, so only a very close pair can overlap there
+            row = row + 1 if gap is not None and gap < (1.0 if ramp else edithud.CONTACT_DUR - 0.2) else 0
+            y = 72 + 372 * row if row else None
+            ov.append(edithud.contact(k, head, accent, counter["contact"], len(all_kills), y_px=y, hero=(i == hero),
+                                      note=c.get("hero_note", "LONGEST CONFIRMED") if i == hero else None))
+            if hud_sfx.get("contact"):
+                snd.append(dict(hud_sfx["contact"], id="ct{0}_{1}".format(cid, i), on={"clip": cid, "at": round(k["t"], 3)}, align="peak"))
+            prev_t = k["t"]
+        return ov, snd
+
+    def clip_from(c: Dict[str, Any], prefix: str, title: Optional[str], chapter_label: bool, whoosh: bool,
+                  op: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         counter["n"] += 1
         cid = "{0}{1:02d}".format(prefix, counter["n"])
         lo, hi = float(c["in"]), float(c["out"])
@@ -569,29 +618,53 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
         speed = c.get("speed") or []
         camera: List[Dict[str, Any]] = []
         y = LABEL_Y
-        if title and chapter_label and hi - lo >= 2.5:
+        # named moves (editbeats): a freeze-zoom on the punchline, an impact, a caption on the beat, a replay after it.
+        # Expanded first: their zooms are camera keys, merged with the clip's own camera below
+        grade_d = {"preset": grade, "strength": "subtle"}
+        bparts: Dict[str, Any] = {}
+        for n, beat in enumerate(c.get("beats") or []):
+            ctx = editbeats.Ctx(cid, c["src"], lo, hi, sfx=lineup.get("beat_sfx"), stickers=lineup.get("beat_stickers"), brand=brand,
+                                grade=grade_d, gain_db=float(c.get("gain_db", 0.0)), n=n, max_gap=prof["max_gap"])
+            editbeats.merge(bparts, editbeats.expand(beat, ctx))
+        if title and chapter_label and hi - lo >= 2.5 and hud and op:
+            overlays.append(edithud.op_title(op["no"], title, op["sub"], lo + edithud.OP_LANDING))
+            if hud_sfx.get("op"):
+                sfx_items.append(dict(hud_sfx["op"], id="op" + cid, on={"clip": cid, "at": round(lo + edithud.OP_LANDING, 3)}, align="peak"))
+        elif title and chapter_label and hi - lo >= 2.5:
             overlays.append(_title_overlay(title, lo + 0.4, y, brand=brand))
             y += 0.075
         if c.get("label") and hi - lo >= 2.5:
             overlays.append(_title_overlay(c["label"], lo + (0.4 if y == LABEL_Y else 0.7), y, brand=brand))
+        for m in c.get("motion") or []:                 # a graphic the author places by hand: {comp, at, [hit, dur], props}
+            overlays.append(dict(m, kind="motion"))
         if c.get("kills"):
             parts = kill_clip_parts(cid, lo, hi, c["kills"], prof, lineup.get("slowmo", "nade"), (0.5, 0.80),
                                     lineup.get("kill_sfx"))
-            overlays += parts["overlays"]
+            if hud:
+                plates, plate_sfx = hud_contacts(cid, c, ramp=bool(c.get("speed") or parts["speed"]))
+                overlays += plates
+                sfx_items.extend(plate_sfx)
+                if parts["camera"]:
+                    _drift(parts["camera"], parts["camera"][-1]["at"], hi + 0.2, prof)      # the aftermath keeps moving, so it is not a dead stretch
+            else:
+                overlays += parts["overlays"]
             markers += parts["markers"]
             fx += parts["fx"]
             camera = parts["camera"]
+            for pun in bparts.get("punches", []):
+                _punch(camera, pun["at"], pun["zoom"])
             speed = speed or parts["speed"]
             sfx_items.extend(parts["sfx"])
         elif c.get("ambient", True):
-            camera = _ambient_camera(lo, hi, prof, [float(p) for p in c.get("punch", [])])
+            camera = _ambient_camera(lo, hi, prof, [float(p) for p in c.get("punch", [])]
+                                     + [(p["at"], p["zoom"] - 1.0) for p in bparts.get("punches", [])])
             markers += [{"at": round(float(p), 3), "name": "punch"} for p in c.get("punch", []) if lo < float(p) < hi]
         clip: Dict[str, Any] = {
             "id": cid, "src": c["src"], "in": lo, "out": hi,
             "label": (title if title else str(c.get("note") or cid))[:80],
             "tags": ["chapter"] if title else [],
             "overlays": overlays, "markers": markers, "camera": camera, "fx": fx,
-            "grade": {"preset": grade, "strength": "subtle"},
+            "grade": grade_d,
             "audio": {"slowmo": "pitch", "gain_db": float(c.get("gain_db", 0.0))},
         }
         if speed:
@@ -599,37 +672,96 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
             clip["interp"] = "blend"
         if title and whoosh and sfx_lib.get("chapter"):
             sfx_items.append(dict(sfx_lib["chapter"], id="w" + cid, on={"clip": cid, "at": round(lo + 0.4, 3)}))
-        return clip
+        extra: List[Dict[str, Any]] = []
+        if bparts:
+            if bparts.get("freezes"):
+                clip["freezes"] = bparts["freezes"]
+            clip["fx"] = clip["fx"] + bparts.get("fx", [])
+            clip["overlays"] = clip["overlays"] + bparts.get("overlays", [])
+            clip["markers"] = clip["markers"] + bparts.get("markers", [])
+            sfx_items.extend(bparts.get("sfx", []))
+            extra = bparts.get("after", [])
+            warnings.extend("{0}: {1}".format(cid, w) for w in bparts.get("warnings", []))
+        return clip, extra
 
-    def run(chapter: Dict[str, Any], prefix: str, label: bool) -> None:
+    def run(chapter: Dict[str, Any], prefix: str, label: bool, op_no: Optional[int] = None) -> None:
         first = len(clips)
+        ctitle = chapter.get("title", "Cold open")
+        # a chapter that asks for a transition preset gets that sound, not the chapter whoosh as well, unless it says `whoosh`
+        whoosh = chapter.get("whoosh", not chapter.get("transition"))
+        chapter_kills = [k for c in chapter["clips"] for k in (c.get("kills") or [])]
+        op = None
+        if hud and op_no is not None:
+            kills_by_op[op_no] = chapter_kills
+            op = {"no": op_no, "sub": chapter["sub"] if "sub" in chapter else edithud.op_sub(chapter_kills)}
         for i, c in enumerate(chapter["clips"]):
-            clips.append(clip_from(c, prefix, chapter["title"] if i == 0 else None, label, chapter.get("whoosh", True)))
+            clip, extra = clip_from(c, prefix, ctitle if i == 0 else None, label, whoosh, op)
+            clips.append(clip)
+            clips.extend(extra)
+        if chapter.get("transition") and len(clips) > first:
+            res = editbeats.apply_transition(chapter["transition"], clips[first - 1] if first else None, clips[first], lineup.get("beat_sfx"))
+            sfx_items.extend(res["sfx"])
+            warnings.extend("{0}: {1}".format(ctitle, w) for w in res["warnings"])
         mus = chapter.get("music")
         if mus and len(clips) > first:
             music_items.append(dict(mus, id="bed{0}".format(len(music_items) + 1),
                                     start={"clip": clips[first]["id"]}, end={"clip": clips[-1]["id"], "from": "end"},
                                     duck=mus.get("duck", True)))
-        chapter_list.append({"title": chapter["title"], "clips": len(chapter["clips"])})
+        chapter_list.append({"title": ctitle, "clips": len(chapter["clips"])})
 
     cold = lineup.get("cold_open")
     if cold and cold.get("clips"):
         run(cold, "o", False)
     sting = lineup.get("sting")
+    hud_meta = lineup.get("hud") or {}
     if sting is not None:
-        dur = float(sting.get("dur", 3.0))
-        clips.append(_card("sting", dur, "Intro", _card_lines(series, number, dur, 0.12, 0.08, 0.44, brand)))
-        if sfx_lib.get("sting"):
-            sfx_items.append(dict(sfx_lib["sting"], id="sting", on={"clip": "sting"}))
+        dur = float(sting.get("dur", edithud.TITLE_DUR if hud else 3.0))
+        if hud:
+            n_streams = len({c["src"] for _, cl in _lineup_clip_lists(lineup) for c in cl if c.get("src")})
+            n_ops = sum(1 for ch in lineup.get("chapters", []) if ch.get("label", True))
+            meta = hud_meta.get("meta") or ["REPORT {0:02d}".format(int(number)) if number is not None else "REPORT",
+                                            "{0:02d} STREAMS".format(n_streams), "{0:02d} OPERATIONS".format(n_ops),
+                                            "{0:02d} CONTACTS".format(len(all_kills))]
+            clips.append(edithud.title_card(series, number, hud_meta.get("kicker", "FIELD REPORT"), hud_meta.get("sub", ""), dur, meta=meta))
+            if hud_sfx.get("title"):
+                sfx_items.append(dict(hud_sfx["title"], id="sting", on={"clip": "sting", "at": edithud.TITLE_HIT}, align="peak"))
+        else:
+            clips.append(_card("sting", dur, "Intro", _card_lines(series, number, dur, 0.12, 0.08, 0.44, brand)))
+            if sfx_lib.get("sting"):
+                sfx_items.append(dict(sfx_lib["sting"], id="sting", on={"clip": "sting"}))
         if sting.get("music"):                  # a few seconds of theme, so the card is not a silent gap
             music_items.append(dict(sting["music"], id="stingbed", start={"clip": "sting"},
                                     end={"clip": "sting", "from": "end"}, fade_in=0.0, fade_out=0.4, duck=False))
+    chapter_ids: Dict[int, Tuple[str, str]] = {}
     for n, chapter in enumerate(lineup.get("chapters", []), start=1):
-        run(chapter, "c{0}_".format(n), chapter.get("label", True))
+        first_clip = len(clips)
+        run(chapter, "c{0}_".format(n), chapter.get("label", True), op_no=n if chapter.get("label", True) else None)
+        if len(clips) > first_clip:
+            chapter_ids[n] = (clips[first_clip]["id"], clips[-1]["id"])
+    for b, bed in enumerate(lineup.get("beds") or [], start=1):
+        # one music bed under several chapters (a chapter's own `music` restarts the track at every chapter)
+        a, z = int(bed["from_chapter"]), int(bed.get("to_chapter", bed["from_chapter"]))
+        if a not in chapter_ids or z not in chapter_ids:
+            raise editspec.SpecError("beds[{0}]: chapters {1}..{2} are not all in the lineup".format(b - 1, a, z))
+        item = {k: v for k, v in bed.items() if k not in ("from_chapter", "to_chapter")}
+        music_items.append(dict(item, id="mbed{0}".format(b), start={"clip": chapter_ids[a][0]},
+                                end={"clip": chapter_ids[z][1], "from": "end"}, duck=bed.get("duck", True)))
+    streams =len({c["src"] for _, cl in _lineup_clip_lists(lineup) for c in cl if c.get("src")})
+    tally = edithud.tally(all_kills, streams) if hud else None
     end = lineup.get("end")
     if end is not None:
-        dur = float(end.get("dur", 6.0))
-        clips.append(_card("end", dur, "End card", _card_lines(series, number, dur, 0.09, 0.06, 0.46, brand)))
+        dur = float(end.get("dur", edithud.STATS_DUR if hud else 6.0))
+        if hud:
+            ops = [{"n": n, "name": ch["title"].upper(), "count": len(kills_by_op.get(n) or []) or len(ch["clips"])}
+                   for n, ch in enumerate(lineup.get("chapters", []), start=1) if ch.get("label", True)]
+            clips.append(edithud.stats_card(series, number, tally, ops, dur, title=hud_meta.get("end_title", "MISSION COMPLETE"),
+                                            next_label=hud_meta.get("next", "NEXT REPORT")))
+            if hud_sfx.get("ratchet"):
+                sfx_items.append(dict(hud_sfx["ratchet"], id="endratchet", on={"clip": "end", "at": edithud.STATS_HIT + 0.15}, align="start"))
+            if hud_sfx.get("stamp"):
+                sfx_items.append(dict(hud_sfx["stamp"], id="endstamp", on={"clip": "end", "at": edithud.STATS_HIT}, align="peak"))
+        else:
+            clips.append(_card("end", dur, "End card", _card_lines(series, number, dur, 0.09, 0.06, 0.46, brand)))
         if end.get("music"):
             music_items.append(dict(end["music"], id="endbed", start={"clip": "end"}, end="end", fade_out=1.5, duck=False))
     n_clips = sum(1 for c in clips if c.get("type", "clip") == "clip")
@@ -638,7 +770,10 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
 
     title = lineup.get("title")
     if facts is not None:
-        facts.update({"series": series, "number": number, "title": title, "chapters": chapter_list, "clips": n_clips})
+        facts.update({"series": series, "number": number, "title": title, "chapters": chapter_list, "clips": n_clips,
+                      "warnings": warnings})
+        if tally:
+            facts["tally"] = tally
     spec = {
         "version": editspec.VERSION, "name": lineup["name"], "profile": lineup.get("profile", "restrained"),
         "output": {"preset": lineup.get("output_preset", "youtube_1080p60")},

@@ -40,7 +40,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import fxspec
+from . import editmotion, fxspec
 from .specerror import SpecError
 
 VERSION = 1
@@ -165,18 +165,20 @@ OUTPUT_PRESETS = {
 
 FITS = ("fit", "fill", "blur")
 
-# libavfilter's xfade names (ffmpeg 8). `fade` is the plain crossfade.
+# libavfilter's built-in xfade names (ffmpeg 8; `ffmpeg -h filter=xfade` lists them, and a test checks this tuple against it).
+# `fade` is the plain crossfade, `hblur` a whip-pan streak, `pixelize` a glitch; `zoomin` dips through muddy brown-black.
 XFADE_NAMES = (
-    "fade", "fadeblack", "fadewhite", "fadegrays", "distance", "dissolve",
-    "wipeleft", "wiperight", "wipeup", "wipedown",
+    "fade", "fadeblack", "fadewhite", "fadegrays", "fadefast", "fadeslow", "distance", "dissolve",
+    "wipeleft", "wiperight", "wipeup", "wipedown", "wipetl", "wipetr", "wipebl", "wipebr",
     "slideleft", "slideright", "slideup", "slidedown",
     "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "coverleft", "coverright", "coverup", "coverdown", "revealleft", "revealright", "revealup", "revealdown",
     "circlecrop", "circleopen", "circleclose", "rectcrop",
     "vertopen", "vertclose", "horzopen", "horzclose",
     "diagtl", "diagtr", "diagbl", "diagbr",
     "hlslice", "hrslice", "vuslice", "vdslice",
-    "radial", "zoomin", "pixelize", "squeezeh", "squeezev",
-    "hlwind", "hrwind", "vuwind", "vdwind", "fadebright",
+    "radial", "zoomin", "pixelize", "squeezeh", "squeezev", "hblur",
+    "hlwind", "hrwind", "vuwind", "vdwind",
 )
 TRANSITION_TYPES = ("cut", "dip", "xfade", "flash")
 
@@ -307,6 +309,11 @@ def _speed(raw: Any, path: str) -> List[Dict[str, Any]]:
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         return [{"at": None, "rate": _num(raw, path, *SPEED_RANGE), "ease": "linear"}]
     keys = _list(raw, path, MAX_SPEED_KEYS)
+    if len(keys) == 1 and isinstance(keys[0], dict) and keys[0].get("at") is None:
+        # the form a constant `"speed": 0.5` normalises to (`at: null` = the whole clip); it must load back, because
+        # `to_json` writes it and `edit render` reads spec.json
+        d = _dict(keys[0], path + "[0]", ("at", "rate", "ease"))
+        return [{"at": None, "rate": _num(d.get("rate"), path + "[0].rate", *SPEED_RANGE), "ease": "linear"}]
     out = []
     for i, k in enumerate(keys):
         p = "{0}[{1}]".format(path, i)
@@ -476,24 +483,67 @@ def _transition(raw: Any, path: str, default_dur: float) -> Dict[str, Any]:
     return out
 
 
-OVERLAY_KINDS = ("text", "callout", "image")
+OVERLAY_KINDS = ("text", "callout", "image", "motion")
 ANIM_IN = ("none", "fade", "pop", "slide_left", "slide_right", "slide_up", "slide_down")
 ANIM_OUT = ("none", "fade", "slide")
 
 
+def _motion_overlay(d: Dict[str, Any], path: str) -> Dict[str, Any]:
+    """A motion graphic: a Remotion composition drawn to alpha video (`editmotion`, `graphics/`).
+
+    `at` is the source second of the graphic's *hit* (the frame a count lands on, a title slams, a plate
+    locks), not of its first frame: the engine starts it `hit` seconds earlier, so what the viewer sees
+    land on the kill is the kill. `dur` is the length of the whole graphic in output seconds. The graphic
+    animates itself, so it takes no `anim_in`/`anim_out`, and it is full-frame: it places its own pieces,
+    and `x`/`y`/`w` are fixed at the centre (they exist so every overlay has the same fields).
+    """
+    comp = d.get("comp")
+    if not isinstance(comp, str) or not editmotion.known(comp):
+        _fail(path + ".comp", "{0!r} is not a motion graphic (one of: {1})".format(comp, ", ".join(sorted(editmotion.COMPS))))
+    base = editmotion.defaults(comp)
+    try:
+        props = editmotion.check_props(d.get("props"), path + ".props")
+    except ValueError as exc:
+        raise SpecError(str(exc))
+    out: Dict[str, Any] = {
+        "kind": "motion", "comp": comp, "props": props,
+        "at": _num(d.get("at"), path + ".at", 0.0, 1e6),
+        "dur": _num(d.get("dur", base["dur"]), path + ".dur", 0.3, 30.0),
+        "hit": _num(d.get("hit", base["hit"]), path + ".hit", 0.0, 29.0),
+        "x": 0.5, "y": 0.5, "w": 1.0, "anchor": "center", "anim_in": "none", "anim_out": "none", "in_dur": 0.0, "out_dur": 0.0,
+    }
+    for k in ("anim_in", "anim_out", "x", "y", "w", "in_dur", "out_dur", "anchor"):
+        if k in d and d[k] != out[k]:          # (the fixed values are accepted, so what to_json wrote loads back)
+            _fail(path + "." + k, "a motion graphic animates and places itself; drop `{0}`".format(k))
+    if out["hit"] > out["dur"]:
+        _fail(path + ".hit", "hit {0} is after the end of the graphic (dur {1})".format(out["hit"], out["dur"]))
+    if "id" in d:
+        if not isinstance(d["id"], str) or not _ID_RE.match(d["id"]):
+            _fail(path + ".id", "use 1-32 letters, digits, _ or -")
+        out["id"] = d["id"]
+    return out
+
+
 def _overlay(raw: Any, path: str) -> Dict[str, Any]:
-    """A text, callout or image item laid over a clip.
+    """A text, callout, image or motion item laid over a clip.
 
     Rendered to a transparent PNG first (Pillow: library fonts, outline, plate)
     and composited with an animated position/alpha, because drawtext cannot do a
     slide-and-settle and depends on fontconfig, which the Windows ffmpeg builds
     ship without. `at` is the source second it appears; `dur` is how long it stays.
+    A `motion` item is drawn by Remotion instead (see `_motion_overlay`).
     """
     d = _dict(raw, path, (
         "id", "kind", "at", "dur", "text", "image", "style", "x", "y", "w", "anchor",
         "anim_in", "anim_out", "in_dur", "out_dur", "size", "color", "plate", "accent", "sub",
+        "comp", "props", "hit",
     ))
     kind = _choice(d.get("kind", "text"), path + ".kind", OVERLAY_KINDS)
+    if kind == "motion":
+        return _motion_overlay(d, path)
+    for k in ("comp", "props", "hit"):
+        if k in d:
+            _fail(path + "." + k, "`{0}` belongs to a motion overlay (kind: \"motion\")".format(k))
     out: Dict[str, Any] = {
         "kind": kind,
         "at": _num(d.get("at"), path + ".at", 0.0, 1e6),

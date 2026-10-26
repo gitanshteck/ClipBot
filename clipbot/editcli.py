@@ -425,10 +425,10 @@ def cmd_edit_new(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
-    _print_taste(settings)
     """Build an episode spec from a lineup file: snap the cuts into pauses, match the clips'
     levels, run the `episode` template, and write spec.json, lineup.json (the prepared
     lineup - what the cuts moved to) and facts.json under work/_edits/<name>/."""
+    _print_taste(settings)
     lineup = json.loads(Path(args.lineup).read_text(encoding="utf-8"))
     lineup["name"] = args.name
     root = edit_stage.edit_dir(settings, args.name)
@@ -498,7 +498,48 @@ def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
         print("CONTEXT: " + issue)
     if issues:
         print("{0} kill clip(s) without their lead-up or aftermath: widen them, or mark a deliberate insert \"cutaway\": true".format(len(issues)))
+    for w in facts.get("warnings", []):
+        print("BEAT: " + w)
     print("\n".join(_summary(timeline, spec)))
+    return 0
+
+
+def cmd_edit_beats(args: argparse.Namespace, settings: Settings) -> int:
+    """What the lineup can ask for: named moves for a clip's `beats`, transition presets for a chapter's `transition`."""
+    from . import editbeats
+
+    print("beats (a lineup clip's \"beats\": [{\"do\": NAME, \"at\": source second, ...}]):")
+    for name, m in editbeats.MACROS.items():
+        print("  {0:<12} {1}\n  {2:<12} {3}".format(name, m["does"], "", m["params"]))
+    print("\ntransitions (a lineup chapter's \"transition\": NAME):")
+    for name, t in editbeats.TRANSITIONS.items():
+        print("  {0:<13}{1}".format(name, t["does"]))
+    print("\nsounds (the lineup's \"beat_sfx\": {role: {asset, gain_db}}): " + ", ".join(editbeats.SFX_ROLES))
+    return 0
+
+
+def cmd_edit_motion(args: argparse.Namespace, settings: Settings) -> int:
+    """The motion graphics a spec's `motion` overlay can name (`list`), or one frame of one drawn to a transparent PNG
+    (`still`) - how a graphic is looked at without rendering an edit."""
+    from . import editmotion
+
+    if args.motion_cmd == "list":
+        print("motion graphics (an overlay {\"kind\": \"motion\", \"comp\": NAME, \"at\": source second the graphic lands, \"props\": {...}}):")
+        for name, d in editmotion.COMPS.items():
+            doc = editmotion.DOCS.get(name, {})
+            print("  {0:<9} {1:.1f} s, hits at {2:.2f} s - {3}\n  {4:<9} props: {5}".format(
+                name, d["dur"], d["hit"], doc.get("does", ""), "", doc.get("props", "")))
+        problems = editmotion.check_ready(settings)
+        print("\nready: " + ("yes" if not problems else "NO - " + "; ".join(problems)))
+        return 0
+    if args.comp not in editmotion.COMPS:
+        raise StageError("no motion graphic {0!r} (one of: {1})".format(args.comp, ", ".join(sorted(editmotion.COMPS))))
+    props = json.loads(Path(args.props).read_text(encoding="utf-8")) if args.props else {}
+    d = editmotion.defaults(args.comp)
+    out = Path(args.out or "{0}_{1}.png".format(args.comp, args.frame))
+    editmotion.render_stills([{"comp": args.comp, "props": props, "frame": args.frame, "out": out.resolve(), "dur": args.dur or d["dur"],
+                               "hit": args.hit if args.hit is not None else d["hit"], "fps": args.fps}], settings)
+    print(out.resolve())
     return 0
 
 
@@ -1134,6 +1175,22 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("spec", help=SPEC_HELP)
     p.add_argument("--segments", action="store_true", help="also delete the shared source-segment cache")
     p.set_defaults(func=cmd_edit_clean)
+
+    p = ed.add_parser("beats", help="the named moves (freeze-zoom, replay, impact, caption pop) and transition presets (whip, glitch, zoom-through) a lineup can ask for")
+    p.set_defaults(func=cmd_edit_beats)
+
+    p = ed.add_parser("motion", help="the motion graphics (Remotion) a spec can use: list them, or draw one frame to a transparent PNG")
+    mo = p.add_subparsers(dest="motion_cmd", metavar="<action>", required=True)
+    mo.add_parser("list", help="the compositions, their length, hit time and props, and whether Node and the packages are ready")
+    q = mo.add_parser("still", help="one frame of a composition as a transparent PNG")
+    q.add_argument("comp")
+    q.add_argument("--frame", type=int, default=45, help="frame number (default 45; 60 per second)")
+    q.add_argument("--props", help="a JSON file of props")
+    q.add_argument("--dur", type=float, help="the graphic's length in seconds (default: the composition's)")
+    q.add_argument("--hit", type=float, help="where it lands, in seconds (default: the composition's)")
+    q.add_argument("--fps", type=float, default=60.0)
+    q.add_argument("--out", help="output .png")
+    p.set_defaults(func=cmd_edit_motion)
 
     p = ed.add_parser("versions", help="every render of an edit that can be played, and what changed between them")
     p.add_argument("name", help="edit name")

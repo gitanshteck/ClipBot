@@ -8,7 +8,11 @@
     "ffmpeg": "ffmpeg-2026-07-30-git-2ae2413488-essentials_build/ffmpeg-2026-07-30-git-2ae2413488-essentials_build/bin/ffmpeg.exe",
     "ffprobe": "ffmpeg-2026-07-30-git-2ae2413488-essentials_build/ffmpeg-2026-07-30-git-2ae2413488-essentials_build/bin/ffprobe.exe",
     "yt_dlp": "yt-dlp",
-    "kick_dl": "kick-dl"
+    "kick_dl": "kick-dl",
+    "_comment_node": "Motion graphics (graphics/, Remotion) need Node 22+. This machine's PATH has Node 20, so the portable Node 22 unzipped under tools/ (gitignored) is used; a bare \"node\" works wherever PATH has a new enough one.",
+    "node": "tools/node-v22.23.4-win-x64/node.exe",
+    "_comment_chrome": "The browser Remotion drives to draw a frame. Remotion's own headless shell is downloaded on first use when this is null; a regular Chrome works (it is launched in new-headless mode), which is what avoids the download here.",
+    "chrome": "C:/Program Files/Google/Chrome/Application/chrome.exe"
   },
 
   "download": {

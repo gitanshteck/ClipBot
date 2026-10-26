@@ -25,3 +25,9 @@ ffmpeg-*-essentials_build/
 config/youtube_client_secret.json
 client_secret*.json
 youtube_token*.json
+
+# Motion graphics (graphics/): the portable Node 22 and the npm package tree are fetched locally,
+# rendered clips cache under work/. See CLAUDE.md "Motion graphics".
+tools/
+graphics/node_modules/
+graphics/out/

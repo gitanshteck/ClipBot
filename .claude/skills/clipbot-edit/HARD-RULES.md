@@ -181,6 +181,29 @@ wrong, change the rule here with the evidence, do not quietly break it in a spec
     the chat at that second, and say what you could not check. The right fix is labels, not a better model:
     ten moments he *knows* he laughed in would settle it.
 
+44. **A zoom is a camera key, never an fx `punch`.** An fx `punch` scales around the centre of the
+    frame and knows nothing about the webcam, so on a gameplay clip with a corner webcam it crops
+    it (rule 38). Camera keys are what safe framing protects. *Origin:* the first `freeze_zoom`
+    macro used an fx punch; it was caught by reading it against rule 38 before it shipped, and now
+    `editbeats` returns zooms as `punches` that `episode()` merges into the clip's camera (and
+    `test_the_zoom_is_never_an_fx_punch...` pins it).
+45. **A preset is named for what it looks like, after you have looked.** xfade's `zoomin` was the
+    obvious "zoom-through" and dips through a muddy brown-black at its midpoint; `hblur` was the
+    whip and `pixelize` the glitch. Rendered between two real clips, frames side by side, before
+    any name was chosen (`rules/look.md`).
+46. **A graphic is looked at twice: as a still over real footage before it goes in, and as frames of the render
+    after.** *Origin:* a stamp sat on the word COMPLETE and a header ran two labels together ("TARGET
+    ACQUIREDSNIPER OVERWATCH"): both found only in a still. Worse, the first preview's plates all said KHANNY, because
+    Remotion merges a composition's `defaultProps` under a render's props and `Root.jsx` carried a demo victim (and a
+    demo distance of 68 m that would have been drawn on any kill the feed gave no range for): `verify` passed, since
+    it cannot read a plate. Compositions now register with no demo props (`test_editmotion` pins it), and
+    `clipbot edit motion still` draws the frames. Read `moments_NN.jpg` and a handful of frames at each hit.
+47. **A label says what happened, not what the template guessed.** *Origin:* the first preview called the second
+    kill of a clip a DOUBLE KILL although the kills were seven seconds apart (a run, not a double), drew a victim
+    name of ten digits (OCR noise) and a plate repeated its own range as a headline ("68 M > KHANNY" under a 68 M
+    count). `edithud` now chains DOUBLE/TRIPLE only within `MULTI_WINDOW` (4 s), draws only names that have a letter
+    in them, and leaves the headline to multi-kills; the rest is the plate's range and chips (`rules/hud.md`).
+
 ## Delivery
 
 26. **YouTube chapters need 0:00, 3+ entries, each >= 10 s.** `edit validate` says

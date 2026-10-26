@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .. import editaudio, editcaptions, editfilters as ef, editframe, editoverlay, editscene, editspec, edittimeline, editversions, library, ytsegments
+from .. import editaudio, editcaptions, editfilters as ef, editframe, editmotion, editoverlay, editscene, editspec, edittimeline, editversions, library, ytsegments
 from ..config import Settings
 from ..ffrun import run_ffmpeg
 from ..progress import NULL_PROGRESS, Progress
@@ -267,10 +267,16 @@ def _video_encode_args(out: Dict[str, Any], tier: str) -> List[str]:
 
 
 def _overlay_pngs(entry: Dict[str, Any], clip: Dict[str, Any], out: Dict[str, Any], png_dir: Path, font: Optional[str],
-                  styles: Dict[str, Any], assets: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Rasterise a clip's overlays (cached by content) and return their PNG info."""
+                  styles: Dict[str, Any], assets: Dict[str, Any], motion_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Rasterise a clip's overlays (cached by content) and return their PNG info. A motion overlay's entry is the
+    alpha video drawn for it by the `motion` phase (`motion_dir` is the cache it lives in)."""
     pngs = []
     for o in entry.get("overlays") or []:
+        if o["kind"] == "motion":
+            # drawn earlier, in the `motion` phase; the file is the cache's, named by the job's key
+            pngs.append({"path": str(editmotion.out_path(motion_dir, o["motion_key"])), "w": out["width"], "h": out["height"],
+                         "key": o["motion_key"], "motion": True})
+            continue
         use_font = font
         if o.get("style") and o["style"] in styles:
             f = styles[o["style"]].get("font")
@@ -425,8 +431,9 @@ def render_edit(
             c = spec["clips"][k]
             keys = entry.get("camera") or []
             seg = segs.get(k)
-            if c["type"] != "clip" or seg is None or not (entry.get("overlays") or any(key["zoom"] > 1.0 + 1e-6 for key in keys)):
-                continue
+            if c["type"] != "clip" or seg is None or not (any(o["kind"] != "motion" for o in entry.get("overlays") or [])
+                                                           or any(key["zoom"] > 1.0 + 1e-6 for key in keys)):
+                continue                  # (a motion graphic places itself: it needs no webcam map)
             try:
                 spans = editscene.scene_spans(settings, ffmpeg, seg["path"], seg["key"], seg["in_rel"],
                                               seg["in_rel"] + (c["out"] - c["in"]))
@@ -469,6 +476,29 @@ def render_edit(
                 drawn += 1
             log.info("captions: %d clip(s)", drawn)
 
+    # ---- motion graphics: Remotion compositions drawn to alpha video, cached by content in the shared cache
+    motion_jobs: List[Dict[str, Any]] = []
+    for entry in clips:
+        for o in list(entry.get("overlays") or []):
+            if o["kind"] != "motion":
+                continue
+            if out["width"] * 9 != out["height"] * 16:
+                warnings.append("{0}: the motion graphic {1!r} is drawn for a 16:9 frame and this output is {2}x{3}; it is left out".format(
+                    entry["id"], o["comp"], out["width"], out["height"]))
+                entry["overlays"].remove(o)
+                continue
+            job = editmotion.make_job(o, fps, out["width"])
+            o["motion_key"] = job["key"]
+            motion_jobs.append(job)
+    motion_drawn = 0
+    if motion_jobs:
+        distinct = len({j["key"] for j in motion_jobs})
+        progress.phase("motion", total=distinct, unit="graphics")
+        motion_drawn = editmotion.render_missing(
+            motion_jobs, settings, cache, log_path=work / "logs" / "motion.log",
+            on_progress=lambda done, total, comp: progress.update(done, label=comp), cancelled=lambda: progress.cancelled)
+        log.info("motion graphics: %d used, %d drawn", distinct, motion_drawn)
+
     # ---- clips
     progress.phase("clips", total=max(1, len(clips)), unit="clips")
     clip_files: List[Dict[str, Any]] = []
@@ -477,13 +507,15 @@ def render_edit(
         c = spec["clips"][n]
         head = entry["transition_in"] if entry["index"] > 0 else None
         nxt = clips[n + 1]["transition_in"] if n + 1 < len(clips) else None
-        pngs = _overlay_pngs(entry, c, out, work / "overlays", font, styles, assets)
+        pngs = _overlay_pngs(entry, c, out, work / "overlays", font, styles, assets, motion_dir=cache)
         if entry.get("scene"):
             # an overlay that would sit on the webcam is moved clear of it (sideways, else up or down); the
             # position goes into the clip's fingerprint, since the overlay's own times and PNG do not change
             canvas = (out["width"], out["height"])
             moved = []
             for k, (o, p) in enumerate(zip(entry.get("overlays") or [], pngs)):
+                if o["kind"] == "motion":
+                    continue                  # full-frame and placed by the graphic itself, not movable
                 sized = dict(o, w=p["w"], h=p["h"], label=str(o.get("text") or o.get("kind", "")))
                 move = editframe.clear_of_webcam(sized, entry.get("camera") or [], entry["scene"], canvas)
                 if move is None:
@@ -624,6 +656,7 @@ def render_edit(
         "bytes": final.stat().st_size, "clips": len(clips), "xfade": needs_xfade,
         "loudness_target": m["loudness_lufs"] if m["normalize"] else None,
         "measured_input": measured, "pacing": pacing, "warnings": warnings,
+        "motion": {"graphics": len({j["key"] for j in motion_jobs}), "drawn": motion_drawn},
         "render_seconds": round(time.time() - t_start, 1),
         "cache": str(work),
     }

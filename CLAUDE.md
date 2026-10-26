@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-10-24.
+> 2026-10-27.
 
 ## What this actually is, right now
 
@@ -134,9 +134,9 @@ clipbot/
                      for what commands exist (run, download, chat, chat-sync,
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
-                     library {scan,list,presets,licenses,hash,fetch,path},
+                     library {scan,list,presets,licenses,hash,fetch,synth,path},
                      edit {new,episode,validate,inspect,render,scenes,words,captions,verify,deliver,thumbnail,list,clean,taste,
-                     versions,review {list,add,resolve,reopen,reply,delete,taste}},
+                     versions,beats,motion {list,still},review {list,add,resolve,reopen,reply,delete,taste}},
                      killfeed {scan,list}, events {fetch-model,scan,peaks,tags},
                      moments {build,list,show,sheet,pool,coverage}) - the last four groups are registered
                      by editcli.add_parsers(), not defined in cli.py
@@ -201,6 +201,16 @@ clipbot/
   editmoment.py      the moment engine: arcs_from_kills() (lead-up + kills +
                      aftermath), score_arc(), coverage(), evidence_sheet() (a contact
                      sheet per arc); writes <workspace>/moments.json
+  editbeats.py       named moves for a lineup: beats (freeze_zoom, replay, impact,
+                     caption_pop) as spec fragments, and transition presets (whip, glitch,
+                     zoom_through, flash, dip, crossfade) - pure
+  editmotion.py      motion graphics, the Python half: COMPS (the compositions and their default length and hit
+                     time), make_job() (a cacheable key), render_missing() (runs graphics/render.mjs under
+                     Node), render_stills(), check_ready()
+  edithud.py         the HUD look (`lineup.look == "hud"`, AFTER ACTION): builds the motion overlays and the
+                     card text from the lineup's data - pure
+  hudsounds.py       the HUD's synthesised cues (hud_contact, hud_slam, ...), CC0 by construction; `clipbot
+                     library synth` writes them into the library
   editdiff.py        diff_specs(old, new): what changed between two renders' specs, in words
                      (clips added/removed/trimmed/moved, gain, captions, master...) - pure
   editversions.py    versioned final renders: begin_final()/commit_final() archive the live
@@ -337,6 +347,12 @@ tests/
   test_editmoment.py            arcs, ranking, coverage, build; the lineup context rule and
                                 `moment` expansion live in test_edittemplates.py
   test_killfeed.py              kill-feed parsing rules + icon geometry
+  test_editbeats.py, test_edit_beats_render.py   beats and transitions: the fragments, the lineup wiring,
+                                and a real render (the freeze holds, a replay adds its length, a whip blurs)
+  test_editmotion.py            the `motion` overlay: spec, timing, filter graph, job key, and (with Node + Chrome +
+                                ffmpeg) a real Remotion render landing on its hit on a clip and a card
+  test_edithud.py               the HUD look: overlay builders, `episode` with `look: "hud"`, `kill_ids`, and the
+                                synthesised cues (peak where the graphic lands, deterministic, CC0 sidecar)
   test_editdiff.py, test_editversions.py, test_editreview.py, test_edit_review_server.py
                                 the review loop: the changelog, version archiving, comments, and the
                                 page's API and media route
@@ -348,6 +364,10 @@ tests/
                                 infrastructure exists in this repo
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
+graphics/                the motion graphics project (Remotion): src/ (Root.jsx + comps/ + parts.jsx + theme.js),
+                         public/fonts, render.mjs (the batch renderer clipbot/editmotion.py runs), package.json
+                         (versions pinned exactly); node_modules/ and out/ are gitignored
+tools/                   gitignored: the portable Node 22 that `tools.node` points at
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
 requirements.txt          core pipeline deps
 requirements-server.txt   dashboard-only deps (fastapi/uvicorn/jinja2, capped for py3.9)
@@ -1361,6 +1381,10 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   `reply`), `note`. `status`: `open`, `done`, `wontfix`; resolving records *how* and *in which version*, so
   "resolved" names something that can be looked at. The dashboard page and `edit review ...` read and write the
   same file; `cli.main` turns a `SpecError` (an unknown id, a bad time) into a message and exit code 1.
+- **The review page opens on the render that is newest** (`editreview.overview`): the preview or the live final,
+  whichever was rendered last, and the preview on a tie. It used to open on the preview whenever one existed, which
+  after a final left the user watching a stale 540p render with its old verify flags on it (found when the page was
+  opened on AFTER ACTION #1's final); `?which=` still asks for any version.
 - **Taste is read by the author, not the renderer**: `edit new` and `edit episode` print the active rules
   (`_print_taste`) so whoever writes the spec applies them by hand. The `clipbot-review` skill
   (`.claude/skills/clipbot-review/`) is the procedure for turning comments into spec changes: follow the clip and
@@ -1372,8 +1396,8 @@ See "The edit engine" for the model; this is the IO. `render_edit(spec,
 settings, preview=False, force=False, progress=NULL_PROGRESS, master=True) ->
 report` where `spec` is a path or a dict and `report` carries `output`,
 `duration`, `frames`, `clips`, `xfade`, `measured_input`, `pacing`, `warnings`,
-`render_seconds`, `cache`. Phases: prepare (open + probe every source) ->
-segments -> framing -> captions -> clips -> assemble -> mix -> master -> mux.
+`render_seconds`, `cache`, `motion` (`{graphics, drawn}`). Phases: prepare (open + probe every source) ->
+segments -> framing -> captions -> motion -> clips -> assemble -> mix -> master -> mux.
 
 - **Framing** (`edit.safe_framing`, default on): for every clip that zooms or carries an
   overlay, `editscene.scene_spans` reads the webcam box from the clip's cached segment (4
@@ -1830,7 +1854,9 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   `to_json` output loads back unchanged (a test pins it; the output block's
   `faststart`/`preview` keys are accepted and ignored for that reason). Clips are
   `type: clip` (`src,in,out,speed,interp,freezes,camera,grade,fx,overlays,markers,
-  audio,framing,transition_in,tags,captions`) or `type: card` (`dur,bg,overlays`). A
+  audio,framing,transition_in,tags,captions`) or `type: card` (`dur,bg,overlays`). `XFADE_NAMES` is exactly ffmpeg 8's built-in xfade list (a test checks it
+  against `ffmpeg -h filter=xfade`; `fadebright` was in it and does not exist). A constant `"speed": 0.5` normalises to a key
+  with `at: null` and loads back (it did not: `to_json` wrote what `load` refused). A
   clip's `captions` is a bool, written only when given (`false`: none here; `true`: even over
   a kill callout). The spec-level `captions` block (`CAPTION_DEFAULTS`: `enabled, font, size,
   color, highlight, outline, x, y, width, karaoke, censor`) is emitted only when the spec has
@@ -1947,6 +1973,79 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   `clipbot edit scenes NAME`), a `loudness.png` (short-term RMS with cuts and events marked), `joins_NN.jpg`
   contact sheets (a frame just after every join) and `moments_NN.jpg` (a frame
   `MOMENT_LAG`=0.6 s after every marker, <= 64: where callouts are up). `ok` is false only on `fail`.
+- **editbeats.py** - the named moves of an editor, as fragments a lineup asks for. A *beat* is `{"do": NAME,
+  "at": source second, ...}` on a lineup clip; `expand(beat, Ctx)` returns `{freezes, fx, punches, overlays,
+  markers, sfx, after, warnings}` and `edittemplates.episode` merges it into the clip. `freeze_zoom` (a freeze of
+  `hold` s + a camera zoom + optional flash/sound/caption), `impact` (shake + flash + sound + optional sticker),
+  `caption_pop` (a big caption with an optional sticker), `replay` (a slower copy of the moment, tagged REPLAY,
+  inserted as a clip after the host, `<id>r<N>`, with camera keys across it so the pacing gate sees events).
+  **A zoom is a camera key, never an fx `punch`** (`punches` -> `_ambient_camera`/`_punch`): an fx punch scales
+  around the frame centre and crops a corner webcam; camera keys are what safe framing protects. A beat within
+  0.3 s of a clip's edge, an unknown parameter, an unknown move and an out-of-range value are `SpecError`s
+  naming the beat - never dropped. Sounds are *roles* (`hit`, `whoosh`, `glitch`, `scratch`) looked up in the
+  lineup's `beat_sfx`; a role with no entry plays nothing and `edit episode` prints `BEAT:`. **Transition
+  presets** (`apply_transition`, a chapter's `"transition"`) were picked by rendering each candidate xfade
+  between two real clips: `whip` = `hblur` 0.3 s (a real streak), `glitch` = `pixelize` 0.2 s, `zoom_through` =
+  a camera push on both clips under a 0.3 s `fade` (xfade's own `zoomin` dips through muddy brown-black), and
+  falls back to a plain cross-fade, saying so, when a punch is in the way or a card is on either side. A chapter
+  with a transition does not also get the chapter whoosh unless it says `"whoosh": true`. `clipbot edit beats`
+  lists them; `rules/look.md` in the edit skill is when to use them (restraint: Teo's roundups cut hard).
+- **Motion graphics (editmotion.py, edithud.py, hudsounds.py, `graphics/`)** - animated graphics from Remotion
+  (React) instead of Pillow stills. A spec overlay `{"kind": "motion", "comp": "Contact", "at": S, "hit": 0.55,
+  "dur": 3.2, "props": {...}}` names a composition in `graphics/src/Root.jsx`. **`at` is the source second the
+  graphic *lands*** (the count locks, the title slams), not its first frame: `edittimeline` starts it `hit`
+  seconds earlier (`t0 = local(at) - hit`; a landing near a clip's start cuts the front of the graphic, `trim`,
+  played as `-ss trim -i`). On a card `at` is card-local output seconds, as for every overlay. It is full-frame
+  and animates and places itself (`x`/`y`/`anim_*` are rejected; the fixed values are accepted so `to_json`
+  loads back). **Compositions are told their length, hit and fps through props (`dur`, `hit`, `fps`) and animate
+  in seconds against them**: the spec stays the one place that says when, and `COMPS` in `editmotion.py` (default
+  length and hit; a test holds it equal to `Root.jsx`) is the only other copy. Ids: `Title` (series card),
+  `OpTitle` (operation header over footage), `Contact` (a kill's report: range counting up to a lock on a 0-300 m
+  ruler, chips, victim), `Stats` (the debrief card), `Acquire` (a range finder that never settles: a tease),
+  `Probe` (tests). `clipbot edit motion list` prints them with their props; `edit motion still COMP --frame N
+  --props FILE` draws one frame to a transparent PNG - **look at a still over real footage before it goes in an
+  edit** (an "OK" stamp sat on the word COMPLETE and a plate on the squad list until a still showed it).
+  - *Render.* `render_edit` has a `motion` phase before `clips`: every distinct job (`make_job`: sha1 of comp,
+    props, dur, hit, fps, scale, `source_hash()` - all of graphics/src, the sizes of public/, package.json - and
+    the size+mtime of any `file:<png>` in the props) not already in `work/_cache/edit/motion/<key>.mov` is drawn
+    by **one** `node graphics/render.mjs` per batch (bundle once, one browser reused), ProRes 4444
+    `yuva444p10le`, written as `.part.mov` and renamed. `file:` props are inlined as data URIs by the script (the
+    page is served over http); a missing file becomes `null`, the composition draws without it. Drawn at
+    scale 1, 1/2 or 1/4 of 1920x1080 and nothing else (`scale_for`): Remotion refuses a scale that does not give
+    whole pixels (1/6 of 1080 came out 180.036), and ffmpeg scales the rest; a preview draws at 1/2, a quarter
+    of the pixels. An output that is not 16:9 leaves a motion overlay out with a warning. ~10 s per graphic;
+    ProRes alpha is large (a 7 s full-frame card is ~150 MB at final scale), the cache is `edit clean`-able.
+  - *Compositing.* `editfilters.overlay_chains` has a motion branch: `[i:v]scale=W:H:flags=bicubic,format=rgba,
+    setpts=PTS-STARTPTS+t0/TB` then `overlay=x=0:y=0:enable=between(t,t0,t1):eof_action=pass:format=auto`.
+    `clear_of_webcam` skips motion overlays (full-frame; a composition keeps its pieces off this stream's layout:
+    webcam top-right, chat bottom-right, minimap bottom-left, so plates sit top-left), and a motion overlay alone
+    does not trigger the webcam scene scan. **Pacing:** a motion overlay counts as an event at its first frame, at
+    its hit and every 2 s while up, and may stay up 8 s (`DWELL_MAX_MOTION`) against a still's 4 s, because it
+    keeps moving. `report["motion"]` = `{graphics, drawn}`.
+  - *Tools.* **Node 22+** (`tools.node`): this machine's PATH has Node 20, so a portable Node 22 (the zip from
+    nodejs.org, checked against SHASUMS256) sits under `tools/` (gitignored). **Chrome** (`tools.chrome`): the
+    regular Chrome is driven in new-headless mode (`chromeMode: 'chrome-for-testing'`) because Chrome 142 has no old
+    headless; null lets Remotion download its own headless shell instead. `graphics/node_modules` (~220 MB) comes
+    from `npm install` in `graphics/`; `@remotion/*` and `remotion` are pinned to one exact version because they
+    must match. Fonts in `graphics/public/fonts`: Bebas Neue and Anton (the library's, OFL) and Share Tech Mono
+    (OFL, from @fontsource); `useFonts()` holds a render until they load. Remotion's licence (read from its
+    LICENSE.md) is free for individuals and for-profit organisations of up to 3 employees, a company licence above that. `check_ready(settings)` says what is missing.
+  - *The HUD look* (`lineup["look"] == "hud"`, `edithud.py`; AFTER ACTION, report 01). `edittemplates.episode`
+    draws a `Title` card, an `OpTitle` over the first seconds of every labelled chapter (landing
+    `OP_LANDING` = 0.9 s in), a `Contact` plate on every kill (instead of the Pillow callout; two kills closer than a
+    plate's life stack 372 px apart; a clip with `"hero": true` gets the large plate on its longest kill, with
+    `hero_note`), and a `Stats` card, all from numbers the lineup carries: the feed's distance (a kill with none
+    is a plain KILL CONFIRMED plate, never a guessed range), the chapter's own kill count, the tally of the kills
+    that are *in* the edit (`edithud.tally`; `facts["tally"]`). Lineup keys: `hud {kicker, sub, end_title, next}`,
+    `hud_sfx {contact, title, op, ratchet, stamp}` (each `{asset, gain_db}`; sounds land on the graphic's hit,
+    `align: peak`), `beds [{asset, gain_db, from_chapter, to_chapter, fade_in, fade_out}]` (one music bed under
+    several chapters - a chapter's own `music` restarts the track), and on a clip `kill_ids ["k004", ...]` (a window
+    chosen by hand around kills named by `killfeed.json` id, so it still gets plates), `motion [{comp, at, ...}]` (a
+    graphic placed by hand, e.g. `Acquire`) and `hero`. A kill clip's aftermath gets a slow push-in so the
+    seconds after the plate are not a dead stretch (`_drift` toward the clip's end). **`hudsounds.py`** synthesises
+    the cues (ticks that slow into a lock, a riser and boom, a whoosh into a thump, a ratchet, a stamp, a sweep)
+    with numpy only, so they are CC0 and deterministic; each peaks where its graphic lands (a test checks).
+    `clipbot library synth` writes them into the library (`sfx/`, with a sidecar) and prints their ids.
 - **editdeliver.py** - `build_package(...)`: `VARIANTS` (`shorts` 1080x1920 <= 180 s,
   `square`, `portrait`) re-frame the master with the blur-fit canvas and **copy the
   audio** (a hero platform deserves a real `edit render --preset`); thumbnails are
@@ -2460,7 +2559,10 @@ Sections and the values worth knowing without opening the file:
   gitignored, so a fresh git worktree doesn't have it - set `CLIPBOT_FFMPEG`
   there.) `yt_dlp` is a bare `yt-dlp`; the one on this machine's PATH can't do
   YouTube, so YouTube work needs `CLIPBOT_YT_DLP` pointed at a current install
-  (see the youtube.py section).
+  (see the youtube.py section). `node` (`CLIPBOT_NODE`) is the Node 22+ that draws motion
+  graphics - the portable one under `tools/` here, a bare `node` anywhere PATH has a new
+  enough one - and `chrome` (`CLIPBOT_CHROME`) the Chrome Remotion drives (null = Remotion
+  fetches its own headless shell); see "Motion graphics".
 - **`download`** — `format` pins `height<=720` explicitly ("best" once
   silently returned 160p); `fallback_to_kick_dl: false` (see above);
   `http_chunk_size: "10M"` (yt-dlp bandwidth-throttling-bypass flag,
@@ -2960,6 +3062,18 @@ Sections and the values worth knowing without opening the file:
   `clipbot events fetch-model` (once), `events scan --workspace W`, then `events check` (against the kill
   record and chat laughs), `events peaks` (the strongest peaks with transcript) and `events tags --at S`
   (what the model hears there). Read the events.py section for what was measured first.
+- ...add a freeze-zoom, a replay, an impact, a caption pop, or a whip / glitch / zoom-through transition →
+  a `beats` list on a lineup clip and a `transition` on a chapter (`clipbot edit beats` lists them),
+  the lineup's `beat_sfx` for sounds; read `rules/look.md` in the edit skill first; new moves go in
+  `clipbot/editbeats.py` (a function returning a fragment, in `_BEATS`) with a test that the spec takes it.
+- ...add an animated graphic (a title, a plate on a kill, an end card) → a composition in
+  `graphics/src/comps/<Id>.jsx` registered in `graphics/src/Root.jsx` with its default length and hit, the same
+  numbers in `editmotion.COMPS` (+ a line in `DOCS`), then a `motion` overlay in a spec (or a builder in
+  `edithud.py` for the HUD look). Draw stills first: `clipbot edit motion still ID --frame N --props FILE`, and
+  look at them over a real frame. Time everything against the `dur`/`hit` props, never in frames.
+- ...make a video in the AFTER ACTION style (a mission-debrief montage with a range plate on every kill) →
+  a lineup with `"look": "hud"` (see `edithud.py` and "Motion graphics"), `clipbot library synth` once for its
+  sounds, then `edit episode` -> validate -> `render --preview` -> look at the frames -> final -> verify.
 - ...act on the user's notes about a render, or find out what changed between versions →
   `clipbot edit review NAME list` (their comments, with clip + offset), the `clipbot-review` skill for the
   procedure, `edit versions NAME --changes N` and `work/_edits/NAME/changelog.md` for the history; the page

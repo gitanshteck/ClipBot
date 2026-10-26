@@ -64,6 +64,18 @@ class TestRoundTrip(unittest.TestCase):
         again = E.normalize(json.loads(E.to_json(n)))
         self.assertEqual(again, n)
 
+    def test_a_constant_speed_loads_back_too(self):
+        """`"speed": 0.5` normalises to a key with `at: null`; `to_json` writes it and `edit render` reads it back."""
+        n = E.normalize(spec([clip(speed=0.5)]))
+        self.assertEqual(n["clips"][0]["speed"], [{"at": None, "rate": 0.5, "ease": "linear"}])
+        self.assertEqual(E.normalize(json.loads(E.to_json(n))), n)
+
+    def test_a_constant_speed_key_is_still_range_checked_and_a_keyed_ramp_still_needs_its_seconds(self):
+        with self.assertRaises(E.SpecError):
+            E.normalize(spec([clip(speed=[{"at": None, "rate": 9.0}])]))
+        with self.assertRaises(E.SpecError):
+            E.normalize(spec([clip(speed=[{"at": None, "rate": 0.5}, {"at": 13, "rate": 1.0}])]))
+
     def test_load_reads_a_file(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "s.json"

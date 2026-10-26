@@ -19,7 +19,9 @@ spec: **render, look, listen (by measurement), fix, only then present.**
 3. Read the rule file for the kind of edit: `rules/gaming.md` for kill/clutch
    montages, `rules/roundups.md` for a numbered variety roundup (a "Mish Mash"),
    plus `rules/hooks.md`, `rules/motion.md`, `rules/audio.md`, `rules/cutting.md`,
-   `rules/framing.md` as needed.
+   `rules/framing.md` as needed, `rules/look.md` before using a beat (freeze-zoom, replay,
+   impact, caption pop) or a transition preset (whip, glitch, zoom-through), and `rules/hud.md`
+   before making motion graphics (a title that slams, a plate on every kill, a debrief card).
 4. Know what you actually have: which sources, at what resolution (Kick tops out
    at 720p60 - an upscaled 1080p master is not 1080p detail), whether the
    footage's data (kill times, chapters) is *measured* or *guessed*.
@@ -81,6 +83,9 @@ clipbot events fetch-model                 # once: the PANNs audio tagger (359 M
 clipbot events scan --workspace W [--first S --last S]   # events.json: laughter/shout/gunfire/music/... per second, ~95x realtime on CPU
 clipbot events peaks --workspace W [--category laughter] [--top 20]   # a category's strongest peaks with the transcript nearby
 clipbot events tags --workspace W --at SECONDS            # what the model hears around a time (check a number before you trust it)
+clipbot edit beats                         # the named moves and transition presets a lineup can ask for (see rules/look.md)
+clipbot edit motion list | still ID --frame N --props FILE   # the motion graphics (Remotion), and one frame of one as a transparent PNG (see rules/hud.md)
+clipbot library synth                      # once: the HUD's synthesised sounds (hud_contact, hud_slam, ...) into the library
 clipbot edit review NAME list|add|resolve|reopen|reply|delete|taste   # the user's timestamped comments: see the clipbot-review skill
 clipbot edit versions NAME [--changes N]   # every playable render and what changed between them (a final render writes changelog.md)
 clipbot edit validate|inspect NAME

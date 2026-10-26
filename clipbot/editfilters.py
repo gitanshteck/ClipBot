@@ -322,6 +322,17 @@ def overlay_chains(g: Graph, lin: str, items: List[Dict[str, Any]], size: Tuple[
     label = lin
     for it in items:
         t0, t1 = it["t0"], it["t1"]
+        if it.get("kind") == "motion":
+            # a graphic drawn to alpha video by Remotion: it animates itself, so it is only shifted onto the
+            # clip's clock and laid over the whole frame. eof_action=pass lets the picture through once it ends.
+            tag = g.label("mo")
+            g.add("[{0}:v]scale={1}:{2}:flags=bicubic,format=rgba,setpts=PTS-STARTPTS+{3}/TB[{4}]".format(
+                it["index"], W, H, num(t0), tag))
+            out = g.label("moo")
+            g.add("[{0}][{1}]overlay=x=0:y=0:enable={2}:eof_action=pass:format=auto[{3}]".format(
+                label, tag, q("between(t,{0},{1})".format(num(t0), num(t1))), out))
+            label = out
+            continue
         ind, outd = it["in_dur"], it["out_dur"]
         # The renderer feeds each PNG as `-loop 1 -framerate <fps> -t <clip length> -i png`
         # so it is a real stream; shift it first so every `t` below is main-timeline time.
@@ -860,7 +871,10 @@ def build_clip_graph(
         item = dict(o)
         item["index"] = len(inputs)
         item["png_w"], item["png_h"] = png["w"], png["h"]
-        inputs.append(["-loop", "1", "-framerate", num(fps), "-t", num(dur), "-i", png["path"]])
+        if o["kind"] == "motion":
+            inputs.append((["-ss", num(o["trim"])] if o.get("trim") else []) + ["-i", png["path"]])
+        else:
+            inputs.append(["-loop", "1", "-framerate", num(fps), "-t", num(dur), "-i", png["path"]])
         items.append(item)
     vl = overlay_chains(g, vl, items, (W, H))
 

@@ -240,7 +240,10 @@ def overview(root: Path, name: str, which: Optional[str] = None, taste: Sequence
     versions = [{k: v for k, v in x.items() if k != "file"} for x in editversions.list_versions(root, name)]
     have = [v["which"] for v in versions]
     if not which or which not in have:
-        which = "preview" if "preview" in have else ("final" if "final" in have else (have[-1] if have else ""))
+        # the page opens on whichever of the preview and the live final was rendered last (a preview is the iteration
+        # target, but one that a final has since replaced is stale, with the old verify flags on it); a tie is the preview
+        live = [v for v in versions if v["which"] in ("preview", "final")]
+        which = max(live, key=lambda v: (v["rendered_at"], v["which"] == "preview"))["which"] if live else (have[-1] if have else "")
     tl = timeline_for(root, name, which) if which else None
     caps = _caption_texts(root)
     clips = []

@@ -119,7 +119,7 @@ fix what you saw**, before ears and captions:
 | **1c: Moment engine v1 - BUILT 2026-10-24, see 0.6** | M1-M6; rebuild the Mish Mash lineup from evidence sheets, with kill context. | Every kill chapter clip has lead-up and aftermath; coverage report per game; you review a candidate sheet, not a list of descriptions. |
 | 2 | Ears: A1 word timestamps, A2 reaction map (also feeds M3), B1 captions, H checks. | as before |
 | 3: Review loop - BUILT 2026-10-25, see 0.9 | E1 review page with timestamped comments, E2 versions and changelog, E4 taste wiring, the `clipbot-review` skill. | as before |
-| 4 | Look (B3 graphics kit, B4 punctuation, B5 transitions, B2 reaction framing, on top of S). | as before |
+| 4: Look - BUILT 2026-10-26/27, see 0.10 and 0.11 | B4 punctuation, B5 transitions and B3 the graphics kit (Remotion motion graphics, the HUD look) built; B2 reaction framing not. | as before |
 | 5 | Sound (A3, C2, C3, C5). | as before |
 | 6 | Finish and learn (B6, F upload, E5 analytics). | as before |
 
@@ -256,6 +256,86 @@ shared state) or opening the dashboard beyond loopback, which needs real authent
 
 **Found on the way:** `cli.main` did not catch `SpecError`, so a mistake in any edit command (an unknown taste id, a bad time)
 printed a Python traceback. It now prints the message and exits 1.
+
+### 0.10 Phase 4 result: the look (B4, B5), 2026-10-26
+
+| | Status | What exists |
+|---|---|---|
+| B4 punctuation | **built** | Named moves a lineup clip can call, `"beats": [{"do": ..., "at": source second}]`: **`freeze_zoom`** (hold the frame for `hold` s, punch in, optional flash, sound and a caption), **`replay`** (the moment again after it at 0.5x, tagged REPLAY, a flash in), **`impact`** (shake, flash, sound, optional sticker), **`caption_pop`** (a big caption with an optional sticker). `clipbot edit beats` lists them. **Not built:** record scratch (the library has no such sound) and meme-sound pops. |
+| B5 transitions | **built** | A chapter's `"transition"`: **`whip`**, **`glitch`**, **`zoom_through`**, plus `flash`, `dip`, `crossfade`; a preset brings its own sound and replaces the chapter whoosh. **Not built:** light leaks and film grain (need overlay assets, section D). |
+| B3 graphics kit | **not built** | Remotion needs Node 22+; this PC has Node 20.19, so it means installing Node and a package tree. Decision 10. |
+| B2 reaction framing | **not built** | It needs a face or crosshair locator (A5 / S3, never built) and, on Kick, the webcam is 320x180 source pixels, so an enlarged cam is soft. |
+
+**Transitions were measured, not named from the docs.** I rendered 16 xfade candidates between two real 1080p clips and looked at
+the middle frame of each. `hblur` is a genuine whip-pan streak (heavy at 0.5 s, right at 0.3 s); `pixelize` is a convincing digital
+glitch; `zoomin`, the obvious "zoom-through", goes through a muddy brown-black at its midpoint and is not used. So `zoom_through` is
+a camera push on both clips under a plain cross-fade (and falls back to a cross-fade, saying so, when a punch is in the way or
+a card is on either side).
+
+**Rendered on real footage, then verified.** A 43-second demo edit, `look-demo` (four chapters, every beat and every preset, cut from
+the same stream footage as Mish Mash), is in `work/_edits/look-demo/`; open it on the review page, `/edits/look-demo/review`.
+Final-quality `verify` is OK: sound and picture agree to 0 ms, -13.9 LUFS, no click at any join, no level step, and the webcam is
+whole in 12 of 12 sampled frames (the preview tier flags 4 of 12, and in each the box is plainly whole: the one-pixel border
+smears at 540p).
+
+**Things that went wrong on the way, and are fixed.**
+- My first `freeze_zoom` zoomed with an fx `punch`, which scales around the centre of the frame and would crop a corner webcam
+  (HARD-RULES 38). Caught by reading it against the rule, before it shipped: the zoom is now a camera key that safe framing protects
+  (rule 44, with a test that no beat emits a `punch`).
+- A constant `"speed": 0.5` normalised to a key with `at: null` that `edit render` then refused to load from `spec.json`; nobody had
+  used a constant speed before. Fixed in `editspec`, pinned by a round-trip test.
+- The spec accepted a transition name, `fadebright`, that ffmpeg 8 does not have, and lacked `hblur`; the list is now exactly
+  ffmpeg's, checked by a test.
+- A 7-second replay tripped the pacing gate (nothing new on screen); it now has camera keys across it.
+- The library's "Glitch" sound is 30 ms and the engine drops anything under 50 ms; the lineup maps `glitch` to "Error" instead.
+- My zoom-through code kept a punch's zoom and silently dropped its ease-back; its test caught it.
+
+**Restraint is the author's call.** Nothing here decides *when* a move belongs. Teo's roundups cut hard with a whoosh per chapter;
+I have not added beats to Mish Mash #1. `rules/look.md` in the edit skill says when each earns its place.
+
+### 0.11 Phase 4, second half: motion graphics (B3) and a real run, 2026-10-27
+
+**Decision 10 answered yes, decision 11 answered with a bigger ask**: "go for it with node... create a brand new video with a new
+style and name not as a demo but as a real run... full control". So: the graphics kit, then a video made with it.
+
+| | Status | What exists |
+|---|---|---|
+| B3 graphics kit | **built** | Remotion (React) compositions drawn to ProRes 4444 alpha video by `graphics/render.mjs` and composited as a `motion` overlay (`editmotion.py`, "Motion graphics" in CLAUDE.md). `Title`, `OpTitle`, `Contact`, `Stats`, `Acquire`. A graphic is told its length and hit time and the spec says where it *lands*. |
+| The HUD look | **built** | `lineup.look = "hud"` (`edithud.py`): a series card, an operation header per chapter, a contact plate on every kill (range counting up to a lock on a 0-300 m ruler), a debrief card; every number is the feed's or counted from the kills in the edit. |
+| Sound for it | **built** | `hudsounds.py`: seven synthesised cues (CC0 by construction, numpy only), each peaking where its graphic lands; `clipbot library synth`. |
+| B2 reaction framing | not built | unchanged (needs a face locator; Kick cam is 320x180). |
+
+**Toolchain, measured.** Node 22.23.4 portable (35.6 MB zip from nodejs.org, SHA-256 checked against SHASUMS256) under `tools/`, not on PATH
+(this PC's Node is 20.19). `npm install` of Remotion 4.0.539 + React 19.3.1: 254 packages, 220 MB, 30 s. **No browser was downloaded**: Chrome
+142 on this machine has no old headless mode ("Old Headless mode has been removed from the Chrome binary"), but Remotion's
+`chromeMode: 'chrome-for-testing'` drives it in new headless. A 1 s transparent 1080p60 ProRes 4444 clip is 9.6 MB and takes ~9 s to draw
+(mostly browser start); the 21 graphics of the first video took ~4 min at half scale. ffmpeg 8 reads the alpha (`yuva444p12le`). Remotion refuses a
+scale that does not give whole pixels (1/6 of 1080 = 180.036), so graphics are drawn at 1, 1/2 or 1/4 and ffmpeg scales the rest.
+
+**The video: AFTER ACTION #1** (`work/_edits/after-action-1/`). A Wardogs mission debrief from three native-1080p60 YouTube streams (Sep 24, 26, 30):
+a cold open that tests a range finder on the 238 m scope and cuts before the shot, the series card, four operations (BREACH: a five-kill room clear
+and a nade-then-headshot double; OVERWATCH: 68 / 63 m and a nade; ZERO IN: 57, 73 and a 99 m headshot; THE SHOT: 238 m, slow-motion, the
+large plate) and a debrief card. Moments were chosen from evidence sheets (`moments sheet`), not descriptions: three candidate arcs were dropped
+because the sheet showed him being downed at the moment of the kill, or no target in frame. Facts are from the kill feed and counted from what is
+in the edit: 14 kills, 3 headshots, 2 grenades, longest 238 m, mean range 51 m over the 14 that have a range, 3 streams.
+
+**Result, measured.** 3:39.9, 1920x1080 at 60 fps, 513 MB (x264 `slow`), final render 915 s of which the 21 graphics (drawn at full scale) took
+~8 min; the preview was 219.5 s / 106 MB in 430 s. `edit verify` on the final: **OK** - -14.1 LUFS, true peak -1.5 dBTP, A/V agree to 0 ms, no black,
+frozen or static stretch, no click or level step at a join, pacing clean (something new at least every 4 s), no cut inside a word, the webcam whole in
+all 30 sampled frames of the 10 zoomed clips; one **warning**: strong language in the first 30 s ("Get fucked" at 0:29; two more later: rule 42,
+the author's call). The preview's one webcam failure (c3_08, "found None") was smear at 540p and did not recur at final. Each graphic's sound peak
+was measured in the preview's mixed audio (not re-measured on the final): the title boom 80 ms before the card's slam, a contact lock 40 ms before its plate's hit (the engine places a peak
+`lead` = 50 ms early on purpose). **Not checked:** the music bed and the synthesised cues were never *listened to* (there is no ear here: levels,
+spectrograms and peak times only); eleven of the 14 distances were not checked by eye against the feed.
+
+**Things that went wrong on the way, and are fixed** (each is in HARD-RULES 46-47 or a test):
+- Remotion merged a demo `defaultProps` under real props: **every plate in the first preview said KHANNY**, and a kill with no range would have been
+  drawn as 68 m. `verify` passed. Found by reading frames of the render; `Root.jsx` registers compositions with no demo props, pinned by a test.
+- The first preview called a kill seven seconds after another a DOUBLE KILL, drew a ten-digit OCR "name", and repeated its own range as a headline.
+- An "OK" stamp sat on the word COMPLETE and the tease's two header labels ran together: found in stills.
+- A kill clip's last seconds were dead stretches under the 4 s gate (nothing after the plate); the aftermath now gets a slow push-in.
+- A one-off script I wrote to patch `edittemplates.py` duplicated half of the file (`str.index` matched an earlier line); restored from a copy I had
+  taken, byte-checked by the test suite. Patches to source now go through exact-match edits only.
 
 ## 1. Where we are
 
@@ -415,7 +495,7 @@ Each check comes with a contact-sheet artefact, as verify does today.
 | **0: Quick wins** | B7 AMF previews; C1 voice chain on the mix; C4 join-level check and crossfades; A4 dead-picture detector (a contact sheet plus my review); D brand kit file plus fonts; F designed thumbnail v1; re-render Mish Mash #1 as v2. | Biggest visible and audible lift for little new machinery. Proves the loop on a video you've already seen. | 1-2 sessions |
 | **1: Ears** | A1 word timestamps; A2 reaction map; B1 animated captions; H profanity and caption checks. | Captions and word-accurate cuts are the largest jump in watchability, and the reaction map closes my "can't hear" gap. | 2 sessions |
 | **2: Review loop - BUILT 2026-10-25 (0.9)** | E1 review page with comments, E2 versions and changelog, E4 taste wiring, the `clipbot-review` skill. | Makes every later improvement iterate with you, not around you. | 1-2 sessions |
-| **3: Look** | B3 Remotion graphics kit; B4 punctuation macros; B5 transitions; B2 reaction framing with A5. | High-production feel; needs Phase 1 timing to place beats precisely. | 2-3 sessions |
+| **3: Look - B4, B5 built (0.10)** | B3 Remotion graphics kit; B4 punctuation macros; B5 transitions; B2 reaction framing with A5. | High-production feel; needs Phase 1 timing to place beats precisely. | 2-3 sessions |
 | **4: Sound** | A3 separation test; C2 game ducking; C3 music editing with Epidemic (if subscribed); C5 Content-ID safety. | Depends on the A3 measurement and the music source decision. | 2 sessions |
 | **5: Finish and learn** | B6 AI upscale (Vulkan) with VMAF check; F upload of edits; E5 analytics loop; optional OTIO / Resolve. | Polishing the source and closing the performance loop. | 2+ sessions |
 
@@ -438,6 +518,8 @@ Every phase ends with the same proof:
 7. **Re-transcribe streams with auto-detected language** (section 0.7)? The stage-3 transcript is Hindi-pinned and reads English as nonsense; it feeds `analyze`'s clip picking. About $1.66 per 4.6 h stream on whisper-1, and the existing `transcript.json` would be replaced (`transcribe --force`), so candidates found from it would need a re-run.
 8. ~~A2 reaction map~~ - approved and built (section 0.8). **New question:** can you give me 10-20 moments you *know* you laughed or shouted in, with the stream and a rough time? That is the label the measurement lacks.
 9. **Phone review?** The review page is dashboard-only (this PC). Do you want a hosted, phone-friendly version (a low-bitrate proxy video plus comments I read back), or is reviewing at the PC enough?
+10. ~~**Graphics kit (B3):** OK to install Node 22+ and Remotion?~~ **Answered 2026-10-27: yes** ("go for it with node"). Built: section 0.11.
+11. ~~**Beats in Mish Mash #1?**~~ **Answered 2026-10-27:** not proposals - a new video, in a new style, as a real run, with full creative control: AFTER ACTION #1 (0.11). Mish Mash #1 is untouched.
 
 ## 6. Known limits (said up front)
 

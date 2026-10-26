@@ -215,12 +215,16 @@ def _localize(c: Dict[str, Any], entry: Dict[str, Any]) -> None:
     entry["overlays"] = []
     for i, o in enumerate(c["overlays"]):
         t0 = local(o["at"]) if c["type"] == "clip" else o["at"]
+        if o["kind"] == "motion":
+            t0 -= o["hit"]            # `at` is where the graphic *lands*; it starts `hit` seconds before
         t1 = min(dur, t0 + o["dur"])
-        if t0 >= dur - 0.05:
-            entry["warnings"].append("overlay {0} starts after the clip ends and was dropped".format(o.get("id", i)))
+        if t0 >= dur - 0.05 or t1 <= 0.05:
+            entry["warnings"].append("overlay {0} falls outside the clip and was dropped".format(o.get("id", i)))
             continue
         d = dict(o)
         d["t0"], d["t1"] = max(0.0, t0), t1
+        if o["kind"] == "motion":
+            d["trim"] = round(max(0.0, -t0), 4)        # a graphic that would start before the clip is cut into
         d["index"] = i
         entry["overlays"].append(d)
 
@@ -294,6 +298,15 @@ def _events(spec, clips, tracks) -> List[Dict[str, Any]]:
             add(e["start"], "overlay", e["id"] + ":card")
         for o in e["overlays"]:
             add(e["start"] + o["t0"], "overlay", "{0}:{1}".format(e["id"], o.get("id", o["kind"])))
+            if o["kind"] == "motion":
+                # a motion graphic never sits still: its hit, and a beat every 2 s for as long as it is up
+                landing = o["t0"] + max(0.0, o["hit"] - o.get("trim", 0.0))
+                if landing - o["t0"] >= 0.25:
+                    add(e["start"] + landing, "overlay", "{0}:{1}:hit".format(e["id"], o.get("id", o["comp"])))
+                t = o["t0"] + 2.0
+                while t < o["t1"] - 0.25:
+                    add(e["start"] + t, "overlay", "{0}:{1}:live".format(e["id"], o.get("id", o["comp"])))
+                    t += 2.0
         for k in e["camera"]:
             add(e["start"] + k["t"], "camera", "{0}:zoom{1}".format(e["id"], k["zoom"]))
         for p in e["pieces"]:
@@ -321,6 +334,7 @@ def _events(spec, clips, tracks) -> List[Dict[str, Any]]:
 
 DWELL_MIN = 1.0   # a callout shown for less than this reads as a flicker
 DWELL_MAX = 4.0   # past this it is a hold and the picture should have moved on
+DWELL_MAX_MOTION = 8.0   # a motion graphic keeps moving (a count-up, a build), so it may stay up longer than a still
 
 
 def pacing(timeline: Dict[str, Any], max_gap: Optional[float] = None) -> Dict[str, Any]:
@@ -356,10 +370,11 @@ def pacing(timeline: Dict[str, Any], max_gap: Optional[float] = None) -> Dict[st
                 issues.append({"severity": "warn", "what": "dwell",
                                "detail": "{0} overlay {1} is up for {2:.2f} s (< {3} s, reads as a flicker)".format(
                                    e["id"], o.get("id", o["index"]), shown, DWELL_MIN)})
-            elif shown > DWELL_MAX + 1e-6:
+            elif shown > (DWELL_MAX_MOTION if o["kind"] == "motion" else DWELL_MAX) + 1e-6:
                 issues.append({"severity": "warn", "what": "dwell",
                                "detail": "{0} overlay {1} is up for {2:.1f} s (> {3} s)".format(
-                                   e["id"], o.get("id", o["index"]), shown, DWELL_MAX)})
+                                   e["id"], o.get("id", o["index"]), shown,
+                                   DWELL_MAX_MOTION if o["kind"] == "motion" else DWELL_MAX)})
     for d in dead:
         issues.append({"severity": "warn", "what": "dead", "detail": "{0} s with nothing new, {1:.1f}-{2:.1f} s".format(
             d["length"], d["start"], d["end"])})

@@ -21,6 +21,8 @@ ENV_OVERRIDES = {
     "CLIPBOT_FFPROBE": "tools.ffprobe",
     "CLIPBOT_YT_DLP": "tools.yt_dlp",
     "CLIPBOT_KICK_DL": "tools.kick_dl",
+    "CLIPBOT_NODE": "tools.node",
+    "CLIPBOT_CHROME": "tools.chrome",
     "CLIPBOT_WHISPER_MODEL": "transcribe.model",
     "CLIPBOT_WHISPER_DEVICE": "transcribe.device",
     "CLIPBOT_WHISPER_LANGUAGE": "transcribe.language",

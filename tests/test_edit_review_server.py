@@ -74,7 +74,24 @@ class TestEditReviewApi(unittest.TestCase):
 
     # -- the review payload ----------------------------------------------------
 
+    def age(self, name, seconds):
+        import os
+        import time
+
+        p = self.root / "render" / name
+        t = time.time() - seconds
+        os.utime(str(p), (t, t))
+
+    def test_the_page_opens_on_whichever_of_the_preview_and_the_final_was_rendered_last(self):
+        self.age("e1.mp4", 600)                                             # the final is the older one: the preview is the iteration target
+        self.assertEqual(self.client.get("/api/edits/e1/review").json()["which"], "preview")
+        self.age("e1.mp4", 0)
+        self.age("e1.preview.mp4", 600)                                     # a final has since replaced it: the preview is stale
+        self.assertEqual(self.client.get("/api/edits/e1/review").json()["which"], "final")
+        self.assertEqual(self.client.get("/api/edits/e1/review?which=preview").json()["which"], "preview")    # asking still works
+
     def test_review_payload_has_versions_chapters_clips_and_the_captions_that_show(self):
+        self.age("e1.mp4", 600)
         d = self.client.get("/api/edits/e1/review").json()
         self.assertEqual(d["which"], "preview")
         self.assertEqual([v["which"] for v in d["versions"]], ["v1", "final", "preview"])

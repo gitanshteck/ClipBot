@@ -489,6 +489,19 @@ def cmd_library(args: argparse.Namespace, settings: Settings) -> int:
         print(library.ensure_layout(root))
         return 0
 
+    if action == "synth":
+        # the HUD's own sounds (counting ticks, a lock, a title slam) are made, not downloaded: CC0 by construction
+        from . import hudsounds
+
+        sfx_dir = library.ensure_layout(root) / "sfx"
+        names = hudsounds.write_library(sfx_dir)
+        index = library.scan(settings)
+        ids = {a["name"]: a["id"] for a in index.get("assets") or [] if a["kind"] == "sfx"}
+        for cid, cue in hudsounds.CUES.items():
+            print("{0:<12} {1:<26} {2}".format(cid, ids.get(cue["name"], "?"), cue["about"]))
+        print("{0} cue(s) written to {1}".format(len(names), sfx_dir))
+        return 0
+
     if action == "scan":
         index = library.scan(settings, prune=getattr(args, "prune", False))
         counts = index["counts"]
@@ -875,6 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_lib_hash.add_argument("--kind", choices=sorted(("sfx", "music", "sticker",
                                                       "font")))
 
+    lib_sub.add_parser("synth", help="write the HUD's synthesised sounds (hud_contact, hud_slam, ...) into the library")
     lib_sub.add_parser("licenses", help="print where every asset came from")
     lib_sub.add_parser("presets", help="list saved effect chains")
     lib_sub.add_parser("speakers", help="list speaker profiles")
