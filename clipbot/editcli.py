@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import audioevents, editcaptions, editcut, editdeliver, editmoment, editwords, library, editqa, editspec, edittaste, edittemplates, edittimeline, panns
+from . import audioevents, editcaptions, editcut, editdeliver, editmoment, editreview, editversions, editwords, library, editqa, editspec, edittaste, edittemplates, edittimeline, panns
 from .config import Settings
 from .progress import Progress
 from .specerror import SpecError
@@ -380,6 +380,7 @@ def _summary(timeline: Dict[str, Any], spec: Dict[str, Any]) -> List[str]:
 
 
 def cmd_edit_new(args: argparse.Namespace, settings: Settings) -> int:
+    _print_taste(settings)
     if args.template != "kill-montage":
         raise StageError("unknown template {0!r} (only kill-montage today)".format(args.template))
     sources: Dict[str, Dict[str, Any]] = {}
@@ -424,6 +425,7 @@ def cmd_edit_new(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_edit_episode(args: argparse.Namespace, settings: Settings) -> int:
+    _print_taste(settings)
     """Build an episode spec from a lineup file: snap the cuts into pauses, match the clips'
     levels, run the `episode` template, and write spec.json, lineup.json (the prepared
     lineup - what the cuts moved to) and facts.json under work/_edits/<name>/."""
@@ -868,6 +870,92 @@ def cmd_edit_taste(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _print_taste(settings: Settings) -> None:
+    """The user's standing preferences, printed where a spec is about to be written: nothing in the renderer reads
+    them (a taste is a judgement and belongs in the spec where it can be seen), so the author has to."""
+    rules = edittaste.active(_taste_file(settings))
+    if rules:
+        print("taste rules in force (apply them by hand; `clipbot edit taste list` says what was said):")
+        for r in rules:
+            print("  {0}  {1}".format(r["id"], r["text"]))
+
+
+# --------------------------------------------------------------------------
+# review: comments on a render, versions and their changelog
+# --------------------------------------------------------------------------
+
+
+def _edit_root(settings: Settings, name: str) -> Path:
+    root = edit_stage.edit_dir(settings, name)
+    if not root.is_dir():
+        raise StageError("no edit named {0!r} under {1}".format(name, edit_stage.edits_root(settings)))
+    return root
+
+
+def cmd_edit_versions(args: argparse.Namespace, settings: Settings) -> int:
+    root = _edit_root(settings, args.name)
+    vs = editversions.list_versions(root, args.name)
+    if not vs:
+        print("{0} has no renders yet".format(args.name))
+        return 0
+    live = editversions.live_number(root, args.name)
+    for v in vs:
+        label = {"final": "v{0} (live)".format(live), "preview": "preview"}.get(v["which"], v["which"])
+        print("{0:<10} {1:>9}  {2:>7.1f} s  {3:>6.0f} MB  {4}".format(
+            label, v["rendered_at"].replace("T", " ")[:16], v["duration"] or 0.0, (v["bytes"] or 0) / 1048576.0, v["summary"]))
+        if args.changes:
+            for c in v["changes"][:args.changes]:
+                print("             - {0}".format(c))
+    return 0
+
+
+def cmd_edit_review(args: argparse.Namespace, settings: Settings) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    root = _edit_root(settings, args.name)
+    doc = editreview.load(root, args.name)
+    act = args.review_cmd
+    if act == "list":
+        shown = doc["comments"] if args.all else editreview.open_comments(doc)
+        if args.on:
+            shown = [c for c in shown if c.get("on") == args.on]
+        if not shown:
+            print("no {0}comments on {1}".format("" if args.all else "open ", args.name))
+        for c in shown:
+            print(editreview.line(c))
+            if c.get("reply"):
+                print("       reply: {0}".format(c["reply"]))
+        return 0
+    if act == "add":
+        c = editreview.add(doc, args.at, args.text, kind=args.kind, on=args.on, timeline=editreview.timeline_for(root, args.name, args.on))
+        editreview.save(root, doc)
+        print(editreview.line(c))
+        return 0
+    if act == "taste":
+        c = next((x for x in doc["comments"] if x["id"] == args.id), None)
+        if c is None:
+            raise StageError("no comment {0!r}".format(args.id))
+        rule = edittaste.add(_taste_file(settings), args.text or c["text"], said=c["text"], edit=args.name)
+        editreview.resolve(doc, args.id, how="taste rule {0}".format(rule["id"]), in_version="")
+        editreview.save(root, doc)
+        print("{0}: {1}   (comment {2} done)".format(rule["id"], rule["text"], args.id))
+        return 0
+    if act == "resolve":
+        c = editreview.resolve(doc, args.id, how=args.how or "", in_version=args.version, status="wontfix" if args.wontfix else "done")
+    elif act == "reopen":
+        c = editreview.reopen(doc, args.id)
+    elif act == "reply":
+        c = editreview.reply(doc, args.id, args.text)
+    else:
+        editreview.delete(doc, args.id)
+        editreview.save(root, doc)
+        print("deleted {0}".format(args.id))
+        return 0
+    editreview.save(root, doc)
+    print(editreview.line(c))
+    return 0
+
+
 # --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
@@ -1046,6 +1134,39 @@ def add_parsers(sub: Any) -> None:
     p.add_argument("spec", help=SPEC_HELP)
     p.add_argument("--segments", action="store_true", help="also delete the shared source-segment cache")
     p.set_defaults(func=cmd_edit_clean)
+
+    p = ed.add_parser("versions", help="every render of an edit that can be played, and what changed between them")
+    p.add_argument("name", help="edit name")
+    p.add_argument("--changes", type=int, default=0, metavar="N", help="also print the first N changes of each version")
+    p.set_defaults(func=cmd_edit_versions)
+
+    p = ed.add_parser("review", help="timestamped comments on a render: list, add, resolve, reply (the review page in the dashboard writes the same file)")
+    p.add_argument("name", help="edit name")
+    rv = p.add_subparsers(dest="review_cmd", metavar="<action>", required=True)
+    q = rv.add_parser("list", help="the open comments (--all: every comment)")
+    q.add_argument("--all", action="store_true")
+    q.add_argument("--on", help="only comments made on this render: preview, final or v<N>")
+    q = rv.add_parser("add", help="add a comment at a time of a render")
+    q.add_argument("--at", required=True, help="192.4, 3:12 or 1:03:12 into the render")
+    q.add_argument("--kind", default="change", choices=list(editreview.KINDS))
+    q.add_argument("--on", default="preview", help="the render it is about: preview (default), final or v<N>")
+    q.add_argument("text")
+    q = rv.add_parser("resolve", help="mark a comment done, saying how and in which version it was seen to be fixed")
+    q.add_argument("id")
+    q.add_argument("--how", help="what was changed")
+    q.add_argument("--in", dest="version", default="preview", help="the render the fix was seen in: preview (default), final or v<N>")
+    q.add_argument("--wontfix", action="store_true", help="close it without a change (say why in --how)")
+    q = rv.add_parser("reopen", help="the fix did not work")
+    q.add_argument("id")
+    q = rv.add_parser("reply", help="answer a question, or explain a choice")
+    q.add_argument("id")
+    q.add_argument("text")
+    q = rv.add_parser("delete", help="remove a comment")
+    q.add_argument("id")
+    q = rv.add_parser("taste", help="turn a comment into a standing taste rule (and close it)")
+    q.add_argument("id")
+    q.add_argument("--text", help="the rule, if it should say more than the comment does")
+    p.set_defaults(func=cmd_edit_review)
 
     p = ed.add_parser("taste", help="the user's standing preferences for edits")
     p.add_argument("action", choices=["list", "add", "retire"])

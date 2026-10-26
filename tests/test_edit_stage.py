@@ -233,6 +233,56 @@ class TestRenderEdit(unittest.TestCase):
         self.assertIn("b", calls)
         self.assertNotIn("a", calls)
 
+    def test_a_second_final_render_archives_the_first_and_says_what_changed(self):
+        first = stage.render_edit(self.spec("vers"), self.settings)
+        root = stage.edit_dir(self.settings, "vers")
+        live = Path(first["output"])
+        self.assertEqual(first["version"], 1)
+        self.assertEqual(first["changes"], ["first render: 3 clip(s)"])
+        self.assertFalse((root / "render" / "v1").exists())                 # nothing to archive yet
+        first_bytes = live.read_bytes()
+        changed = self.spec("vers")
+        changed["clips"][2]["out"] = 3.5
+        second = stage.render_edit(changed, self.settings)
+        self.assertEqual(second["version"], 2)
+        archived = root / "render" / "v1" / "vers.v1.mp4"
+        self.assertEqual(archived.read_bytes(), first_bytes)                # the old final, byte for byte
+        self.assertTrue((root / "render" / "v1" / "vers.v1.spec.json").is_file())
+        self.assertTrue((root / "render" / "v1" / "vers.v1.timeline.json").is_file())
+        self.assertNotEqual(live.read_bytes(), first_bytes)                 # the live final is the new render
+        self.assertTrue(any(l.startswith("b: out 4 -> 3.5") for l in second["changes"]), second["changes"])
+        doc = json.loads((root / "versions.json").read_text(encoding="utf-8"))
+        self.assertEqual((doc["current"], [h["n"] for h in doc["history"]], doc["history"][1]["from"]), (2, [1, 2], 1))
+        text = (root / "changelog.md").read_text(encoding="utf-8")
+        self.assertLess(text.index("## v2"), text.index("## v1"))           # newest first
+
+    def test_a_final_render_that_fails_leaves_the_live_final_and_the_archive_alone(self):
+        stage.render_edit(self.spec("vfail"), self.settings)
+        changed = self.spec("vfail")
+        changed["clips"][2]["out"] = 3.5
+        root = stage.edit_dir(self.settings, "vfail")
+        live = root / "render" / "vfail.mp4"
+        before = live.read_bytes()
+        real = stage._run_ffmpeg
+
+        def boom(argv, *a, **k):
+            if argv[-1].endswith(".part.mp4") and "-map" in argv:           # the mux
+                raise StageError("disk full")
+            return real(argv, *a, **k)
+
+        with mock.patch.object(stage, "_run_ffmpeg", side_effect=boom), self.assertRaises(StageError):
+            stage.render_edit(changed, self.settings)
+        self.assertEqual(live.read_bytes(), before)
+        self.assertFalse((root / "render" / "v1").exists())
+        self.assertEqual(json.loads((root / "versions.json").read_text(encoding="utf-8"))["current"], 1)
+
+    def test_a_preview_is_never_versioned(self):
+        stage.render_edit(self.spec("vprev"), self.settings, preview=True)
+        stage.render_edit(self.spec("vprev"), self.settings, preview=True)
+        root = stage.edit_dir(self.settings, "vprev")
+        self.assertFalse((root / "versions.json").exists())
+        self.assertFalse((root / "render" / "v1").exists())
+
     def test_a_cut_only_edit_assembles_by_copy(self):
         sp = self.spec("cuts")
         sp["clips"][2].pop("transition_in")

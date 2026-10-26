@@ -12,6 +12,7 @@ from unittest import mock
 
 from clipbot import cli, editcli
 from clipbot.config import Settings
+from clipbot.specerror import SpecError
 from clipbot.utils import StageError
 
 
@@ -413,6 +414,99 @@ class TestWordsAndCaptions(TestEditEpisode):
         self.assertEqual((b.func, b.check_only), (editcli.cmd_edit_words, True))
         c = cli.build_parser().parse_args(["edit", "episode", "ep", "l.json", "--words"])
         self.assertTrue(c.words)
+
+
+class TestReviewCommands(unittest.TestCase):
+    """`edit review` and `edit versions`: the same review.json the dashboard page writes, from a terminal."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings = Settings({"work_root": self._tmp.name}, Path("s.json"))
+        self.root = Path(self._tmp.name) / "_edits" / "e1"
+        (self.root / "render").mkdir(parents=True)
+        tl = {"clips": [{"id": "sting", "type": "card", "start": 0.0, "dur": 12.0, "tags": [], "label": "Intro"},
+                        {"id": "a", "type": "clip", "start": 12.0, "dur": 20.0, "tags": ["chapter"], "label": "Headshots"}]}
+        (self.root / "render" / "e1.preview.timeline.json").write_text(json.dumps({"timeline": tl, "report": {"duration": 32.0}}), encoding="utf-8")
+        (self.root / "render" / "e1.preview.mp4").write_bytes(b"x" * 100)
+
+    def review(self, cmd, **kw):
+        return run(editcli.cmd_edit_review, self.settings, name="e1", review_cmd=cmd, **kw)
+
+    def test_the_parsers_register_every_action(self):
+        for argv in (["list"], ["add", "--at", "3:12", "text"], ["resolve", "n1"], ["reopen", "n1"], ["reply", "n1", "why"], ["delete", "n1"], ["taste", "n1"]):
+            a = cli.build_parser().parse_args(["edit", "review", "e1"] + argv)
+            self.assertIs(a.func, editcli.cmd_edit_review)
+            self.assertEqual(a.review_cmd, argv[0])
+        self.assertIs(cli.build_parser().parse_args(["edit", "versions", "e1"]).func, editcli.cmd_edit_versions)
+
+    def test_add_locates_the_comment_in_the_edit_and_list_shows_open_ones(self):
+        code, out = self.review("add", at="0:20", text="zoom less", kind="change", on="preview")
+        self.assertEqual(code, 0)
+        self.assertIn("[a +8.0s]", out)
+        _, listing = self.review("list", all=False, on=None)
+        self.assertIn("zoom less", listing)
+        self.assertEqual(json.loads((self.root / "review.json").read_text(encoding="utf-8"))["comments"][0]["chapter"], "Headshots")
+
+    def test_resolve_records_how_and_where_and_list_hides_it_until_all(self):
+        self.review("add", at="20", text="zoom less", kind="change", on="preview")
+        _, out = self.review("resolve", id="n1", how="zoom 1.18 -> 1.10", version="preview", wontfix=False)
+        self.assertIn("(done: zoom 1.18 -> 1.10)", out)
+        self.assertIn("no open comments", self.review("list", all=False, on=None)[1])
+        self.assertIn("zoom less", self.review("list", all=True, on=None)[1])
+        self.review("reopen", id="n1")
+        self.assertIn("zoom less", self.review("list", all=False, on=None)[1])
+        _, out = self.review("resolve", id="n1", how="he likes it", version="preview", wontfix=True)
+        self.assertIn("wontfix", out)
+
+    def test_reply_and_delete_and_unknown_ids(self):
+        self.review("add", at="20", text="why this clip?", kind="question", on="preview")
+        self.review("reply", id="n1", text="it is the strongest laugh")
+        self.assertIn("reply: it is the strongest laugh", self.review("list", all=False, on=None)[1])
+        self.assertIn("deleted n1", self.review("delete", id="n1")[1])
+        with self.assertRaises(SpecError):                            # cli.main turns it into a message and exit code 1
+            self.review("resolve", id="n1", how="", version="preview", wontfix=False)
+
+    def test_a_taste_comment_becomes_a_standing_rule_and_closes(self):
+        self.review("add", at="20", text="captions bigger on phones", kind="taste", on="preview")
+        _, out = self.review("taste", id="n1", text="captions at least 6% of the frame tall")
+        self.assertIn("t1: captions at least 6% of the frame tall", out)
+        self.assertIn("(done: taste rule t1)", self.review("list", all=True, on=None)[1])
+        rules = json.loads((Path(self._tmp.name) / "_edits" / "taste.json").read_text(encoding="utf-8"))["rules"]
+        self.assertEqual((rules[0]["said"], rules[0]["edit"]), ("captions bigger on phones", "e1"))
+
+    def test_a_mistake_in_a_comment_command_is_a_message_and_exit_code_one_not_a_traceback(self):
+        with mock.patch.object(cli, "load_settings", return_value=self.settings), mock.patch.object(cli, "setup_logging"):
+            for argv in (["edit", "review", "e1", "resolve", "n9"], ["edit", "review", "e1", "add", "--at", "soon", "text"],
+                         ["edit", "taste", "retire", "t99"]):
+                self.assertEqual(cli.main(argv), 1, argv)
+
+    def test_an_edit_that_does_not_exist_says_so(self):
+        with self.assertRaises(StageError):
+            run(editcli.cmd_edit_review, self.settings, name="nope", review_cmd="list", all=False, on=None)
+        with self.assertRaises(StageError):
+            run(editcli.cmd_edit_versions, self.settings, name="nope", changes=0)
+
+    def test_versions_lists_what_can_be_played(self):
+        _, out = run(editcli.cmd_edit_versions, self.settings, name="e1", changes=0)
+        self.assertIn("preview", out)
+        (self.root / "render" / "e1.mp4").write_bytes(b"y" * 100)
+        _, out = run(editcli.cmd_edit_versions, self.settings, name="e1", changes=5)
+        self.assertIn("v1 (live)", out)
+
+    def test_spec_writing_commands_print_the_taste_rules_in_force(self):
+        from clipbot import edittaste
+
+        edittaste.add(Path(self._tmp.name) / "_edits" / "taste.json", "no whoosh at chapter starts", said="ugh")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            editcli._print_taste(self.settings)
+        self.assertIn("t1  no whoosh at chapter starts", out.getvalue())
+        edittaste.retire(Path(self._tmp.name) / "_edits" / "taste.json", "t1")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            editcli._print_taste(self.settings)
+        self.assertEqual(out.getvalue(), "")                          # a retired rule is not in force
 
 
 if __name__ == "__main__":

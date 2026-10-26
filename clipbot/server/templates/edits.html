@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Edits — ClipBot{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="/static/edit_review.css?v={{ ASSET_V }}">
+
+<section class="panel">
+  <h1>Edits</h1>
+  <div class="meta">
+    Finished videos made with the edit engine (<code>clipbot edit ...</code>). Open one to watch a render, leave
+    timestamped comments, and see what changed between versions.
+  </div>
+</section>
+
+<div id="edits-list" class="grid"><div class="empty">Loading…</div></div>
+<div class="toast" id="toast"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(async function () {
+  const box = document.getElementById('edits-list');
+  try {
+    const { edits } = await api('/api/edits');
+    if (!edits.length) { box.innerHTML = '<div class="empty">No edits yet. Make one with <code>clipbot edit new</code> or <code>clipbot edit episode</code>.</div>'; return; }
+    box.innerHTML = edits.map(e => `
+      <a class="card er-card" href="/edits/${encodeURIComponent(e.name)}/review">
+        <h2>${esc(e.name)}</h2>
+        <div class="meta">${e.duration ? fmtDur(e.duration) + ' · ' : ''}${e.live ? 'v' + e.live + ' live' : 'no final yet'}${e.versions.includes('preview') ? ' · preview' : ''}</div>
+        <div class="meta">${e.rendered_at ? 'rendered ' + esc(e.rendered_at.replace('T', ' ').slice(0, 16)) : 'not rendered'}</div>
+        <div class="row">${e.open_comments ? `<span class="badge warn">${e.open_comments} open comment${e.open_comments === 1 ? '' : 's'}</span>` : '<span class="badge">no open comments</span>'}</div>
+      </a>`).join('');
+  } catch (err) { box.innerHTML = '<div class="empty">' + esc(err.message) + '</div>'; }
+})();
+</script>
+{% endblock %}

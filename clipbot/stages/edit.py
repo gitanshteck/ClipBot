@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .. import editaudio, editcaptions, editfilters as ef, editframe, editoverlay, editscene, editspec, edittimeline, library, ytsegments
+from .. import editaudio, editcaptions, editfilters as ef, editframe, editoverlay, editscene, editspec, edittimeline, editversions, library, ytsegments
 from ..config import Settings
 from ..ffrun import run_ffmpeg
 from ..progress import NULL_PROGRESS, Progress
@@ -367,6 +367,9 @@ def render_edit(
     work = root / "cache" / tag
     for d in (root, work / "clips", work / "filters", work / "overlays", work / "logs", root / "render"):
         d.mkdir(parents=True, exist_ok=True)
+    # a final render archives the final before it (editversions) and writes what changed; it needs the spec that
+    # final was rendered from, and the record of it is about to be overwritten
+    prev_final = None if preview else editversions.begin_final(root, name)
     # a record of what this render used - never spec.json itself, which is the author's
     # (a preview's 540p output block must not replace the spec it was made from)
     (root / "render").mkdir(parents=True, exist_ok=True)
@@ -605,9 +608,14 @@ def render_edit(
 
     # ---- mux
     final = root / "render" / ("{0}.preview.mp4".format(name) if preview else "{0}.mp4".format(name))
-    argv = mux_argv(ffmpeg, video_master, audio_out, final, total)
+    part = final if preview else final.with_name("{0}.part.mp4".format(name))      # a final is only put in place once whole
+    argv = mux_argv(ffmpeg, video_master, audio_out, part, total)
     _run_ffmpeg(argv, 0, progress, 0, 0, work / "logs" / "mux.log", None)
     progress.update(3)
+    version = None
+    if not preview:
+        version = editversions.commit_final(root, name, prev_final, json.loads(editspec.to_json(spec)), {"duration": round(total, 3), "bytes": part.stat().st_size},
+                                            part, final)
 
     pacing = edittimeline.pacing(timeline)
     report = {
@@ -619,6 +627,9 @@ def render_edit(
         "render_seconds": round(time.time() - t_start, 1),
         "cache": str(work),
     }
+    if version is not None:
+        report["version"] = version["n"]
+        report["changes"] = version["changes"]
     (root / "render" / ("{0}.{1}.timeline.json".format(name, tag))).write_text(
         json.dumps({"timeline": timeline, "report": report}, indent=1, default=str), encoding="utf-8")
     log.info("Rendered %s: %.1fs, %s, %d clip(s), in %.0fs", final.name, total, human_size(report["bytes"]),

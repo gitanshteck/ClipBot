@@ -25,6 +25,7 @@ from . import review
 from . import youtube_auth
 from . import ytupload
 from .config import Settings, load_settings
+from .specerror import SpecError
 from .stages import analyze as analyze_stage
 from .stages import audio as audio_stage
 from .stages import chat as chat_stage
@@ -895,7 +896,7 @@ def main(argv: Optional[list] = None) -> int:
     try:
         settings = load_settings(Path(args.settings) if args.settings else None)
         return args.func(args, settings)
-    except (StageError, ToolMissingError, FileNotFoundError) as exc:
+    except (StageError, ToolMissingError, FileNotFoundError, SpecError) as exc:       # a SpecError names what to fix
         log.error("%s", exc)
         return 1
     except KeyboardInterrupt:

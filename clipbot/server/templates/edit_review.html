@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} — review — ClipBot{% endblock %}
+{% block bodyclass %}edit-review-page{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="/static/edit_review.css?v={{ ASSET_V }}">
+
+<section class="panel er-head">
+  <a class="back" href="/edits">&larr; Edits</a>
+  <h1>{{ name }}</h1>
+  <div class="row">
+    <label class="meta">Watching
+      <select id="er-which" title="Which render to watch"></select>
+    </label>
+    <span class="meta" id="er-meta"></span>
+  </div>
+  <div id="er-verify" class="er-verify"></div>
+</section>
+
+<div class="er-grid">
+  <div class="er-main">
+    <div class="er-stage"><video id="er-video" controls preload="metadata"></video></div>
+
+    <div class="er-transport">
+      <button id="er-play" title="Play / pause (space)">▶</button>
+      <button data-seek="-5" title="Back 5 s (left arrow)">−5s</button>
+      <button data-seek="5" title="Forward 5 s (right arrow)">+5s</button>
+      <select id="er-rate" title="Speed">
+        <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+      </select>
+      <span class="time"><span id="er-now">0:00.0</span><span class="sep"> / </span><span id="er-dur">—</span></span>
+    </div>
+
+    <div class="er-tl" id="er-tl" title="Click to seek">
+      <div id="er-ticks"></div>
+      <div id="er-marks"></div>
+      <div class="er-head-line" id="er-playhead"></div>
+    </div>
+    <div class="er-legend meta">
+      <span><i class="k-change"></i> change</span><span><i class="k-taste"></i> taste</span>
+      <span><i class="k-question"></i> question</span><span><i class="k-note"></i> note</span>
+      <span class="hint">faded = done · thin lines = chapters</span>
+    </div>
+
+    <div class="er-now" id="er-nowclip"></div>
+
+    <form class="er-form" id="er-form">
+      <div class="row">
+        <span class="er-at">Comment at <b id="er-at">0:00.0</b></span>
+        <select id="er-kind" title="What kind of note is this?">
+          <option value="change">change — do this</option>
+          <option value="taste">taste — I always want / never want</option>
+          <option value="question">question — why is it like this?</option>
+          <option value="note">note — nothing to do</option>
+        </select>
+        <button type="submit" id="er-add">Add comment</button>
+      </div>
+      <textarea id="er-text" rows="3" placeholder="What should change here?  (C focuses this box and pauses · Ctrl+Enter adds)"></textarea>
+    </form>
+  </div>
+
+  <aside class="er-side">
+    <nav class="er-tabs" id="er-tabs">
+      <button data-tab="comments" class="on">Comments <span class="badge" id="er-n-comments">0</span></button>
+      <button data-tab="chapters">Chapters</button>
+      <button data-tab="clips">Clips</button>
+      <button data-tab="versions">Versions</button>
+      <button data-tab="taste">Taste</button>
+    </nav>
+    <div id="er-panel"></div>
+  </aside>
+</div>
+
+<div class="toast" id="toast"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>window.EDIT_NAME = {{ name|tojson }};</script>
+<script src="/static/edit_review.js?v={{ ASSET_V }}"></script>
+{% endblock %}

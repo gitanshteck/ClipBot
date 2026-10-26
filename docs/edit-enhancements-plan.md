@@ -118,7 +118,7 @@ fix what you saw**, before ears and captions:
 | **1b: Safe, dynamic framing - DONE 2026-10-24, see 0.5** | S1-S5 on the YouTube and Kick layouts. | `verify` "overlay clipped" passes on Mish Mash #1 re-rendered; no punch crops a cam; scenes map matches a hand check on 20 sampled frames. |
 | **1c: Moment engine v1 - BUILT 2026-10-24, see 0.6** | M1-M6; rebuild the Mish Mash lineup from evidence sheets, with kill context. | Every kill chapter clip has lead-up and aftermath; coverage report per game; you review a candidate sheet, not a list of descriptions. |
 | 2 | Ears: A1 word timestamps, A2 reaction map (also feeds M3), B1 captions, H checks. | as before |
-| 3 | Review loop (E). | as before |
+| 3: Review loop - BUILT 2026-10-25, see 0.9 | E1 review page with timestamped comments, E2 versions and changelog, E4 taste wiring, the `clipbot-review` skill. | as before |
 | 4 | Look (B3 graphics kit, B4 punctuation, B5 transitions, B2 reaction framing, on top of S). | as before |
 | 5 | Sound (A3, C2, C3, C5). | as before |
 | 6 | Finish and learn (B6, F upload, E5 analytics). | as before |
@@ -237,6 +237,25 @@ chat), so the test has little power and I would not call the answer final. What 
 your moments. So `moments.voice_weight` (0) and `analyze.signals.events` (false) are **off**; the map is recorded, shown in
 `moments show` and `events peaks`, and one setting turns it on. **What would settle it:** ten to twenty moments you *know* you
 laughed or shouted in (decision 8 in section 5). `clipbot events check --workspace W` re-runs this whole measurement on any stream.
+
+### 0.9 Phase 3 result: the review loop (E), 2026-10-25
+
+| | Status | What exists |
+|---|---|---|
+| E1 review page | **built, as a dashboard page, not a hosted artifact** | `/edits/<name>/review`: the render playing (preview, the live final, or any archived version), a timeline with chapter ticks and your comment markers, "what is on screen now" under the video (clip, source and range, chapter, the caption it shows), tabs for comments / chapters / clips / versions / taste, and keys for it: **C** pauses and opens the comment box, **Ctrl+Enter** adds, space and the arrows move. A comment records the clip and the offset into it, not only the second, so it survives a re-render. Comments live in `work/_edits/<name>/review.json`, the same file `clipbot edit review` and I read and write; the page picks up what the CLI writes within 8 s. Checked in the browser against the real Mish Mash edit: the video loads at 11:27, a comment added from the keyboard lands on `c6_39` in the right chapter, switching to v4 and the live final plays. |
+| E2 versions and changelog | **built** | A final render now archives the final before it as `render/v<N>/` (with its spec, timeline, lineup and captions), writes `versions.json` and `changelog.md`, and prints what changed in words: `c3_14: in 405.55 -> 405.2 s, clip 0.35 s longer`, `gain 0 -> -3 dB`, `added c9 (...)`. A failed render leaves the live final where it was. Previews are not versioned. Mish Mash #1's hand-made v1, v2, v4 are recognised; its live final is v5. |
+| E4 taste wiring | **partly** | A comment of kind `taste` turns into a standing rule with your words kept (`edit review NAME taste ID`, or the page's "-> taste rule"); `edit new` and `edit episode` print the rules in force. **Not built:** templates applying a rule by themselves - nothing in the renderer reads taste, by design (a taste is a judgement and belongs in the spec where you can see it), so the author applies it. |
+| `clipbot-review` skill | **built** | The procedure for turning comments into changes: follow the clip and offset, make the smallest change, re-render, *look*, then resolve with what was changed and where it was seen; ask when a note is ambiguous; never resolve without looking. |
+| E3 A/B options, E5 retention loop | **not built** | E3 needs a second variant of a cold open or thumbnail to compare; E5 needs the extra read-only YouTube Analytics permission (decision 5 in section 5). |
+
+**Why a dashboard page and not an artifact.** The plan allowed either. The preview alone is 314 MB and a hosted page carries 15 MB
+per file, so the video cannot live there; the dashboard already serves video with seeking. The cost: it is loopback-only by
+design (no auth, per CLAUDE.md), so it works from this PC, not from your phone. If you want phone review, the honest options
+are a short low-bitrate proxy render on a hosted page (watch there, comment there, I read the comments through the page's
+shared state) or opening the dashboard beyond loopback, which needs real authentication first. Decision 9 in section 5.
+
+**Found on the way:** `cli.main` did not catch `SpecError`, so a mistake in any edit command (an unknown taste id, a bad time)
+printed a Python traceback. It now prints the message and exits 1.
 
 ## 1. Where we are
 
@@ -395,7 +414,7 @@ Each check comes with a contact-sheet artefact, as verify does today.
 |---|---|---|---|
 | **0: Quick wins** | B7 AMF previews; C1 voice chain on the mix; C4 join-level check and crossfades; A4 dead-picture detector (a contact sheet plus my review); D brand kit file plus fonts; F designed thumbnail v1; re-render Mish Mash #1 as v2. | Biggest visible and audible lift for little new machinery. Proves the loop on a video you've already seen. | 1-2 sessions |
 | **1: Ears** | A1 word timestamps; A2 reaction map; B1 animated captions; H profanity and caption checks. | Captions and word-accurate cuts are the largest jump in watchability, and the reaction map closes my "can't hear" gap. | 2 sessions |
-| **2: Review loop** | E1 review page with comments, E2 versions and changelog, E4 taste wiring, the `clipbot-review` skill. | Makes every later improvement iterate with you, not around you. | 1-2 sessions |
+| **2: Review loop - BUILT 2026-10-25 (0.9)** | E1 review page with comments, E2 versions and changelog, E4 taste wiring, the `clipbot-review` skill. | Makes every later improvement iterate with you, not around you. | 1-2 sessions |
 | **3: Look** | B3 Remotion graphics kit; B4 punctuation macros; B5 transitions; B2 reaction framing with A5. | High-production feel; needs Phase 1 timing to place beats precisely. | 2-3 sessions |
 | **4: Sound** | A3 separation test; C2 game ducking; C3 music editing with Epidemic (if subscribed); C5 Content-ID safety. | Depends on the A3 measurement and the music source decision. | 2 sessions |
 | **5: Finish and learn** | B6 AI upscale (Vulkan) with VMAF check; F upload of edits; E5 analytics loop; optional OTIO / Resolve. | Polishing the source and closing the performance loop. | 2+ sessions |
@@ -418,6 +437,7 @@ Every phase ends with the same proof:
 6. **Mish Mash #1:** keep it as the test bed and re-cut it at the end of each phase, or publish v1 now and use #2 for the next phase?
 7. **Re-transcribe streams with auto-detected language** (section 0.7)? The stage-3 transcript is Hindi-pinned and reads English as nonsense; it feeds `analyze`'s clip picking. About $1.66 per 4.6 h stream on whisper-1, and the existing `transcript.json` would be replaced (`transcribe --force`), so candidates found from it would need a re-run.
 8. ~~A2 reaction map~~ - approved and built (section 0.8). **New question:** can you give me 10-20 moments you *know* you laughed or shouted in, with the stream and a rough time? That is the label the measurement lacks.
+9. **Phone review?** The review page is dashboard-only (this PC). Do you want a hosted, phone-friendly version (a low-bitrate proxy video plus comments I read back), or is reviewing at the PC enough?
 
 ## 6. Known limits (said up front)
 

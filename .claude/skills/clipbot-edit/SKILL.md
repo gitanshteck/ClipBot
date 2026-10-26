@@ -81,6 +81,8 @@ clipbot events fetch-model                 # once: the PANNs audio tagger (359 M
 clipbot events scan --workspace W [--first S --last S]   # events.json: laughter/shout/gunfire/music/... per second, ~95x realtime on CPU
 clipbot events peaks --workspace W [--category laughter] [--top 20]   # a category's strongest peaks with the transcript nearby
 clipbot events tags --workspace W --at SECONDS            # what the model hears around a time (check a number before you trust it)
+clipbot edit review NAME list|add|resolve|reopen|reply|delete|taste   # the user's timestamped comments: see the clipbot-review skill
+clipbot edit versions NAME [--changes N]   # every playable render and what changed between them (a final render writes changelog.md)
 clipbot edit validate|inspect NAME
 clipbot edit render NAME [--preview] [--force] [--no-master] [--preset shorts_1080x1920]
 clipbot edit verify NAME [--preview] [--shallow]

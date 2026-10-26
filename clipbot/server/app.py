@@ -29,6 +29,9 @@ from fastapi.templating import Jinja2Templates
 
 from .. import chatsync
 from .. import compilations
+from .. import editreview
+from .. import editversions
+from .. import edittaste
 from .. import fxspec
 from .. import library
 from .. import manifest as manifest_module
@@ -47,6 +50,7 @@ from ..stages import chat as chat_stage
 from ..stages import compile as compile_stage
 from ..stages import cut as cut_stage
 from ..stages import download as download_stage
+from ..stages import edit as edit_stage
 from ..stages import reel as reel_stage
 from ..stages import transcribe as transcribe_stage
 from ..stages import diarize as diarize_stage
@@ -64,6 +68,8 @@ log = get_logger("clipbot.server")
 
 HERE = Path(__file__).resolve().parent
 SLUG_RE = re.compile(r"^[a-z0-9._-]{1,120}$")
+EDIT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+WHICH_RE = re.compile(r"^(preview|final|v[0-9]{1,4})$")
 
 settings = load_settings()
 bus = EventBus()
@@ -92,7 +98,7 @@ def _asset_version() -> str:
     static_dir = HERE / "static"
     for name in (
         "app.css", "app.js", "review.css", "review.js", "reel.js", "fx.js",
-        "compile.css", "compile.js", "player.js",
+        "compile.css", "compile.js", "player.js", "edit_review.css", "edit_review.js",
     ):
         path = static_dir / name
         if path.is_file():
@@ -132,6 +138,19 @@ def get_workspace(slug: str) -> Workspace:
     if not root.is_dir():
         raise HTTPException(status_code=404, detail="no such workspace")
     return Workspace(root)
+
+
+def get_edit(name: str) -> Path:
+    """The folder of an edit under work/_edits/, validated the way a workspace slug is: a name, never a path."""
+    if not EDIT_NAME_RE.match(name or ""):
+        raise HTTPException(status_code=400, detail="bad edit name")
+    base = edit_stage.edits_root(settings).resolve()
+    root = (base / name).resolve()
+    if base not in root.parents:
+        raise HTTPException(status_code=400, detail="path escapes the edits folder")
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="no such edit")
+    return root
 
 
 # --- job handlers ---------------------------------------------------------
@@ -1627,6 +1646,138 @@ async def media_manifest(slug: str):
     if not ws.manifest_csv_path.exists():
         raise HTTPException(status_code=404, detail="no manifest yet")
     return serve_file(ws.manifest_csv_path, "", download_name="{0}-manifest.csv".format(slug))
+
+
+# --- edits: the review loop ---------------------------------------------------
+
+
+@app.get("/edits", response_class=HTMLResponse)
+async def page_edits(request: Request):
+    return templates.TemplateResponse("edits.html", {"request": request, "platform": ""})
+
+
+@app.get("/edits/{name}/review", response_class=HTMLResponse)
+async def page_edit_review(request: Request, name: str):
+    get_edit(name)
+    return templates.TemplateResponse("edit_review.html", {"request": request, "name": name, "platform": ""})
+
+
+@app.get("/api/edits")
+async def api_edits():
+    base = edit_stage.edits_root(settings)
+    out = []
+    for d in sorted(base.iterdir()) if base.is_dir() else []:
+        if not d.is_dir() or not EDIT_NAME_RE.match(d.name) or not ((d / "spec.json").exists() or (d / "render").is_dir()):
+            continue
+        versions = editversions.list_versions(d, d.name)
+        try:
+            comments = editreview.load(d, d.name)["comments"]
+        except ValueError:
+            comments = []
+        out.append({"name": d.name, "versions": [v["which"] for v in versions],
+                    "live": editversions.live_number(d, d.name),
+                    "rendered_at": max([v["rendered_at"] for v in versions] or [""]),
+                    "duration": next((v["duration"] for v in reversed(versions) if v.get("duration")), None),
+                    "open_comments": sum(1 for c in comments if c.get("status", "open") == "open"),
+                    "comments": len(comments)})
+    out.sort(key=lambda e: e["rendered_at"], reverse=True)
+    return {"edits": out}
+
+
+@app.get("/api/edits/{name}/review")
+async def api_edit_review(name: str, which: str = ""):
+    root = get_edit(name)
+    if which and not WHICH_RE.match(which):
+        raise HTTPException(status_code=400, detail="which is preview, final or v<N>")
+    try:
+        return editreview.overview(root, name, which or None, edittaste.active(edit_stage.edits_root(settings) / "taste.json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _comment_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/edits/{name}/comments")
+async def api_edit_comment_add(name: str, payload: Dict[str, Any] = Body(...)):
+    root = get_edit(name)
+    on = str(payload.get("on") or "preview")
+    try:
+        doc = editreview.load(root, name)
+        c = editreview.add(doc, payload.get("t"), str(payload.get("text") or ""), kind=str(payload.get("kind") or "change"), on=on,
+                           timeline=editreview.timeline_for(root, name, on))
+        editreview.save(root, doc)
+    except ValueError as exc:
+        raise _comment_error(exc)
+    return c
+
+
+@app.patch("/api/edits/{name}/comments/{cid}")
+async def api_edit_comment_update(name: str, cid: str, payload: Dict[str, Any] = Body(...)):
+    root = get_edit(name)
+    try:
+        doc = editreview.load(root, name)
+        if not any(c["id"] == cid for c in doc["comments"]):
+            raise ValueError("no comment {0!r}".format(cid))
+        if "text" in payload or "kind" in payload:
+            editreview.update(doc, cid, text=payload.get("text"), kind=payload.get("kind"))
+        if "reply" in payload:
+            editreview.reply(doc, cid, str(payload.get("reply") or ""))
+        status = payload.get("status")
+        if status == "open":
+            editreview.reopen(doc, cid)
+        elif status in ("done", "wontfix"):
+            editreview.resolve(doc, cid, how=str(payload.get("how") or ""), in_version=str(payload.get("in") or ""), status=status)
+        elif status is not None:
+            raise ValueError("status is open, done or wontfix")
+        editreview.save(root, doc)
+        return next(c for c in doc["comments"] if c["id"] == cid)
+    except ValueError as exc:
+        if "no comment" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc))
+        raise _comment_error(exc)
+
+
+@app.delete("/api/edits/{name}/comments/{cid}")
+async def api_edit_comment_delete(name: str, cid: str):
+    root = get_edit(name)
+    try:
+        doc = editreview.load(root, name)
+        editreview.delete(doc, cid)
+        editreview.save(root, doc)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"deleted": cid}
+
+
+@app.post("/api/edits/{name}/comments/{cid}/taste")
+async def api_edit_comment_taste(name: str, cid: str, payload: Dict[str, Any] = Body(default={})):
+    """Turn a comment into a standing taste rule (edittaste), and close the comment pointing at the rule."""
+    root = get_edit(name)
+    try:
+        doc = editreview.load(root, name)
+        c = next((x for x in doc["comments"] if x["id"] == cid), None)
+        if c is None:
+            raise HTTPException(status_code=404, detail="no such comment")
+        rule = edittaste.add(edit_stage.edits_root(settings) / "taste.json", str(payload.get("text") or c["text"]), said=c["text"], edit=name)
+        editreview.resolve(doc, cid, how="taste rule {0}".format(rule["id"]), in_version="")
+        editreview.save(root, doc)
+    except ValueError as exc:
+        raise _comment_error(exc)
+    return {"rule": rule, "comment": c}
+
+
+@app.get("/media/edit/{name}/{which}")
+async def media_edit(name: str, which: str, request: Request):
+    """A render of an edit - the preview, the live final or an archived v<N> - served with Range, for the review page."""
+    root = get_edit(name)
+    if not WHICH_RE.match(which):
+        raise HTTPException(status_code=400, detail="which is preview, final or v<N>")
+    path = editversions.resolve_file(root, name, which)
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="no such render")
+    return serve_file(path, request.headers.get("range", ""))
 
 
 # --- events ---------------------------------------------------------------

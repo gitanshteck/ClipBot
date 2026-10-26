@@ -66,6 +66,10 @@ The real state:
   speech / silence -> `events.json`. Opt-in; needs PyTorch and a pinned 359 MB checkpoint from
   `clipbot events fetch-model`. Measured, not assumed: gunfire checks out against the kill record,
   laughter is a weak hint (so it is off in ranking and in analyze); see "events.py (stage 2d)".
+- **A review loop** (`clipbot edit review|versions`, the dashboard's `/edits/<name>/review`, `editreview.py`,
+  `editversions.py`, `editdiff.py`, the `clipbot-review` skill): the user watches a render, leaves timestamped
+  comments, and each comment is resolved with *what was changed and in which version it was seen*. A final
+  render archives the one before it and writes a changelog in words. See "The review loop".
 - **A kill-feed reader** (`clipbot killfeed scan`, `stages/killfeed.py`,
   `killfeed.py`): OCRs a shooter's on-screen kill feed (Windows OCR) and writes
   `killfeed.json`, the data source for `edittemplates.kill_montage`. Tuned on
@@ -131,7 +135,8 @@ clipbot/
                      audio, transcribe, analyze, transliterate, cut, reel,
                      compile, manifest, upload, youtube-auth, cleanup, info, list,
                      library {scan,list,presets,licenses,hash,fetch,path},
-                     edit {new,episode,validate,inspect,render,scenes,words,captions,verify,deliver,thumbnail,list,clean,taste},
+                     edit {new,episode,validate,inspect,render,scenes,words,captions,verify,deliver,thumbnail,list,clean,taste,
+                     versions,review {list,add,resolve,reopen,reply,delete,taste}},
                      killfeed {scan,list}, events {fetch-model,scan,peaks,tags},
                      moments {build,list,show,sheet,pool,coverage}) - the last four groups are registered
                      by editcli.add_parsers(), not defined in cli.py
@@ -196,6 +201,13 @@ clipbot/
   editmoment.py      the moment engine: arcs_from_kills() (lead-up + kills +
                      aftermath), score_arc(), coverage(), evidence_sheet() (a contact
                      sheet per arc); writes <workspace>/moments.json
+  editdiff.py        diff_specs(old, new): what changed between two renders' specs, in words
+                     (clips added/removed/trimmed/moved, gain, captions, master...) - pure
+  editversions.py    versioned final renders: begin_final()/commit_final() archive the live
+                     final as render/v<N>/ and write versions.json + changelog.md;
+                     list_versions(), resolve_file()
+  editreview.py      timestamped comments on a render (review.json): add/resolve/reply,
+                     locate() a time in the timeline, overview() for the review page
   editwords.py       word-level timing for the edit engine: fetch_window()/words_for()
                      (whisper-1 on only the windows an edit uses, cached per workspace
                      under work/_cache/edit/words/), repair(), voiced_spans(),
@@ -325,6 +337,9 @@ tests/
   test_editmoment.py            arcs, ranking, coverage, build; the lineup context rule and
                                 `moment` expansion live in test_edittemplates.py
   test_killfeed.py              kill-feed parsing rules + icon geometry
+  test_editdiff.py, test_editversions.py, test_editreview.py, test_edit_review_server.py
+                                the review loop: the changelog, version archiving, comments, and the
+                                page's API and media route
   test_panns.py, test_audioevents.py, test_events_stage.py   the reaction map: the pinned
                                 checkpoint, the architecture's shapes, categories and peaks,
                                 the stage/CLI, and how it enters moment ranking and analyze
@@ -1322,6 +1337,35 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   event_moments` adds `(laughter, 0.8)` / `(shouting, 0.6)` tags to the transcript sent to `analyze`;
   `clipbot events peaks` lists a category's strongest peaks with the transcript nearby.
 
+### The review loop (editversions.py, editdiff.py, editreview.py)
+
+- **Versions.** A *final* render (`render_edit(preview=False)`) calls `editversions.begin_final` before it overwrites
+  the spec record (it needs the spec the live final was rendered from), muxes to `<name>.part.mp4`, and only then
+  `commit_final`: the live `<name>.mp4` moves to `render/v<N>/<name>.v<N>.mp4` with its spec, timeline and (copies of)
+  `lineup.json`/`captions.json`, the part becomes the live final, `versions.json` gets `{n, rendered_at, duration,
+  bytes, from, summary, changes}` and `changelog.md` is rewritten newest first. **A render that fails leaves the live
+  final and the archive as they were** (tested). Previews are never versioned. The live final's number is
+  `versions.json["current"]`, or `max(archived) + 1` for an edit archived by hand before this existed (Mish Mash #1:
+  v1, v2, v4 by hand, live v5); a taken archive number is skipped, never overwritten. `report["version"]` and
+  `report["changes"]` carry the result to the CLI.
+- **The changelog is in words** (`editdiff.diff_specs(old, new)`): clips by id (so a reorder is not "everything
+  changed"; moves are the minimum outside the longest run that kept its order), trims as `in 10 -> 9.5 s, clip
+  0.5 s longer`, gain, captions on/off, camera/effects/marker counts, overlay text, transitions, and the globals
+  (profile, output, master, captions block, music/sfx tracks); under 0.02 s is rounding, not an edit; capped at 60
+  lines. `edit versions NAME [--changes N]` lists what can be played.
+- **Comments** (`review.json`, `editreview.py`): `{id, t, on, clip, offset, chapter, kind, text, status, reply,
+  done: {at, in, how}}`. `t` is a second of the render named by `on` (`preview`, `final` or `v<N>`); `clip` and
+  `offset` are what `locate()` found in *that render's timeline* when the comment was made, and are what to
+  follow after the edit changes - a second moves between versions, a clip does not. `kind`: `change` (do it),
+  `taste` (a rule: `edit review NAME taste ID` -> `edittaste.add`, `said` = their words), `question` (answer in
+  `reply`), `note`. `status`: `open`, `done`, `wontfix`; resolving records *how* and *in which version*, so
+  "resolved" names something that can be looked at. The dashboard page and `edit review ...` read and write the
+  same file; `cli.main` turns a `SpecError` (an unknown id, a bad time) into a message and exit code 1.
+- **Taste is read by the author, not the renderer**: `edit new` and `edit episode` print the active rules
+  (`_print_taste`) so whoever writes the spec applies them by hand. The `clipbot-review` skill
+  (`.claude/skills/clipbot-review/`) is the procedure for turning comments into spec changes: follow the clip and
+  offset, make the smallest change, re-render, *look*, then resolve.
+
 ### edit.py (stage 5d)
 
 See "The edit engine" for the model; this is the IO. `render_edit(spec,
@@ -1381,7 +1425,7 @@ segments -> framing -> captions -> clips -> assemble -> mix -> master -> mux.
   removed in ffmpeg 8** and a 40-piece graph is far over any argv limit.
 - Layout of `work/_edits/<name>/`: `spec.json` (the author's - **a render never
   overwrites it**; `edit new --force` keeps the old as `spec.previous.json`),
-  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles; an episode's holds its own `titles`, `fact_lines`, `credits`, `hashtags` and `notes` instead), `lineup.json` + `cuts.json` (an episode: the lineup *after* `edit episode` snapped its cuts, and where each one moved), `words.json` (every clip's words, from `edit words`; read by `verify`), `captions.json` (the author's subtitles, from `edit captions`), `render/<name>.mp4`,
+  `facts.json` (player, game and the kills/nades/longest distance the edit *contains* - not the input count - for `deliver`'s titles; an episode's holds its own `titles`, `fact_lines`, `credits`, `hashtags` and `notes` instead), `lineup.json` + `cuts.json` (an episode: the lineup *after* `edit episode` snapped its cuts, and where each one moved), `words.json` (every clip's words, from `edit words`; read by `verify`), `captions.json` (the author's subtitles, from `edit captions`), `review.json` (the user's comments), `versions.json` + `changelog.md` (final renders, see "The review loop"), `render/v<N>/` (archived finals), `render/<name>.mp4`,
   `render/<name>.preview.mp4`, `render/<name>.<final|preview>.spec.json` (what that
   render used - a preview's 540p output block lives here, not in spec.json) and
   `.timeline.json`, `verify/<final|preview>/`, `deliver/`, `cache/`. Underscore-
@@ -2267,6 +2311,15 @@ verify-before-present and pacing-gate ideas of github.com/ranahaani/i-hate-editi
   recorded) for one of `transcribe`/`analyze`/`cut`/
   `audio`/`download`/`compile`/`run` — needed for stages like transcribe
   (and compile) that write no partial file to detect otherwise.
+- **Edits** (`/edits`, `/edits/{name}/review`; `templates/edits.html`, `edit_review.html`, `static/edit_review.js|css`):
+  not a workspace page - an edit lives under `work/_edits/<name>/`, validated by `get_edit()` the way a slug is
+  (`EDIT_NAME_RE`: a name, never a path). Routes: `GET /api/edits`; `GET /api/edits/{name}/review?which=` (the
+  versions that can be played, that render's chapters and clips with the caption text each shows, what `verify`
+  flagged, the comments, the taste rules); `POST /api/edits/{name}/comments`; `PATCH|DELETE .../comments/{id}`;
+  `POST .../comments/{id}/taste`; `GET /media/edit/{name}/{preview|final|v<N>}` (Range-served - the preview
+  is ~300 MB, which is why this is a dashboard page and not a hosted artifact). The page polls every 8 s so
+  comments written by the CLI or by Claude while it is open appear; it never writes anything but `review.json`
+  and, on request, the taste file.
 - **Platform tabs**: `base.html`'s topbar carries a Kick | YouTube tab strip;
   every page passes `platform` so the tab you're inside stays lit (the library
   pages from their route, workspace pages from `ws.platform`). `library.html`
@@ -2785,6 +2838,11 @@ Sections and the values worth knowing without opening the file:
   load; a different file is a different (unmeasured) model.
 - **A reaction-map score does not rank or annotate anything unless switched on** (`moments.voice_weight`,
   `analyze.signals.events`): measured, laughter/shout were a weak hint on this channel's audio.
+- **A final render archives the final before it and never loses it**: the new file is muxed to `.part.mp4` and
+  only then swapped in (`editversions.commit_final`), so a failed render leaves the live final where it was. A
+  preview is never versioned.
+- **A review comment is resolved with what changed and where it was seen** (`done.how`, `done.in`); it follows
+  the clip id and offset, not the second, because a second moves between versions.
 - **A render never overwrites `spec.json`** - it writes `render/<name>.<tier>.spec.json`.
   (A preview once replaced the author's spec with its own 540p output block.)
 - **Words are fetched with auto-detected language and a Hinglish prompt, never
@@ -2902,6 +2960,10 @@ Sections and the values worth knowing without opening the file:
   `clipbot events fetch-model` (once), `events scan --workspace W`, then `events check` (against the kill
   record and chat laughs), `events peaks` (the strongest peaks with transcript) and `events tags --at S`
   (what the model hears there). Read the events.py section for what was measured first.
+- ...act on the user's notes about a render, or find out what changed between versions →
+  `clipbot edit review NAME list` (their comments, with clip + offset), the `clipbot-review` skill for the
+  procedure, `edit versions NAME --changes N` and `work/_edits/NAME/changelog.md` for the history; the page
+  is `/edits/NAME/review` in the dashboard.
 - ...add a new kind of edit template → `clipbot/edittemplates.py` (a pure function
   returning a spec dict; validate it with `editspec.normalize` in a test and compile
   it with `edittimeline.compile_timeline` + `pacing`) + a `--template` choice in
