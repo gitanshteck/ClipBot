@@ -1,0 +1,162 @@
+/* Stream brief: on-air scenes. Shared by the rundown page (inlined), the OBS
+   overlays (/brief/overlay/<frame>) and the dock. Everything is drawn on a
+   fixed-size stage: 1920x1080, or 1080x1920 for vertical. */
+:root {
+  --ink: #0B1220;
+  --panel: #111A2C;
+  --raise: #17233A;
+  --line: #233150;
+  --text: #E9EEF7;
+  --muted: #8E9BB5;
+  --accent: #19A2D2;   /* brand: the T in TECK */
+  --rec: #FF4D5E;      /* on-air tally, clip markers */
+  --clip: #F2B33D;     /* clip bait */
+  --good: #3CCB8C;
+  --key: #00B140;      /* broadcast chroma green: never used for content */
+  --display: "Unbounded", "Arial Black", system-ui, sans-serif;
+  --body: "Poppins", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+
+.stage { width: 1920px; height: 1080px; position: relative; overflow: hidden; color: var(--text); font-family: var(--body); -webkit-font-smoothing: antialiased; }
+.stage.vert { width: 1080px; height: 1920px; }
+.stage.bg-brand { background: radial-gradient(1400px 900px at 10% -10%, #15284A 0%, #0B1220 58%), #0B1220; }
+.stage.bg-brand::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(rgba(35,49,80,.35) 1px, transparent 1px), linear-gradient(90deg, rgba(35,49,80,.35) 1px, transparent 1px); background-size: 80px 80px; mask-image: linear-gradient(180deg, rgba(0,0,0,.7), transparent 75%); -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,.7), transparent 75%); }
+.stage.bg-brand::after { content: "TECK"; position: absolute; right: -40px; bottom: -120px; font: 900 420px/1 var(--display); color: rgba(25,162,210,.05); letter-spacing: -.04em; }
+.stage.vert.bg-brand::after { font-size: 300px; right: -30px; bottom: 200px; }
+.stage.bg-green { background: var(--key); }
+.stage.bg-clear { background: transparent; }
+.stage h2, .stage p { margin: 0; }
+
+/* the card */
+.oc { position: absolute; z-index: 2; background: rgba(13,22,40,.94); border: 1px solid rgba(35,49,80,.9); border-radius: 22px; padding: 30px 34px 32px; box-shadow: 0 24px 60px rgba(0,0,0,.45); overflow: hidden; animation: ocIn .42s cubic-bezier(.2,.8,.2,1) both; }
+.oc::before { content: ""; position: absolute; left: 0; top: 0; height: 5px; width: 100%; background: var(--accent); transform-origin: 0 50%; animation: wipe .5s .08s cubic-bezier(.6,0,.2,1) both; }
+.oc .bug { display: flex; align-items: center; gap: 14px; font: 700 17px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+.oc .bug .tk { font: 900 18px/1 var(--display); letter-spacing: .02em; color: var(--text); }
+.oc .bug .tk b { color: var(--accent); }
+.oc .bug .ct-n { margin-left: auto; color: var(--text); }
+.oc .tt { font: 900 64px/1.02 var(--display); letter-spacing: -.01em; margin: 18px 0 0; text-transform: lowercase; text-wrap: balance; }
+.oc .st { font: 500 26px/1.3 var(--body); color: #B9C4D8; margin: 14px 0 0; }
+.oc .credit { margin-top: 18px; font: 600 17px/1 var(--mono); letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+.oc .credit b { color: var(--accent); font-weight: 700; }
+.oc .opts { display: grid; gap: 12px; margin-top: 22px; }
+.oc .opt { display: flex; align-items: center; gap: 18px; background: rgba(25,162,210,.1); border: 1px solid rgba(25,162,210,.4); border-radius: 14px; padding: 14px 20px; font: 700 30px/1.15 var(--body); }
+.oc .opt .n { font: 900 34px/1 var(--display); color: var(--accent); min-width: 34px; }
+.oc .agenda { list-style: none; margin: 22px 0 0; padding: 0; display: grid; gap: 10px; }
+.oc .agenda li { display: grid; grid-template-columns: 110px 1fr; gap: 16px; font: 600 26px/1.25 var(--body); text-transform: lowercase; }
+.oc .agenda .at { font: 700 22px/1.4 var(--mono); color: var(--accent); text-transform: none; }
+.oc .count { margin-top: 22px; font: 700 54px/1 var(--mono); color: var(--rec); }
+.oc .count small { font: 600 18px/1 var(--mono); color: var(--muted); letter-spacing: .14em; margin-left: 12px; }
+.oc .reveal { margin-top: 22px; font: 900 76px/1 var(--display); color: var(--clip); animation: pop .35s cubic-bezier(.2,1.4,.4,1) both; }
+.oc .reveal small { display: block; font: 500 20px/1.3 var(--body); color: var(--muted); margin-top: 10px; }
+.oc .locked { margin-top: 22px; font: 700 24px/1 var(--mono); color: var(--muted); letter-spacing: .1em; }
+.oc .kd { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 18px; }
+.oc .kd div { background: rgba(255,255,255,.04); border: 1px solid rgba(35,49,80,.9); border-radius: 14px; padding: 12px 16px; }
+.oc .kd span { display: block; font: 700 14px/1 var(--mono); letter-spacing: .16em; color: var(--muted); }
+.oc .kd strong { display: block; font: 900 54px/1.05 var(--display); margin-top: 6px; }
+.oc .kd .k strong { color: var(--accent); }
+.oc .kd .d strong { color: var(--rec); }
+.oc .rule { margin-top: 16px; font: 600 22px/1.35 var(--body); }
+.oc .rule b { font: 700 15px/1 var(--mono); letter-spacing: .14em; color: var(--clip); display: block; margin-bottom: 6px; }
+.oc .pr { display: none; margin-top: 14px; font: 600 18px/1.35 var(--body); color: #B9C4D8; }
+.oc .pr b { font: 700 13px/1 var(--mono); letter-spacing: .14em; color: var(--accent); margin-right: 8px; }
+
+/* lower third */
+.l3 { position: absolute; z-index: 2; display: flex; align-items: stretch; border-radius: 16px; overflow: hidden; background: rgba(13,22,40,.95); border: 1px solid rgba(35,49,80,.9); box-shadow: 0 18px 44px rgba(0,0,0,.4); animation: l3In .45s .1s cubic-bezier(.2,.8,.2,1) both; }
+.l3 .lk { background: var(--accent); color: #04121C; font: 900 24px/1 var(--display); letter-spacing: .08em; padding: 0 24px; display: flex; align-items: center; }
+.l3 .lt { padding: 20px 26px; font: 600 32px/1.25 var(--body); display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.l3 .lt .o { font: 700 24px/1 var(--body); color: #B9C4D8; background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 14px; }
+.l3 .lt .o b { color: var(--accent); font-family: var(--display); margin-right: 8px; }
+
+/* frame: chat cam (full-frame cam, logo top right, chat bottom right) */
+.lay-overlay .oc { left: 1220px; top: 250px; width: 660px; }
+.lay-overlay .oc .tt { font-size: 52px; }
+.lay-overlay .oc .st { font-size: 22px; }
+.lay-overlay .oc .opt { font-size: 26px; padding: 12px 18px; }
+.lay-overlay .oc .agenda li { font-size: 22px; grid-template-columns: 90px 1fr; }
+.lay-overlay .oc .agenda .at { font-size: 19px; }
+.lay-overlay .l3 { left: 80px; top: 892px; max-width: 1110px; }
+.lay-overlay.s-game .oc { left: 1444px; top: 392px; width: 456px; padding: 20px 22px 22px; border-radius: 16px; }
+.lay-overlay.s-game .oc .tt { font-size: 30px; margin-top: 12px; }
+.lay-overlay.s-game .oc .bug { font-size: 13px; }
+.lay-overlay.s-game .oc .bug .tk { font-size: 14px; }
+.lay-overlay.s-game .oc .kd strong { font-size: 40px; }
+.lay-overlay.s-game .oc .rule { font-size: 17px; }
+.lay-overlay.s-game .l3 { display: none; }
+.lay-overlay.l3only .oc { display: none; }
+
+/* frame: game scene (cam box top right): everything as one compact card under the cam */
+.lay-game .oc { left: 1444px; top: 392px; width: 456px; padding: 20px 22px 22px; border-radius: 16px; }
+.lay-game .oc .bug { font-size: 13px; gap: 10px; }
+.lay-game .oc .bug .tk { font-size: 14px; }
+.lay-game .oc .tt { font-size: 30px; margin-top: 12px; }
+.lay-game .oc .st { font-size: 17px; margin-top: 8px; }
+.lay-game .oc .credit { font-size: 12px; margin-top: 10px; }
+.lay-game .oc .opts { gap: 8px; margin-top: 12px; }
+.lay-game .oc .opt { font-size: 18px; padding: 8px 12px; gap: 10px; border-radius: 10px; }
+.lay-game .oc .opt .n { font-size: 20px; min-width: 20px; }
+.lay-game .oc .agenda { display: none; }
+.lay-game .oc .count { font-size: 30px; margin-top: 12px; }
+.lay-game .oc .reveal { font-size: 40px; margin-top: 12px; }
+.lay-game .oc .locked { font-size: 15px; margin-top: 12px; }
+.lay-game .oc .kd strong { font-size: 40px; }
+.lay-game .oc .rule { font-size: 17px; margin-top: 10px; }
+.lay-game .oc .rule b { font-size: 12px; }
+.lay-game .oc .pr { display: block; }
+.lay-game .l3 { display: none; }
+.lay-game.s-game .oc .pr { display: none; }
+
+/* frame: full scene (brand background; cam slot top right and chat slot bottom right stay empty) */
+.lay-full .oc { left: 120px; top: 170px; width: 1220px; background: transparent; border: 0; box-shadow: none; padding: 0; }
+.lay-full .oc::before { width: 120px; height: 8px; border-radius: 4px; }
+.lay-full .oc .bug { margin-top: 30px; font-size: 20px; }
+.lay-full .oc .tt { font-size: 112px; margin-top: 26px; }
+.lay-full .oc .st { font-size: 34px; }
+.lay-full .oc .opt { font-size: 38px; }
+.lay-full.s-starting .oc .tt { font-size: 96px; }
+.lay-full .oc .agenda { grid-template-columns: 1fr 1fr; gap: 14px 40px; margin-top: 30px; }
+.lay-full .oc .agenda li { font-size: 30px; grid-template-columns: 96px 1fr; }
+.lay-full .l3 { left: 120px; top: 900px; max-width: 1220px; }
+.lay-full.s-game .oc .kd { max-width: 760px; }
+.lay-full.l3only .oc { display: none; }
+
+/* frame: vertical 1080x1920 (cam fills the top, Shorts buttons on the right edge, captions at the bottom) */
+.lay-vertical .oc { left: 60px; top: 830px; width: 880px; }
+.lay-vertical .oc .tt { font-size: 66px; }
+.lay-vertical .oc .agenda li { font-size: 26px; }
+.lay-vertical .l3 { left: 60px; top: 1420px; width: 880px; }
+.lay-vertical .l3 .lt { font-size: 30px; }
+.lay-vertical.l3only .oc { display: none; }
+
+/* safe-area guides */
+.guides { position: absolute; inset: 0; z-index: 3; pointer-events: none; display: none; }
+.show-guides .guides { display: block; }
+.gz { position: absolute; border: 3px dashed rgba(255,255,255,.55); border-radius: 12px; display: flex; align-items: flex-start; justify-content: flex-start; padding: 10px 14px; font: 700 20px/1 var(--mono); letter-spacing: .12em; color: rgba(255,255,255,.8); background: rgba(255,255,255,.04); }
+.gz.no { border-color: rgba(255,77,94,.7); color: rgba(255,120,130,.9); background: rgba(255,77,94,.06); }
+
+/* mock backdrops for previews only (never on stream) */
+.mock { position: absolute; inset: 0; z-index: 0; }
+.mock.chatcam { background: radial-gradient(500px 400px at 28% 40%, #5a2142 0%, #2a1530 45%, #160d1d 100%); }
+.mock.chatcam .face { position: absolute; left: 620px; top: 160px; width: 360px; height: 420px; border-radius: 48% 48% 40% 40%; background: rgba(0,0,0,.45); }
+.mock.chatcam .body { position: absolute; left: 380px; top: 560px; width: 860px; height: 560px; border-radius: 260px 260px 0 0; background: rgba(0,0,0,.5); }
+.mock.chatcam .logo { position: absolute; left: 1474px; top: 170px; font: 900 56px/1 var(--display); color: rgba(255,255,255,.75); }
+.mock.chatcam .logo b { color: var(--accent); }
+.mock .chatlines { position: absolute; left: 1260px; top: 580px; width: 620px; display: grid; gap: 14px; }
+.mock .chatlines i { display: block; height: 16px; border-radius: 8px; background: rgba(255,255,255,.22); }
+.mock .chatlines i:nth-child(2n) { width: 70%; }
+.mock .chatlines i:nth-child(3n) { width: 85%; }
+.mock.game { background: linear-gradient(180deg, #5d8fb0 0%, #8fb2a0 38%, #4d6b3c 55%, #2f4426 100%); }
+.mock.game .mini { position: absolute; left: 50px; top: 60px; width: 290px; height: 270px; background: rgba(40,40,40,.75); border: 3px solid rgba(255,255,255,.3); }
+.mock.game .cam { position: absolute; left: 1444px; top: 110px; width: 456px; height: 256px; background: #3a1d24; border: 4px solid var(--accent); }
+.mock.game .chatlines { left: 1320px; top: 910px; width: 560px; gap: 10px; }
+.mock.vcam { background: linear-gradient(180deg, #3a1d2c 0 780px, #4d6b3c 780px 100%); }
+.mock.vcam .face { position: absolute; left: 380px; top: 180px; width: 320px; height: 380px; border-radius: 48% 48% 40% 40%; background: rgba(0,0,0,.45); }
+
+.noanim .oc, .noanim .oc::before, .noanim .l3, .noanim .reveal { animation: none !important; }
+@keyframes ocIn { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: none; } }
+@keyframes l3In { from { opacity: 0; transform: translateX(-30px); } to { opacity: 1; transform: none; } }
+@keyframes wipe { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes pop { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .oc, .oc::before, .l3, .reveal { animation: none !important; }
+}

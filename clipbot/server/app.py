@@ -27,6 +27,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .. import brief as brief_module
 from .. import chatsync
 from .. import compilations
 from .. import fxspec
@@ -93,6 +94,8 @@ def _asset_version() -> str:
     for name in (
         "app.css", "app.js", "review.css", "review.js", "reel.js", "fx.js",
         "compile.css", "compile.js", "player.js",
+        "brief/scenes.css", "brief/scenes.js", "brief/live.js",
+        "brief/overlay.js", "brief/dock.js", "brief/dock.css",
     ):
         path = static_dir / name
         if path.is_file():
@@ -339,7 +342,24 @@ async def _startup():
     bus.bind_loop(asyncio.get_event_loop())
     BusLogHandler(bus).install()
     runner.start()
+    asyncio.get_event_loop().create_task(_watch_brief())
     log.info("Dashboard ready on http://%s:%s", settings.get("server.host", "127.0.0.1"), settings.get("server.port", 8765))
+
+
+async def _watch_brief():
+    """Tell open overlays, the dock and /brief when a new day's brief lands, so
+    OBS picks it up without anyone pressing refresh."""
+    last = None
+    while True:
+        try:
+            path = brief_module.brief_dir(settings) / "brief.json"
+            mtime = path.stat().st_mtime_ns if path.is_file() else None
+            if last is not None and mtime != last:
+                bus.publish("brief", {"changed": True})
+            last = mtime
+        except OSError:
+            pass
+        await asyncio.sleep(20)
 
 
 # --- status helpers -------------------------------------------------------
@@ -1627,6 +1647,110 @@ async def media_manifest(slug: str):
     if not ws.manifest_csv_path.exists():
         raise HTTPException(status_code=404, detail="no manifest yet")
     return serve_file(ws.manifest_csv_path, "", download_name="{0}-manifest.csv".format(slug))
+
+
+# --- stream brief -----------------------------------------------------------
+# The daily run of show (clipbot/brief.py). /brief is the rundown page,
+# /brief/overlay/<frame> are OBS Browser Sources (transparent, 1920x1080 or
+# 1080x1920), /brief/dock is the control panel for an OBS Custom Browser Dock.
+# Live state travels over /api/events as "brief" events.
+
+
+def _brief_local_base() -> str:
+    return "http://{0}:{1}".format(settings.get("server.host", "127.0.0.1"), settings.get("server.port", 8765))
+
+
+def _brief_date() -> str:
+    try:
+        return str(brief_module.load_brief(settings).get("date", ""))
+    except (FileNotFoundError, ValueError):
+        return ""
+
+
+@app.get("/brief", response_class=HTMLResponse)
+async def page_brief():
+    try:
+        data = brief_module.load_brief(settings)
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Stream brief</title>"
+            "<body style='font:16px system-ui;background:#0B1220;color:#E9EEF7;padding:40px'>"
+            "<h1>No stream brief yet</h1><p>The daily run writes it to {0}. "
+            "See tools/stream-brief/DAILY.md.</p>".format(brief_module.brief_dir(settings)),
+            status_code=404,
+        )
+    html = brief_module.render_page(data, "local", _brief_local_base())
+    return HTMLResponse(html, headers={"cache-control": "no-store"})
+
+
+@app.get("/brief/overlay/{frame}", response_class=HTMLResponse)
+async def page_brief_overlay(request: Request, frame: str, bg: Optional[str] = None):
+    if frame not in brief_module.FRAMES:
+        raise HTTPException(status_code=404, detail="Unknown overlay '{0}': use one of {1}".format(frame, ", ".join(brief_module.FRAMES)))
+    bg = bg or ("brand" if frame == "full" else "clear")
+    if bg not in ("brand", "green", "clear"):
+        raise HTTPException(status_code=400, detail="bg must be brand, green or clear")
+    return templates.TemplateResponse("brief_overlay.html", {"request": request, "frame": frame, "bg": bg})
+
+
+@app.get("/brief/dock", response_class=HTMLResponse)
+async def page_brief_dock(request: Request):
+    return templates.TemplateResponse("brief_dock.html", {"request": request, "base": _brief_local_base(), "frames": brief_module.FRAMES})
+
+
+@app.get("/api/brief")
+async def api_brief():
+    try:
+        return brief_module.load_brief(settings)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/brief/state")
+async def api_brief_state():
+    return brief_module.read_state(settings, _brief_date())
+
+
+@app.put("/api/brief/state")
+async def api_brief_state_put(payload: Dict[str, Any] = Body(...)):
+    try:
+        stored = brief_module.write_state(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("brief", {"state": stored})
+    return stored
+
+
+@app.post("/api/brief/markers")
+async def api_brief_marker(payload: Dict[str, Any] = Body(...)):
+    try:
+        marker = brief_module.add_marker(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("brief", {"marker": marker})
+    return marker
+
+
+@app.get("/api/brief/markers")
+async def api_brief_markers(date: str):
+    try:
+        return brief_module.read_markers(settings, date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/brief/feedback")
+async def api_brief_feedback(date: Optional[str] = None):
+    return {"feedback": brief_module.list_feedback(settings, date)}
+
+
+@app.post("/api/brief/feedback")
+async def api_brief_feedback_set(payload: Dict[str, Any] = Body(...)):
+    try:
+        row = brief_module.set_feedback(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"row": row}
 
 
 # --- events ---------------------------------------------------------------

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teck Brief dock</title>
+  {# The control panel. Add it in OBS: Docks -> Custom Browser Docks, URL {{ base }}/brief/dock #}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@700;900&family=Poppins:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/brief/scenes.css?v={{ ASSET_V }}">
+  <link rel="stylesheet" href="/static/brief/dock.css?v={{ ASSET_V }}">
+</head>
+<body data-base="{{ base }}">
+  <header class="top">
+    <span class="mark"><b>T</b>ECK BRIEF</span>
+    <span class="conn" id="conn" title="Connection to the ClipBot dashboard"><i></i><span>connecting</span></span>
+  </header>
+  <main id="dock">
+    <p class="muted">Loading tonight's brief…</p>
+  </main>
+  <footer class="foot">
+    <a href="/brief" target="_blank" rel="noopener">Open the full brief</a>
+    <details>
+      <summary>Overlay addresses for OBS</summary>
+      <ul class="addr">
+        {% for f in frames %}
+        <li><span>{{ f }}</span><code>{{ base }}/brief/overlay/{{ f }}</code><button type="button" data-copy="{{ base }}/brief/overlay/{{ f }}">copy</button></li>
+        {% endfor %}
+      </ul>
+      <p class="muted">Browser Source, 1920×1080 (vertical: 1080×1920), background left transparent, top of the source list. Chat → your Cam scene, game → Game Scene, full → Intro, vertical → Camera Verical.</p>
+    </details>
+  </footer>
+  <script src="/static/brief/scenes.js?v={{ ASSET_V }}"></script>
+  <script src="/static/brief/live.js?v={{ ASSET_V }}"></script>
+  <script src="/static/brief/dock.js?v={{ ASSET_V }}"></script>
+</body>
+</html>

@@ -179,6 +179,12 @@ clipbot/
   preview.py         PreviewRunner — the dashboard's live "Effects" proxy preview
   progress.py        Progress / NULL_PROGRESS — CLI-safe, dashboard-aware progress
                      reporting with cancellation and ETA
+  brief.py           the daily stream brief (run of show for the start of each
+                     stream): brief_dir(), problems() validation, load_brief() +
+                     merge_steam(), render_page(brief, "claude"|"local"), and the
+                     live on-air state / markers / feedback JSON files the
+                     dashboard's OBS overlays and dock read and write. See the
+                     "Stream brief" section
   stages/
     download.py       stage 1  (Kick: yt-dlp; kick-dl fallback currently disabled)
                        + acquire(), the platform dispatcher the CLI and jobs call
@@ -203,11 +209,17 @@ clipbot/
     __main__.py       `python -m clipbot.server` entry point (uvicorn)
     templates/        Jinja2: base.html (topbar with the Kick | YouTube tabs),
                        library.html (the Kick tab), library_youtube.html (the
-                       YouTube tab), workspace.html, review.html, compile.html
+                       YouTube tab), workspace.html, review.html, compile.html,
+                       brief_overlay.html + brief_dock.html (stream brief, OBS)
     static/           vanilla JS/CSS: app.js, player.js (player adapter: a native
                        <video> or the embedded YouTube player), fx.js, reel.js,
                        review.js, compile.js, *.css
                        (ignore the *.bak files sitting alongside — stale, unused)
+      brief/          the stream brief's page and scenes: page.html (rundown,
+                       not Jinja - brief.render_page fills its placeholders),
+                       scenes.css/scenes.js (on-air scene renderer + state
+                       reducer, shared by page, overlays and dock), live.js
+                       (client for /api/brief/*), overlay.js, dock.js/.css
 
 config/
   settings.json         all tunables — see "Configuration" below
@@ -250,9 +262,16 @@ tests/
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
                                 infrastructure exists in this repo
+  test_brief.py                 clipbot/brief.py (validation, render_page,
+                                state versioning, markers, feedback) and the
+                                /brief* + /api/brief/* routes (TestClient)
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
+tools/stream-brief/       the daily stream brief's producer side: scan_library.py
+                          (installed games), steam_ccu.py (Steam player counts),
+                          build_page.py (the claude.ai artifact copy), DAILY.md
+                          (the procedure a scheduled Claude task follows each day)
 requirements.txt          core pipeline deps
 requirements-server.txt   dashboard-only deps (fastapi/uvicorn/jinja2, capped for py3.9)
 requirements-diarize.txt  opt-in: pyannote.audio + PyTorch for stages/diarize.py -
@@ -1682,7 +1701,8 @@ error message instead of a silent no-op or a 500.
   `compilations.json` read needed on the media route); and `GET
   /api/events` (Server-Sent Events, with `Last-Event-ID` replay — event
   kinds include `job`, `progress`, `log`, `workspace`, `clips`,
-  `compilations`, `preview`, `library`).
+  `compilations`, `preview`, `library`, `brief`); plus the stream brief's
+  routes (see "Stream brief" below).
 - `external_activity(ws)` detects a **CLI-driven** job the dashboard didn't
   start itself: partial download files (`.part`/`.ytdl`), or (Windows-only)
   a `wmic process ... get commandline` scan matching `clipbot` + the
@@ -1816,11 +1836,53 @@ CLI-only. Removed outright rather than left as a second dead kind.)
   watchdog force-cancel. LRU-ish eviction to `reel.preview.cache_max_mb`
   (512MB default).
 
+## Stream brief (clipbot/brief.py, server/static/brief/, tools/stream-brief/)
+
+- A daily run of show for the start of each stream (pre-show, talk, reaction
+  blocks, a chat game, the game vote, the game) plus game picks from the PC's
+  library. A scheduled Claude task writes `<brief dir>/brief.json` each
+  afternoon by following `tools/stream-brief/DAILY.md`; nothing in the pipeline
+  depends on it.
+- **Two front ends, one page.** `brief.render_page(brief, backend)` fills
+  `server/static/brief/page.html` with `scenes.css`, `scenes.js`, `live.js` and
+  the data. `backend="claude"` is the claude.ai artifact copy built by
+  `tools/stream-brief/build_page.py` (state, markers and feedback go to the
+  artifact's own database; a phone remote uses its room). `backend="local"` is
+  `GET /brief` on the dashboard, which talks to `/api/brief/*`.
+- **OBS.** `GET /brief/overlay/{chat|game|vertical|full}` are Browser Sources
+  (1920x1080, vertical 1080x1920; `?bg=brand|green|clear`, default clear except
+  full = brand). Each frame places the cards around the user's real scene
+  layout (measured from VOD frames): chat = full-frame cam with the chat overlay
+  bottom right, game = compact card under the cam box, vertical = clear of the
+  Shorts UI, full = brand scene for the pre-show. Chat, game and vertical draw
+  nothing until Start is pressed. `GET /brief/dock` is the control panel for an
+  OBS Custom Browser Dock.
+- **Live state** is one JSON object (`brief.default_state`): `v` (ms timestamp
+  of the change), `on`, `seg`, `item`, `reveal`, `kills`, `deaths`, timer
+  fields, `bg`, `lay`, `l3only`, `date`. Every view applies controls with
+  `BriefScenes.reduce` and sends the whole object (`PUT /api/brief/state`);
+  `brief.write_state` keeps it only if its `v` is newer (or the date is new),
+  stores it at `<brief dir>/live/state.json`, and the route publishes a `brief`
+  SSE event `{state}` that every overlay applies. State from another day reads
+  as a fresh default.
+- **Markers** (`POST /api/brief/markers`, `markers/<date>.json`): a `segment`
+  marker on every segment change and a `clip` marker on each clip press, with a
+  UTC `at`; the next brief turns them into YouTube chapters and an editor list.
+  **Feedback** (`POST /api/brief/feedback`, `feedback.json`): more / less / drop
+  per item, keyed `<date>_<kind>_<target>`; `reaction: null` clears.
+- `_watch_brief()` (started in `_startup`) publishes `{changed: true}` when
+  brief.json's mtime changes, so overlays and the dock load the new day without
+  a refresh.
+- `brief.problems()` is the build's gate: required keys, segment fields,
+  scene-specific fields (guess rounds, vote poll), card titles of at most 48
+  characters, and a backstop regex for private words, because the page is shown
+  live on stream.
+
 ## Configuration reference (config/settings.json)
 
 Every leaf is overridable by a `CLIPBOT_*` env var — see `ENV_OVERRIDES` in
-`clipbot/config.py` for the exact list (work root, library dir, tool paths,
-transcribe backend,
+`clipbot/config.py` for the exact list (work root, library dir, brief dir,
+server port, tool paths, transcribe backend,
 whisper model/device/language, Claude model, rubric file path).
 
 Sections and the values worth knowing without opening the file:
@@ -1907,7 +1969,10 @@ Sections and the values worth knowing without opening the file:
   `category_id` (`"20"`, Gaming), `made_for_kids` (`false`), `chunk_mb` (`16`;
   about three held in memory in stream mode), `max_retries` (`8`) and
   `stream_container` (`"mp4"`).
-- **`server`** — `host: 127.0.0.1`, `port: 8765`, no auth (see security
+- **`brief`** — `dir` (`""` = `<work_root>/_brief`; env `CLIPBOT_BRIEF_DIR`):
+  where the stream brief's brief.json, live state, markers and feedback live.
+- **`server`** — `host: 127.0.0.1`, `port: 8765` (env `CLIPBOT_SERVER_PORT`,
+  handy for a second copy of the dashboard), no auth (see security
   posture above).
 
 ## Testing
@@ -2024,6 +2089,10 @@ Sections and the values worth knowing without opening the file:
   (stale time before first play, seek-from-ended restarts, no timeupdate).
   Skipped without Node. Mutation-checked for the pending-seek path, the stale
   tick guard, the pause-after-seek, and the referrer policy.
+- `tests/test_brief.py` — the stream brief: validation messages, Steam merge,
+  `render_page` placeholders and the `</script>` escape, newest-`v`-wins state
+  (and a new day replacing yesterday's), marker/feedback validation, and the
+  routes: overlays and dock load without a brief, mutations need `X-ClipBot`.
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
   `tests/` is not a package, so `python -m unittest tests.test_x` fails; pass
@@ -2190,6 +2259,11 @@ Sections and the values worth knowing without opening the file:
   login in `youtube_auth.py`, one-time `clipbot youtube-auth`). To upload clips,
   reels or compilations, give `upload_vod` a different source file -
   `ResumableUpload.upload_file` is already generic.
+- ...change the stream brief or its OBS overlays → data and live state in
+  `clipbot/brief.py`; scenes in `server/static/brief/scenes.css|js` (one
+  renderer for the artifact, the rundown at `/brief`, the overlays and the dock,
+  so a scene change shows everywhere); the daily content in
+  `tools/stream-brief/DAILY.md`.
 - ...add a new full dashboard page (not just a route) → a new template
   extending `base.html` (gets the shared topbar/job-panel/SSE for free) +
   a dedicated `static/<page>.js` if it's non-trivial (see `compile.html`/
