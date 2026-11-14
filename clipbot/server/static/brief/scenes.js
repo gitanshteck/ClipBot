@@ -98,7 +98,27 @@
   }
 
   function defaultState(date) {
-    return { v: 0, on: false, seg: 0, item: 0, reveal: false, kills: 0, deaths: 0, startedAt: 0, pausedAt: 0, pausedTotal: 0, bg: "brand", lay: "h", l3only: false, date: date || B.date };
+    return { v: 0, on: false, seg: 0, item: 0, reveal: false, kills: 0, deaths: 0, startedAt: 0, pausedAt: 0, pausedTotal: 0, bg: "brand", lay: "h", l3only: false, ask: "", askShow: false, date: date || B.date };
+  }
+
+  // The live-chat answer card: the question as the kicker, the one-breath answer big,
+  // up to three riff points, an honest "AI answer" tag. Types out while it streams.
+  function askHTML(c) {
+    var head = c.head || (c.done ? "" : "thinking…");
+    var pts = (c.points || []).map(function (p) { return "<li>" + esc(p) + "</li>"; }).join("");
+    var html = '<div class="oc oc-ask"><div class="bug"><span class="tk"><b>T</b>ECK</span><span>ASKED THE AI</span><span class="ai-tag">AI · CAN BE WRONG</span></div>' +
+      '<p class="aq">“' + esc(c.q) + '”</p>' +
+      '<h2 class="tt at' + (head.length > 150 ? " xlong" : head.length > 85 ? " long" : "") + '">' + esc(head) + (c.done ? "" : '<span class="caret"></span>') + '</h2>' +
+      (pts ? '<ul class="ap">' + pts + '</ul>' : "") +
+      '<div class="pr"><b>CHAT</b>agree? tell me in chat</div></div>';
+    html += '<div class="l3"><span class="lk">ASKED</span><span class="lt">' + esc(c.q) + '</span></div>';
+    return html;
+  }
+  function paintAsk(el, c, look) {
+    var lay = layoutFor(look);
+    el.className = "stage" + (lay === "vertical" ? " vert" : "") + " bg-" + (look.bg || "clear") + " lay-" + lay + " s-ask" + (look.guides ? " show-guides" : "");
+    el.innerHTML = (look.mock || "") + askHTML(c) + guidesHTML(lay);
+    return lay;
   }
   // Apply one control to a copy of the state. Returns {state, segChanged, clip} or null when nothing changes.
   function reduce(S, a, shift) {
@@ -123,6 +143,8 @@
     else if (a === "lay") { s.lay = s.lay === "h" ? "v" : "h"; }
     else if (a === "l3") { s.l3only = !s.l3only; }
     else if (a === "clip") { return { state: S, segChanged: false, clip: true }; }
+    else if (a.indexOf("ask:") === 0) { s.ask = a.slice(4); s.askShow = true; }
+    else if (a === "askhide") { s.askShow = false; }
     else return null;
     s.date = B.date;
     s.v = Math.max(now, (S.v || 0) + 1);
@@ -136,6 +158,6 @@
   root.BriefScenes = {
     init: init, esc: esc, tc: tc, mmss: mmss, KIND: KIND,
     sceneOf: sceneOf, itemsOf: itemsOf, elapsedOf: elapsedOf, sceneHTML: sceneHTML, guidesHTML: guidesHTML,
-    layoutFor: layoutFor, paintStage: paintStage, defaultState: defaultState, reduce: reduce, markerDoc: markerDoc
+    layoutFor: layoutFor, paintStage: paintStage, askHTML: askHTML, paintAsk: paintAsk, defaultState: defaultState, reduce: reduce, markerDoc: markerDoc
   };
 })(window);

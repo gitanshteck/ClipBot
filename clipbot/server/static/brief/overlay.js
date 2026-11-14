@@ -8,7 +8,7 @@
   var frame = body.getAttribute("data-frame"), bg = body.getAttribute("data-bg");
   var vertical = frame === "vertical";
   var W = vertical ? 1080 : 1920, H = vertical ? 1920 : 1080;
-  var B = null, S = null, lastKey = "";
+  var B = null, S = null, lastKey = "", asks = {};
   var debug = /[?&]debug=1/.test(location.search);
 
   function fit() {
@@ -19,6 +19,17 @@
 
   function draw() {
     if (!B) return;
+    if (S && S.askShow && S.ask) {
+      var c = asks[S.ask];
+      if (!c) { fetchAsk(S.ask); return; }
+      var akey = "ask|" + c.id + "|" + c.text.length + "|" + c.done;
+      if (akey === lastKey) return;
+      var same = lastKey.indexOf("ask|" + c.id + "|") === 0;
+      SC.paintAsk(stage, c, { frame: frame, bg: bg });
+      if (same) stage.classList.add("noanim");
+      lastKey = akey;
+      return;
+    }
     var live = S && S.on && S.date === B.date;
     if (!live && frame !== "full") {
       if (lastKey !== "off") { stage.className = "stage" + (vertical ? " vert" : "") + " bg-clear"; stage.innerHTML = ""; lastKey = "off"; }
@@ -49,6 +60,12 @@
     if (!S || s.date !== S.date || s.v > S.v) { S = s; draw(); }
   });
   Live.onBriefChanged(function () { loadBrief(); });
+  function fetchAsk(id) {
+    if (fetchAsk.busy === id) return;
+    fetchAsk.busy = id;
+    Live.api("GET", "/api/brief/chat/" + encodeURIComponent(id)).then(function (c) { asks[c.id] = c; fetchAsk.busy = ""; draw(); }, function () { fetchAsk.busy = ""; });
+  }
+  Live.onChat(function (c) { asks[c.id] = c; if (S && S.askShow && S.ask === c.id) draw(); });
   Live.onConnection(function (ok) { if (ok && !B) loadBrief(); });
   window.addEventListener("resize", fit);
   setInterval(draw, 1000);

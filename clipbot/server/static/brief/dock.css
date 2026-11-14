@@ -68,3 +68,29 @@ h2 { font: 700 11px/1 var(--mono); letter-spacing: .14em; text-transform: upperc
 .addr button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 2px 7px; font: 600 10.5px/1.4 var(--mono); cursor: pointer; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* Ask the AI */
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.ask { margin: 12px 12px 0; padding: 12px; border-radius: 12px; background: linear-gradient(160deg, #13223b, #111a2c); border: 1px solid rgba(25,162,210,.35); display: grid; gap: 10px; }
+.ask-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ask-h h2 { margin: 0; color: var(--accent); }
+.ask-prov { font: 600 10.5px/1 var(--mono); color: var(--muted); letter-spacing: .06em; }
+.ask-prov.off { color: var(--rec); }
+#askForm { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+#askQ { resize: vertical; min-height: 44px; border-radius: 9px; border: 1px solid var(--line); background: #0d1320; color: var(--text); font: 400 13px/1.4 var(--body); padding: 8px 10px; }
+#askQ:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+#askGo { border-radius: 9px; border: 0; background: var(--accent); color: #04121C; font: 800 13px/1 var(--display); padding: 0 14px; cursor: pointer; }
+#askGo:disabled { opacity: .4; cursor: default; }
+.ask-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 340px; overflow-y: auto; }
+.ask-item { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; display: grid; gap: 6px; }
+.ask-item.onair { border-color: var(--rec); box-shadow: 0 0 0 1px var(--rec) inset; }
+.ask-item .q { font-size: 12px; color: var(--muted); font-style: italic; }
+.ask-item .a { font: 600 13.5px/1.4 var(--body); }
+.ask-item .a .caret { display: inline-block; width: 7px; height: 13px; margin-left: 3px; background: var(--accent); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.ask-item ul { margin: 0; padding-left: 16px; font-size: 12.5px; color: #c9d3e6; display: grid; gap: 2px; }
+.ask-item .err { color: #ff8f9b; font-size: 12px; }
+.ask-item .row { display: flex; gap: 6px; align-items: center; }
+.ask-item .row button { border: 1px solid var(--line); background: #1a2233; color: var(--text); border-radius: 7px; padding: 5px 9px; font: 700 11.5px/1 var(--body); cursor: pointer; }
+.ask-item .row button.show { border-color: rgba(255,77,94,.55); color: #ff8f9b; }
+.ask-item .row .meta { margin-left: auto; font: 500 10px/1 var(--mono); color: var(--muted); }

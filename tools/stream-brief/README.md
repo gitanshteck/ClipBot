@@ -34,6 +34,27 @@ count kills and deaths, and **CLIP THAT** drops a marker. Segment changes and cl
 markers are saved to `<brief dir>/markers/<date>.json`; the next day's run turns
 them into YouTube chapters and an editor clip list.
 
+## Ask the AI
+
+The dock has an **Ask the AI** panel: type a question and a small, fast model
+answers while you are live (a one-line answer you can say out loud plus up to
+three points to riff on). **Show on stream** puts the answer on every overlay in
+place of the current segment; press it again to go back. The model is told the
+stream is live and what segment and topic are on screen. Nothing is posted to
+chat.
+
+Setup, one of:
+
+- **Claude Code signed in with your Claude plan** (preferred): install it and run
+  `claude` once. Questions run through it on your plan, not API billing.
+- `ANTHROPIC_API_KEY` set in the environment where the dashboard starts: used as
+  the fallback.
+- The Gemini CLI with a `GEMINI_API_KEY` (unverified; Google moved free sign-ins
+  off it in June 2026).
+
+`brief.chat.provider` in `config/settings.json` pins one; `auto` tries them in
+that order.
+
 ## Files
 
 | File | What it does |

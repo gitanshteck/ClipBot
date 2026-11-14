@@ -96,6 +96,53 @@
     else if (k === "l") act("l3");
   });
 
+  // ---------- Ask the AI (kept outside #dock so typing survives re-renders) ----------
+  var askForm = document.getElementById("askForm"), askQ = document.getElementById("askQ"), askGo = document.getElementById("askGo");
+  var askList = document.getElementById("askList"), askProv = document.getElementById("askProv");
+  var asks = [];   // newest first
+  function renderAsks() {
+    var esc = SC.esc;
+    askList.innerHTML = asks.map(function (c) {
+      var onair = S && S.askShow && S.ask === c.id;
+      var head = c.head || (c.done ? "" : "thinking…");
+      return '<li class="ask-item' + (onair ? " onair" : "") + '"><div class="q">“' + esc(c.q) + '”</div>' +
+        (c.error ? '<div class="err">' + esc(c.error) + '</div>' : '<div class="a">' + esc(head) + (c.done ? "" : '<span class="caret"></span>') + '</div>') +
+        ((c.points || []).length ? "<ul>" + c.points.map(function (p) { return "<li>" + esc(p) + "</li>"; }).join("") + "</ul>" : "") +
+        '<div class="row">' + (c.error ? "" : (onair ? '<button type="button" data-askhide>Hide from stream</button>' : '<button type="button" class="show" data-askshow="' + esc(c.id) + '">Show on stream</button>')) +
+        '<span class="meta">' + esc(c.provider || "") + '</span></div></li>';
+    }).join("");
+  }
+  function upsert(c) {
+    for (var i = 0; i < asks.length; i++) if (asks[i].id === c.id) { asks[i] = c; renderAsks(); return; }
+    asks.unshift(c); asks = asks.slice(0, 20); renderAsks();
+  }
+  function history() {
+    return asks.filter(function (c) { return c.done && !c.error; }).slice(0, 6).reverse().map(function (c) { return { q: c.q, a: c.text }; });
+  }
+  askForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var q = askQ.value.trim();
+    if (!q) return;
+    askGo.disabled = true;
+    Live.ask(q, history(), "OBS dock" + (S && B && S.on ? ", during '" + (B.run[S.seg] || {}).name + "'" : "")).then(function (c) {
+      upsert(c); askQ.value = ""; askGo.disabled = false; askQ.focus();
+    }, function (err) { askGo.disabled = false; toast(err.message || "Couldn't ask"); });
+  });
+  askQ.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askForm.requestSubmit ? askForm.requestSubmit() : askGo.click(); }
+  });
+  askList.addEventListener("click", function (e) {
+    var sh = e.target.closest("[data-askshow]");
+    if (sh) { act("ask:" + sh.getAttribute("data-askshow")); renderAsks(); return; }
+    if (e.target.closest("[data-askhide]")) { act("askhide"); renderAsks(); }
+  });
+  Live.onChat(function (c) { upsert(c); });
+  Live.chatStatus().then(function (st) {
+    askProv.textContent = st.provider ? "via " + st.provider : "no model set up";
+    askProv.className = "ask-prov" + (st.provider ? "" : " off");
+    if (!st.provider) { askProv.title = st.hint; askGo.disabled = true; askQ.placeholder = st.hint; }
+  }, function () { askProv.textContent = "offline"; askProv.className = "ask-prov off"; });
+
   function setConn(state, text) { conn.className = "conn " + state; conn.querySelector("span").textContent = text; }
   function load() {
     Live.getBrief().then(function (b) {
@@ -109,7 +156,7 @@
       setTimeout(load, 15000);
     });
   }
-  Live.onState(function (s) { if (B && (!S || s.v > S.v || s.date !== S.date)) { S = s; render(); } });
+  Live.onState(function (s) { if (B && (!S || s.v > S.v || s.date !== S.date)) { S = s; render(); renderAsks(); } });
   Live.onBriefChanged(function () { toast("Tonight's brief was updated"); load(); });
   Live.onConnection(function (ok) { setConn(ok ? "on" : "off", ok ? "connected" : "reconnecting"); });
   setInterval(tick, 1000);

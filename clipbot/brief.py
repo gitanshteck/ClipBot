@@ -187,7 +187,7 @@ def render_page(brief: Dict[str, Any], backend: str, local_base: str = "http://1
 def default_state(date: str = "") -> Dict[str, Any]:
     return {"v": 0, "on": False, "seg": 0, "item": 0, "reveal": False, "kills": 0, "deaths": 0,
             "startedAt": 0, "pausedAt": 0, "pausedTotal": 0, "bg": "brand", "lay": "h",
-            "l3only": False, "date": date}
+            "l3only": False, "ask": "", "askShow": False, "date": date}
 
 
 def read_state(settings: Settings, date: str = "") -> Dict[str, Any]:
@@ -222,6 +222,9 @@ def write_state(settings: Settings, incoming: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("state.bg must be brand, green or clear")
     if clean["lay"] not in ("h", "v"):
         raise ValueError("state.lay must be h or v")
+    if not isinstance(clean["ask"], str) or not re.match(r"^[a-z0-9-]{0,40}$", clean["ask"]):
+        raise ValueError("state.ask must be a chat id")
+    clean["askShow"] = bool(clean["askShow"])
     path = brief_dir(settings) / "live" / "state.json"
     with _LOCK:
         current = _read_json(path, None)

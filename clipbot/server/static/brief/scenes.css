@@ -152,6 +152,34 @@
 .mock.vcam { background: linear-gradient(180deg, #3a1d2c 0 780px, #4d6b3c 780px 100%); }
 .mock.vcam .face { position: absolute; left: 380px; top: 180px; width: 320px; height: 380px; border-radius: 48% 48% 40% 40%; background: rgba(0,0,0,.45); }
 
+/* live-chat answer card */
+.oc-ask .ai-tag { margin-left: auto; font: 700 13px/1 var(--mono); letter-spacing: .12em; color: var(--clip); border: 1px solid rgba(242,179,61,.5); border-radius: 999px; padding: 6px 10px; }
+.oc-ask .aq { margin-top: 18px; font: 500 italic 24px/1.35 var(--body); color: #B9C4D8; }
+.oc-ask .tt.at { font-size: 46px; line-height: 1.12; text-transform: none; }
+.oc-ask .ap { margin: 18px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.oc-ask .ap li { position: relative; padding-left: 26px; font: 500 24px/1.35 var(--body); color: var(--text); }
+.oc-ask .ap li::before { content: ""; position: absolute; left: 0; top: 13px; width: 12px; height: 4px; border-radius: 2px; background: var(--accent); }
+.oc-ask .caret { display: inline-block; width: .5em; height: .9em; margin-left: 6px; background: var(--accent); vertical-align: -0.08em; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.lay-overlay.s-ask .oc { top: 160px; width: 680px; left: 1200px; max-height: 400px; }
+.lay-overlay.s-ask .oc .tt.at { font-size: 34px; }
+.lay-overlay.s-ask .oc .aq { font-size: 19px; }
+.lay-overlay.s-ask .oc .ap li { font-size: 19px; }
+.oc-ask .ap li { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.oc-ask .tt.at.long { font-size: 36px; }
+.oc-ask .tt.at.xlong { font-size: 30px; }
+.lay-overlay.s-ask .oc .tt.at.long { font-size: 27px; }
+.lay-overlay.s-ask .oc .tt.at.xlong { font-size: 22px; }
+.lay-game.s-ask .oc .tt.at.long, .lay-game.s-ask .oc .tt.at.xlong { font-size: 17px; }
+.lay-full.s-ask .oc .tt.at.long { font-size: 54px; }
+.lay-full.s-ask .oc .tt.at.xlong { font-size: 42px; }
+.lay-game.s-ask .oc .aq, .lay-game.s-ask .oc .ai-tag { display: none; }
+.lay-game.s-ask .oc .tt.at { font-size: 22px; }
+.lay-game.s-ask .oc .ap li { font-size: 15px; padding-left: 18px; }
+.lay-game.s-ask .oc .ap li::before { top: 9px; width: 9px; }
+.lay-full.s-ask .oc .tt.at { font-size: 72px; }
+.lay-full.s-ask .oc .ap li { font-size: 32px; }
+.lay-vertical.s-ask .oc .tt.at { font-size: 52px; }
 .noanim .oc, .noanim .oc::before, .noanim .l3, .noanim .reveal { animation: none !important; }
 @keyframes ocIn { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: none; } }
 @keyframes l3In { from { opacity: 0; transform: translateX(-30px); } to { opacity: 1; transform: none; } }

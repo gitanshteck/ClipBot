@@ -16,6 +16,15 @@
     <span class="mark"><b>T</b>ECK BRIEF</span>
     <span class="conn" id="conn" title="Connection to the ClipBot dashboard"><i></i><span>connecting</span></span>
   </header>
+  <section class="ask" id="ask" aria-label="Ask the AI">
+    <div class="ask-h"><h2>Ask the AI</h2><span class="ask-prov" id="askProv">checking…</span></div>
+    <form id="askForm" autocomplete="off">
+      <label for="askQ" class="sr">Question</label>
+      <textarea id="askQ" rows="2" maxlength="600" placeholder="Ask anything. Enter sends, Shift+Enter for a new line"></textarea>
+      <button type="submit" id="askGo">Ask</button>
+    </form>
+    <ol class="ask-list" id="askList"></ol>
+  </section>
   <main id="dock">
     <p class="muted">Loading tonight's brief…</p>
   </main>

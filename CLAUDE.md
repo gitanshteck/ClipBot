@@ -185,6 +185,9 @@ clipbot/
                      live on-air state / markers / feedback JSON files the
                      dashboard's OBS overlays and dock read and write. See the
                      "Stream brief" section
+  briefchat.py       the brief's live "Ask the AI" chat: providers (claude-cli,
+                     gemini-cli, anthropic), stream_context(), build_prompt(),
+                     parse_answer(), ask(). See the "Stream brief" section
   stages/
     download.py       stage 1  (Kick: yt-dlp; kick-dl fallback currently disabled)
                        + acquire(), the platform dispatcher the CLI and jobs call
@@ -265,6 +268,10 @@ tests/
   test_brief.py                 clipbot/brief.py (validation, render_page,
                                 state versioning, markers, feedback) and the
                                 /brief* + /api/brief/* routes (TestClient)
+  test_briefchat.py             clipbot/briefchat.py (answer parsing, prompt and
+                                context building, provider choice, the CLI and
+                                Anthropic runners with fakes) and the
+                                /api/brief/chat* routes
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
@@ -1859,7 +1866,7 @@ CLI-only. Removed outright rather than left as a second dead kind.)
   OBS Custom Browser Dock.
 - **Live state** is one JSON object (`brief.default_state`): `v` (ms timestamp
   of the change), `on`, `seg`, `item`, `reveal`, `kills`, `deaths`, timer
-  fields, `bg`, `lay`, `l3only`, `date`. Every view applies controls with
+  fields, `bg`, `lay`, `l3only`, `ask`, `askShow`, `date`. Every view applies controls with
   `BriefScenes.reduce` and sends the whole object (`PUT /api/brief/state`);
   `brief.write_state` keeps it only if its `v` is newer (or the date is new),
   stores it at `<brief dir>/live/state.json`, and the route publishes a `brief`
@@ -1877,6 +1884,30 @@ CLI-only. Removed outright rather than left as a second dead kind.)
   scene-specific fields (guess rounds, vote poll), card titles of at most 48
   characters, and a backstop regex for private words, because the page is shown
   live on stream.
+- **Live chat ("Ask the AI")**, `clipbot/briefchat.py`: the dock sends a
+  question and a small, fast model answers while on air. Providers
+  (`brief.chat.provider`): `claude-cli` (Claude Code print mode on the user's
+  own Claude login), `gemini-cli`, and `anthropic` (the API, Haiku-class model,
+  effort low). `auto` picks the first available in that order (`available()`:
+  the CLI is on `PATH`, or `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/an `ant`
+  profile exists). The prompt always goes to a CLI on stdin. The `claude-cli`
+  child's environment drops `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` so the
+  subscription login is used rather than API billing, and it runs from the home
+  directory so no project CLAUDE.md is loaded. Gemini CLI caveat: Google moved
+  free and AI Pro/Ultra sign-ins off it in June 2026, so it may need
+  `GEMINI_API_KEY` (unverified here). Routes: `GET /api/brief/chat/status`
+  (provider, available list, setup hint), `POST /api/brief/chat` (question,
+  history, page; 400 empty or over `QUESTION_MAX`, 503 with the hint when no
+  provider; starts a worker thread and returns the Ask), `GET
+  /api/brief/chat/{id}` (the last 30 are kept in memory). Answers stream as
+  `brief` SSE events `{chat: {...}}`. The answer shape asked for is one
+  first line sayable in one breath plus up to three `- ` points
+  (`parse_answer` returns `{head, points}`; `*` and bullet characters also
+  count, extra points are dropped). The dock's "Ask the AI" panel shows it;
+  "Show on stream" sets state `ask` (the chat id, `^[a-z0-9-]{0,40}$`) and
+  `askShow`, and every overlay then draws the answer card instead of the
+  current segment. `stream_context()` tells the model what segment and topic
+  are on screen and never includes a guess round's answer.
 
 ## Configuration reference (config/settings.json)
 
@@ -1971,6 +2002,11 @@ Sections and the values worth knowing without opening the file:
   `stream_container` (`"mp4"`).
 - **`brief`** — `dir` (`""` = `<work_root>/_brief`; env `CLIPBOT_BRIEF_DIR`):
   where the stream brief's brief.json, live state, markers and feedback live.
+  Nested **`chat.*`** (`briefchat.py`): `provider` (`"auto"`; or `claude-cli`,
+  `gemini-cli`, `anthropic`), `model` (`"claude-haiku-5-5"`, anthropic provider
+  only), `effort` (`"low"`, anthropic provider only), `claude_cli` /
+  `gemini_cli` (argv lists; not in settings.json, the defaults live in
+  `briefchat.py`).
 - **`server`** — `host: 127.0.0.1`, `port: 8765` (env `CLIPBOT_SERVER_PORT`,
   handy for a second copy of the dashboard), no auth (see security
   posture above).
@@ -2093,6 +2129,13 @@ Sections and the values worth knowing without opening the file:
   `render_page` placeholders and the `</script>` escape, newest-`v`-wins state
   (and a new day replacing yesterday's), marker/feedback validation, and the
   routes: overlays and dock load without a brief, mutations need `X-ClipBot`.
+- `tests/test_briefchat.py` — the live chat: `parse_answer` shapes, the prompt
+  (history cap, question cap), `stream_context` (a guess round's answer never
+  appears), provider choice with `shutil.which`/environment patched,
+  `_run_cli` against a real subprocess (this Python), the claude-cli child
+  environment losing `ANTHROPIC_API_KEY`, `ask()` failure paths,
+  `_run_anthropic` against a fake `anthropic` module, the `ask`/`askShow`
+  state fields, and the chat routes (the worker thread run synchronously).
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
   `tests/` is not a package, so `python -m unittest tests.test_x` fails; pass

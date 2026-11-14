@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import brief as brief_module
+from .. import briefchat
 from .. import chatsync
 from .. import compilations
 from .. import fxspec
@@ -1751,6 +1753,56 @@ async def api_brief_feedback_set(payload: Dict[str, Any] = Body(...)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"row": row}
+
+
+# Live chat: ask a small model a question on air (clipbot/briefchat.py). The
+# answer streams to the dock and overlays as "brief" events {chat: {...}}.
+_brief_asks = {}  # type: Dict[str, briefchat.Ask]
+_brief_asks_order = []  # type: List[str]
+
+
+@app.get("/api/brief/chat/status")
+async def api_brief_chat_status():
+    provider = briefchat.pick_provider(settings)
+    return {"provider": provider, "available": briefchat.available(settings),
+            "hint": "" if provider else briefchat.setup_hint(settings)}
+
+
+@app.post("/api/brief/chat")
+async def api_brief_chat(payload: Dict[str, Any] = Body(...)):
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Ask a question first")
+    if len(question) > briefchat.QUESTION_MAX:
+        raise HTTPException(status_code=400, detail="Keep the question under {0} characters".format(briefchat.QUESTION_MAX))
+    provider = briefchat.pick_provider(settings)
+    if not provider:
+        raise HTTPException(status_code=503, detail=briefchat.setup_hint(settings))
+    try:
+        brief_data = brief_module.load_brief(settings)
+    except FileNotFoundError:
+        brief_data = None
+    state = brief_module.read_state(settings, str((brief_data or {}).get("date", "")))
+    history = briefchat.history_payload(payload.get("history") or [])
+    context = briefchat.stream_context(brief_data, state, str(payload.get("page") or "")[:80])
+    prompt = briefchat.build_prompt(question, history, context)
+    ask_id = "a{0}".format(int(time.time() * 1000))
+    ask_obj = briefchat.Ask(ask_id, question, provider)
+    _brief_asks[ask_id] = ask_obj
+    _brief_asks_order.append(ask_id)
+    while len(_brief_asks_order) > 30:
+        _brief_asks.pop(_brief_asks_order.pop(0), None)
+    on_delta = lambda d: bus.publish("brief", {"chat": d})  # noqa: E731
+    threading.Thread(target=briefchat.ask, args=(settings, ask_obj, prompt, on_delta), daemon=True).start()
+    return ask_obj.to_dict()
+
+
+@app.get("/api/brief/chat/{ask_id}")
+async def api_brief_chat_get(ask_id: str):
+    ask_obj = _brief_asks.get(ask_id)
+    if not ask_obj:
+        raise HTTPException(status_code=404, detail="No such question (the dashboard keeps the last 30)")
+    return ask_obj.to_dict()
 
 
 # --- events ---------------------------------------------------------------
