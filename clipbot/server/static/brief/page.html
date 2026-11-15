@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teck Cue</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Poppins:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+/*__SCENES_CSS__*/
+/* The rundown page: a broadcast run-sheet on a navy control-room desk. Single theme on purpose (it sits next to OBS). */
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--ink); color: var(--text); font: 400 15px/1.55 var(--body); -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button { font: inherit; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 0 20px 64px; }
+.muted { color: var(--muted); }
+
+.xnav { display: flex; gap: 6px; flex-wrap: wrap; padding-top: 14px; font: 600 12px/1 var(--mono); letter-spacing: .06em; }
+.xnav a { color: var(--muted); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; }
+.xnav a:first-child { color: var(--text); }
+.xnav a:hover { color: var(--accent); border-color: var(--accent); }
+.slate { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.mark { font: 900 20px/1 var(--display); letter-spacing: .02em; }
+.mark b { color: var(--accent); font-weight: 900; }
+.mark small { font: 500 11px/1 var(--mono); color: var(--muted); letter-spacing: .14em; margin-left: 10px; vertical-align: middle; }
+.slate-meta { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; font: 500 12px/1.2 var(--mono); color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.slate-meta strong { color: var(--text); font-weight: 700; }
+.live-dot { display: inline-flex; align-items: center; gap: 6px; }
+.live-dot i { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.live-dot.on i { background: var(--good); }
+
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 28px; padding: 34px 0 26px; align-items: end; }
+.kicker { font: 700 12px/1 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 10px; }
+.kicker::before { content: ""; width: 26px; height: 2px; background: var(--accent); }
+.hero h1 { font: 900 clamp(30px, 5.2vw, 60px)/1.02 var(--display); letter-spacing: -.01em; margin: 14px 0; }
+.hero p { margin: 0; max-width: 62ch; color: var(--muted); font-size: 16px; }
+.tuned { margin-top: 14px !important; color: var(--clip) !important; font-size: 14px !important; }
+.golive { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: grid; gap: 12px; }
+.golive .times { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.golive .t { font: 700 26px/1 var(--mono); }
+.golive .tz { font: 500 11px/1 var(--mono); color: var(--muted); letter-spacing: .12em; margin-top: 6px; }
+.btn-air { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; border: 0; border-radius: 10px; padding: 14px 16px; background: var(--rec); color: #fff; font: 700 14px/1 var(--display); letter-spacing: .06em; cursor: pointer; text-transform: uppercase; }
+.btn-air:hover { filter: brightness(1.08); }
+.btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btn-sub { border: 1px solid var(--line); background: var(--raise); color: var(--text); border-radius: 10px; padding: 10px; font: 600 13px/1.2 var(--body); cursor: pointer; text-align: center; text-decoration: none; }
+.btn-sub:hover { border-color: var(--accent); }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px rgba(255,255,255,.18); }
+.plat-line { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); font: 600 11px/1.5 var(--body); color: var(--muted); white-space: nowrap; text-decoration: none; }
+.chip.acc { color: var(--accent); border-color: rgba(25,162,210,.45); }
+.chip.clip { color: var(--clip); border-color: rgba(242,179,61,.45); }
+.chip.rec { color: var(--rec); border-color: rgba(255,77,94,.45); }
+.chip.good { color: var(--good); border-color: rgba(60,203,140,.45); }
+
+.fb { display: inline-flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.fb button { display: none; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 2px 9px; font: 600 11px/1.6 var(--body); cursor: pointer; }
+.fb button:hover { color: var(--text); border-color: var(--muted); }
+.has-fb .fb .r { display: inline-block; }
+.has-cm .fb .c { display: inline-block; }
+.fb button.on[data-r="more"] { color: var(--good); border-color: var(--good); }
+.fb button.on[data-r="less"] { color: var(--clip); border-color: var(--clip); }
+.fb button.on[data-r="drop"] { color: var(--rec); border-color: var(--rec); }
+.fb-tray { margin-top: 10px; }
+.dropped { opacity: .5; }
+
+.strip { margin: 6px 0 34px; }
+.strip-track { position: relative; display: flex; gap: 3px; height: 74px; }
+.seg { position: relative; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); padding: 9px 10px; overflow: hidden; min-width: 0; cursor: pointer; text-align: left; color: inherit; }
+.seg:hover { background: var(--raise); }
+.seg .sn { font: 600 12px/1.25 var(--body); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.seg .st { font: 500 10.5px/1 var(--mono); color: var(--muted); margin-top: 6px; }
+.seg::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--k, var(--line)); }
+.seg.clipbait::before { content: ""; position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--clip); }
+.seg.game { background: repeating-linear-gradient(135deg, var(--panel) 0 8px, #101215 8px 16px); }
+.seg.pre { background: repeating-linear-gradient(45deg, var(--panel) 0 6px, #14171a 6px 12px); }
+.ruler { position: relative; height: 22px; margin-top: 6px; font: 500 10.5px/1 var(--mono); color: var(--muted); }
+.ruler span { position: absolute; top: 6px; transform: translateX(-50%); white-space: nowrap; }
+.ruler span::before { content: ""; position: absolute; left: 50%; top: -7px; width: 1px; height: 5px; background: var(--line); }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 4px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.k-talk { --k: var(--accent); } .k-chat { --k: #7FD3F0; } .k-react { --k: #A78BFA; } .k-transition { --k: var(--muted); } .k-game { --k: var(--good); } .k-starting { --k: var(--rec); }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+section { margin-top: 44px; }
+.grid section:first-child, .grid > div > section:first-child { margin-top: 0; }
+.sh { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.sh h2 { font: 700 19px/1.2 var(--display); letter-spacing: .01em; }
+.sh .tag { font: 500 11px/1 var(--mono); color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+
+.run { display: grid; gap: 10px; }
+.row { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 14px; padding: 16px; position: relative; }
+.row.done { opacity: .45; }
+.row.live { border-color: var(--rec); box-shadow: 0 0 0 1px var(--rec) inset; }
+.row .tc { font: 700 15px/1 var(--mono); }
+.row .tc small { display: block; font: 500 11px/1 var(--mono); color: var(--muted); margin-top: 6px; }
+.row .rail { position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; background: var(--k); }
+.row h3 { font: 600 16px/1.3 var(--body); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-right: 120px; }
+.screenline { margin: 8px 0 0; font: 700 13px/1.3 var(--display); letter-spacing: .01em; }
+.screenline span { color: var(--muted); font: 500 12px/1.3 var(--body); margin-left: 6px; }
+.say { margin: 10px 0 0; padding-left: 12px; border-left: 2px solid var(--accent); font-style: italic; }
+.notes { margin: 10px 0 0; padding-left: 18px; }
+.notes li { margin: 2px 0; }
+.why { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+.why::before { content: "from your streams · "; font: 600 10.5px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.plain { margin: 10px 0 0; font-size: 13px; }
+.prompt { margin-top: 10px; display: inline-flex; gap: 8px; align-items: center; font: 500 13px/1.4 var(--body); background: var(--raise); border-radius: 8px; padding: 6px 10px; }
+.prompt b { font: 700 10.5px/1 var(--mono); letter-spacing: .1em; color: var(--accent); }
+.row-acts { position: absolute; top: 12px; right: 12px; display: flex; gap: 6px; align-items: center; }
+.row-acts .go { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 3px 8px; font: 600 11px/1.4 var(--mono); cursor: pointer; }
+.row-acts .go:hover { color: var(--rec); border-color: var(--rec); }
+.tick { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.tick input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+.items-ref { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+.rounds { margin: 10px 0 0; padding-left: 18px; font-size: 13.5px; }
+.rounds b { color: var(--clip); font-weight: 600; }
+
+.stack { display: grid; gap: 12px; }
+.plat { padding: 14px 16px; display: grid; gap: 6px; }
+.plat-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.plat-h strong { font: 700 15px/1.2 var(--display); }
+.plat p { margin: 0; font-size: 13.5px; color: var(--muted); }
+.plat .act { font-size: 13.5px; }
+.timing { padding: 14px 16px; display: grid; gap: 8px; font-size: 13.5px; }
+.timing .big { display: flex; align-items: center; gap: 10px; font: 700 18px/1.2 var(--mono); }
+.list { margin: 0; padding: 14px 16px 14px 34px; display: grid; gap: 7px; font-size: 13.5px; }
+.titles { padding: 6px; display: grid; gap: 4px; }
+.titlebtn { display: flex; justify-content: space-between; gap: 10px; align-items: center; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text); font: 500 13.5px/1.4 var(--body); padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.titlebtn:hover { background: var(--raise); }
+.titlebtn span:last-child { font: 600 10.5px/1 var(--mono); color: var(--muted); letter-spacing: .08em; flex-shrink: 0; }
+.mini-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+
+.scenes { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+.scene-tile { padding: 12px; display: grid; gap: 10px; align-content: start; }
+.scene-tile .frame { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 8px; background: #000; cursor: pointer; border: 1px solid var(--line); }
+.scene-tile .frame.tall { aspect-ratio: auto; width: 236px; height: 420px; justify-self: center; }
+.scene-tile .frame:hover { border-color: var(--accent); }
+.scene-tile h3 { font: 600 14.5px/1.3 var(--body); }
+.scene-tile p { margin: 0; font-size: 12.5px; color: var(--muted); }
+.scene-tile .stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.obs { padding: 16px 18px; display: grid; gap: 12px; font-size: 13.5px; }
+.obs ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.urls { display: grid; gap: 6px; }
+.url { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 10px; align-items: center; background: var(--raise); border-radius: 8px; padding: 8px 10px; }
+.url b { font-weight: 600; }
+.url code { font: 500 12px/1.4 var(--mono); color: var(--accent); word-break: break-all; }
+.url button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 3px 8px; font: 600 11px/1.4 var(--mono); cursor: pointer; }
+.url button:hover { color: var(--text); }
+.keys { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px 14px; font-size: 12.5px; color: var(--muted); }
+.keys kbd { font: 700 11px/1 var(--mono); color: var(--text); background: var(--raise); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; margin-right: 6px; }
+
+.docket { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+.dk { padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+.dk-face { padding: 16px 16px 14px; background: linear-gradient(135deg, #17191d, #0E0F11); border-bottom: 1px solid var(--line); position: relative; }
+.dk-face::before { content: ""; position: absolute; left: 0; top: 0; height: 3px; width: 100%; background: var(--accent); }
+.dk-face .bugline { font: 700 10.5px/1 var(--mono); letter-spacing: .12em; color: var(--muted); text-transform: uppercase; display: flex; justify-content: space-between; gap: 8px; }
+.dk-face .bugline b { color: var(--accent); }
+.dk-face .cardt { font: 900 20px/1.1 var(--display); margin: 10px 0 0; text-transform: lowercase; }
+.dk-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 9px; flex: 1; }
+.dk-body h3 { font: 600 14px/1.4 var(--body); color: var(--muted); }
+.dk .take { margin: 0; font-style: italic; padding-left: 10px; border-left: 2px solid var(--accent); }
+.dk .q { margin: 0; font-size: 13.5px; }
+.dk .q b { font: 700 10.5px/1 var(--mono); letter-spacing: .1em; color: var(--accent); margin-right: 6px; }
+.dk .angle { margin: 0; font-size: 12.5px; color: var(--good); }
+.dk .risk { margin: 0; font-size: 12.5px; color: var(--muted); }
+.dk .src { margin-top: auto; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.pips { display: inline-flex; gap: 3px; align-items: center; }
+.pips i { width: 14px; height: 6px; border-radius: 2px; background: var(--line); }
+.pips i.on { background: var(--clip); }
+.block-h { font: 600 11px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 22px 0 10px; }
+.polls { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.games { display: grid; gap: 8px; }
+.gm { display: grid; grid-template-columns: 34px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 2fr); gap: 16px; padding: 14px 16px; align-items: start; }
+.gm .rk { font: 900 20px/1 var(--display); color: var(--muted); }
+.gm.top .rk { color: var(--accent); }
+.gm h3 { font: 600 15.5px/1.3 var(--body); }
+.gm .meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+.gm .verdict { margin: 0; font-size: 13.5px; }
+.gm .fit, .gm .up { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
+.metric { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.metric .v { font: 700 14px/1 var(--mono); color: var(--text); }
+.bar { height: 6px; background: var(--raise); border-radius: 0 4px 4px 0; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 0 4px 4px 0; }
+.gm-more summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 8px 2px; }
+
+.week { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.day { padding: 12px; display: grid; gap: 6px; align-content: start; }
+.day .d { font: 700 13px/1 var(--mono); }
+.day.today { border-color: var(--accent); }
+.day p { margin: 0; font-size: 13px; }
+.cal { margin: 0; padding: 0; list-style: none; }
+.cal li { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.cal li:first-child { border-top: 0; }
+.cal .cd { font: 700 12.5px/1.4 var(--mono); }
+.cal .cd small { display: block; font-weight: 500; color: var(--muted); }
+
+.evi { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 20px; align-items: start; }
+.chart { padding: 18px; position: relative; }
+.chart h3 { font: 600 14px/1.3 var(--body); margin-bottom: 14px; }
+.cr { display: grid; grid-template-columns: 150px minmax(0, 1fr) 48px; gap: 12px; align-items: center; padding: 7px 0; }
+.cr .lb { font-size: 13px; }
+.cr .vb { height: 18px; position: relative; }
+.cr .vb i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 0 4px 4px 0; }
+.cr .vb::before { content: ""; position: absolute; left: 0; top: -4px; bottom: -4px; width: 1px; background: var(--line); }
+.cr .vl { font: 700 13px/1 var(--mono); text-align: right; }
+.cr:hover .vb i, .cr:focus-visible .vb i { filter: brightness(1.18); }
+.tip { position: absolute; z-index: 5; pointer-events: none; background: #0A0B0D; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4); opacity: 0; transition: opacity .12s; max-width: 240px; }
+.tip.on { opacity: 1; }
+.tablev summary { cursor: pointer; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+.tablev table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.tablev td, .tablev th { text-align: left; padding: 5px 0; border-top: 1px solid var(--line); }
+.tablev td:last-child, .tablev th:last-child { text-align: right; font-family: var(--mono); }
+.lessons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lesson { padding: 14px 16px; }
+.lesson h3 { font: 600 14.5px/1.3 var(--body); margin-bottom: 4px; }
+.lesson p { margin: 0; font-size: 13px; color: var(--muted); }
+.scope { margin: 0 0 14px; color: var(--muted); font-size: 13.5px; max-width: 80ch; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.beats { margin: 0; padding: 6px 16px; list-style: none; }
+.beats li { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); font-size: 13.5px; }
+.beats li:first-child { border-top: 0; }
+.beats .ev { font: 600 11px/1.6 var(--mono); color: var(--good); letter-spacing: .06em; text-transform: uppercase; }
+.beats .ev.c { color: var(--clip); }
+footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; display: grid; gap: 8px; }
+footer ul { margin: 0; padding-left: 18px; columns: 2; column-gap: 32px; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--raise); border: 1px solid var(--line); padding: 8px 14px; border-radius: 999px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 90; }
+.toast.on { opacity: 1; }
+
+/* on-air view on this page (a preview of what OBS shows, and the claude.ai route to OBS) */
+.air { position: fixed; inset: 0; z-index: 70; display: none; overflow: hidden; background: var(--ink); }
+.air.on { display: block; }
+.air.bg-green { background: var(--key); }
+.air.bg-clear { background: transparent; }
+html.clear-bg, html.clear-bg body { background: transparent; }
+html.clear-bg .wrap { visibility: hidden; }
+.air > .stage { position: absolute; left: 50%; top: 50%; transform-origin: 50% 50%; }
+.host { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 80; display: flex; gap: 14px; align-items: center; background: rgba(8,12,22,.92); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; font: 500 13px/1.2 var(--mono); color: var(--muted); transition: opacity .25s; max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; }
+.air.idle .host { opacity: 0; pointer-events: none; }
+.host strong { color: var(--text); }
+.host .hl { color: var(--clip); font-family: var(--body); font-style: italic; max-width: 520px; display: none; }
+.air.hostlines .host .hl { display: block; }
+.host button { background: rgba(255,255,255,.06); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 6px 9px; font: 600 12px/1 var(--mono); cursor: pointer; }
+.host button:hover { background: rgba(255,255,255,.12); }
+.host .clipb { color: var(--rec); border-color: rgba(255,77,94,.5); }
+
+/* phone remote (claude.ai only) */
+.remote { position: fixed; inset: 0; z-index: 75; display: none; background: var(--ink); padding: 16px; overflow-y: auto; }
+.remote.on { display: block; }
+.rm-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.rm-now { margin: 16px 0; padding: 16px; display: grid; gap: 6px; }
+.rm-now .rs { font: 700 12px/1 var(--mono); letter-spacing: .12em; color: var(--accent); text-transform: uppercase; }
+.rm-now .rt { font: 800 22px/1.2 var(--display); text-transform: lowercase; }
+.rm-now .ri { font-size: 14px; color: var(--muted); }
+.rm-now .rc { font: 700 16px/1 var(--mono); }
+.rm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.rm-grid button { min-height: 64px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: 700 16px/1.2 var(--body); cursor: pointer; }
+.rm-grid button:active { background: var(--raise); }
+.rm-grid .wide { grid-column: 1 / -1; }
+.rm-grid .clipbig { background: var(--rec); border-color: var(--rec); color: #fff; min-height: 88px; font: 900 22px/1 var(--display); letter-spacing: .06em; }
+.rm-grid .kill { color: var(--accent); }
+.rm-grid .death { color: var(--rec); }
+.rm-note { margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+
+@media (max-width: 980px) {
+  .hero, .grid, .evi, .two { grid-template-columns: minmax(0, 1fr); }
+  .gm { grid-template-columns: 30px minmax(0, 1fr); }
+  .gm .metrics, .gm .vtext { grid-column: 2; }
+  .week { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .wrap { padding: 0 16px 48px; }
+  .strip { overflow-x: auto; padding-bottom: 6px; }
+  .strip-track, .ruler { min-width: 820px; }
+  .row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .row h3 { padding-right: 0; }
+  .row-acts { position: static; }
+  .lessons, .week { grid-template-columns: minmax(0, 1fr); }
+  .cr { grid-template-columns: 110px minmax(0, 1fr) 40px; }
+  .cal li, .beats li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .url { grid-template-columns: minmax(0, 1fr); }
+  footer ul { columns: 1; }
+  .scenes { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<div class="air" id="air" aria-hidden="true">
+  <div class="stage" id="stage"></div>
+  <div class="host" id="host">
+    <span id="hClock"></span>
+    <span id="hSeg"></span>
+    <span class="hl" id="hLine"></span>
+    <button type="button" data-a="prev">◀ seg</button>
+    <button type="button" data-a="item">item ▼</button>
+    <button type="button" data-a="reveal">reveal</button>
+    <button type="button" data-a="next">seg ▶</button>
+    <button type="button" data-a="clip" class="clipb">● clip</button>
+    <button type="button" data-a="bg">bg</button>
+    <button type="button" data-a="lay">16:9 / 9:16</button>
+    <button type="button" data-a="exit">esc</button>
+  </div>
+</div>
+<div class="remote" id="remote" data-uncommentable></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>/*__SCENES_JS__*/</script>
+<script>/*__LIVE_JS__*/</script>
+<script id="brief" type="application/json">__BRIEF_JSON__</script>
+<script>
+(function () {
+  "use strict";
+  var B;
+  try { B = JSON.parse(document.getElementById("brief").textContent); } catch (e) { B = null; }
+  var app = document.getElementById("app");
+  if (!B || !B.run) {
+    app.innerHTML = '<div class="card" style="padding:24px;margin-top:40px"><h2>No brief for today yet</h2><p class="muted">The data block is missing or broken. Re-run tools/stream-brief/build_page.py.</p></div>';
+    return;
+  }
+  var SC = window.BriefScenes;
+  SC.init(B);
+  var esc = SC.esc, tc = SC.tc, mmss = SC.mmss, KIND = SC.KIND, sceneOf = SC.sceneOf, itemsOf = SC.itemsOf, elapsedOf = SC.elapsedOf;
+  var LOCAL = B.backend === "local";
+  var BASE = LOCAL ? "" : (B.local_base || "http://127.0.0.1:8765");
+  var fmtN = function (n) { return n == null ? "–" : Number(n).toLocaleString("en-AU"); };
+  var DAY = B.date.replace(/-/g, "");
+  var uid = function (kind, id) { return kind + "-" + DAY + "-" + id; };
+  var docketById = {};
+  (B.docket || []).forEach(function (d) { docketById[d.id] = d; });
+  var store = {
+    get: function (k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+    set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  };
+  var doneKey = "teck-brief-done-" + B.date;
+  var done = store.get(doneKey) || {};
+  function toast(msg) {
+    var t = document.getElementById("toast");
+    t.textContent = msg; t.classList.add("on");
+    clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.remove("on"); }, 1800);
+  }
+  function copy(text, label) {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast(label || "Copied"); }, function () { toast("Copy blocked: select the text instead"); });
+    else toast("Copy blocked: select the text instead");
+  }
+  function fb(kind, id, label) {
+    return '<span class="fb" data-fb-kind="' + esc(kind) + '" data-fb-id="' + esc(id) + '" data-fb-label="' + esc(label) + '">' +
+      '<button type="button" class="r" data-r="more" title="More like this in future briefs">▲ more</button>' +
+      '<button type="button" class="r" data-r="less" title="Less like this">▼ less</button>' +
+      '<button type="button" class="r" data-r="drop" title="Drop it">✕ drop</button>' +
+      '<button type="button" class="c" data-cm title="Leave a comment here (use Send to Claude to get it changed)">✎ comment</button></span>';
+  }
+
+  // ---------- page ----------
+  var dateLabel = new Date(B.date + "T12:00:00").toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" });
+  var preEnd = 0; B.run.forEach(function (s) { if (s.kind === "game") preEnd = s.t; });
+  var h = [];
+  if (LOCAL) h.push('<nav class="xnav" aria-label="ClipBot"><a href="/">&larr; ClipBot</a><a href="/kick">Kick library</a><a href="/youtube">YouTube library</a><a href="/brief/dock" target="_blank" rel="noopener">Control dock</a></nav>');
+  h.push('<header class="slate"><div class="mark"><b>T</b>ECK IS LIVE<small>CUE' + (LOCAL ? " · THIS PC" : "") + '</small></div>' +
+    '<div class="slate-meta"><span>' + esc(dateLabel) + '</span><span>Edition <strong>' + esc(B.edition) + '</strong></span>' +
+    '<span>Built <strong>' + esc((B.generated_at || "").replace("T", " ").slice(0, 16)) + '</strong></span>' +
+    '<span class="live-dot" id="syncDot" title="Saving feedback and markers"><i></i><span id="syncTxt">not saving</span></span></div></header>');
+
+  h.push('<div class="hero"><div><div class="kicker">' + esc(B.headline.kicker) + '</div><h1>' + esc(B.headline.line) + '</h1><p>' + esc(B.headline.why) + '</p>' +
+    (B.feedback_note ? '<p class="tuned">Tuned from your feedback: ' + esc(B.feedback_note) + '</p>' : "") + '</div>' +
+    '<div class="golive"><div class="times"><div><div class="t">' + esc(B.go_live.start_aedt) + '</div><div class="tz">AEDT · GO LIVE</div></div>' +
+    '<div><div class="t muted">' + esc(B.go_live.start_ist) + '</div><div class="tz">IST · INDIA</div></div></div>' +
+    '<div class="plat-line">' + (B.platforms || []).map(function (p, i) { return '<span class="chip ' + (i === 0 ? "acc" : "") + '">' + esc(p.name) + ' · ' + esc(p.role) + '</span>'; }).join("") + '</div>' +
+    (LOCAL
+      ? '<a class="btn-air" href="/brief/dock" target="_blank" rel="noopener"><span class="dot"></span>Open the control dock</a>' +
+        '<div class="btn-row"><button class="btn-sub" type="button" data-open="onair">Preview on air</button><a class="btn-sub" href="#obs">OBS setup</a></div>'
+      : '<button class="btn-air" type="button" data-open="onair"><span class="dot"></span>Go on air</button>' +
+        '<div class="btn-row"><button class="btn-sub" type="button" data-open="onair-green">Green screen</button><button class="btn-sub" type="button" data-open="vertical">Vertical 9:16</button></div>' +
+        '<button class="btn-sub" type="button" data-open="remote">Phone remote (open this page on your phone)</button>') +
+    '</div></div>');
+
+  var stripMins = preEnd + 5 + 18;
+  h.push('<div class="strip" aria-label="Run of show timeline"><div class="strip-track">');
+  B.run.forEach(function (s, i) {
+    if (s.id === "outro") return;
+    var w = s.kind === "game" ? 18 : s.dur;
+    h.push('<button type="button" class="seg k-' + esc(s.kind) + (s.clip ? " clipbait" : "") + (s.kind === "game" ? " game" : "") + (s.kind === "starting" ? " pre" : "") + '" style="flex:' + w + ' 1 0" data-jump="' + i + '" title="' + esc(s.name) + '">' +
+      '<div class="sn">' + esc(s.name) + '</div><div class="st">' + tc(s.t) + (s.kind === "game" ? " →" : " · " + s.dur + "m") + '</div></button>');
+  });
+  h.push('</div><div class="ruler">');
+  [0, 15, 30, 45].forEach(function (m) { if (m <= preEnd) h.push('<span style="left:' + ((m + 5) / stripMins * 100) + '%">' + tc(m) + '</span>'); });
+  h.push('<span style="left:' + ((preEnd + 5) / stripMins * 100) + '%">' + tc(preEnd) + ' game</span></div>');
+  h.push('<div class="legend"><span><i style="background:var(--rec)"></i>Pre-show</span><span><i style="background:var(--accent)"></i>Talk</span><span><i style="background:#7FD3F0"></i>Chat game</span><span><i style="background:#A78BFA"></i>React</span><span><i style="background:var(--good)"></i>Game</span><span><i style="background:var(--clip);width:7px;height:7px;border-radius:50%"></i>Clip bait</span></div></div>');
+
+  h.push('<div class="grid"><section id="run"><div class="sh"><h2>Run of show</h2><span class="tag">' + preEnd + ' min before the game</span></div><div class="run">');
+  B.run.forEach(function (s, i) {
+    var items = (s.items || []).map(function (id) { var d = docketById[id]; return d ? '<a class="chip" href="#' + uid("dk", id) + '">' + esc(d.card || d.headline.slice(0, 40)) + '</a>' : ""; }).join("");
+    var rounds = s.rounds ? '<ol class="rounds">' + s.rounds.map(function (r) { return "<li>" + esc(r.q) + " → <b>" + esc(r.a) + "</b></li>"; }).join("") + "</ol>" : "";
+    var extra = (s.poll ? '<div class="items-ref">' + s.poll.map(function (o, j) { return '<span class="chip acc">' + (j + 1) + " · " + esc(o) + "</span>"; }).join("") + "</div>" : "") +
+      (s.rule ? '<p class="plain">Rule: ' + esc(s.rule) + "</p>" : "") + (s.predict ? '<p class="plain">Prediction: ' + esc(s.predict) + "</p>" : "");
+    h.push('<article class="card row k-' + esc(s.kind) + (done[s.id] ? " done" : "") + '" id="' + uid("seg", s.id) + '" data-comment-target><span class="rail"></span>' +
+      '<div class="tc">' + tc(s.t) + '<small>' + (s.kind === "game" ? "2 h+" : s.dur + " min") + '</small></div><div>' +
+      '<h3>' + esc(s.name) + ' <span class="chip">' + esc(KIND[s.kind] || s.kind) + '</span>' + (s.clip ? '<span class="chip clip">Clip bait</span>' : "") + '</h3>' +
+      '<p class="screenline">' + esc(s.screen.title) + '<span>' + esc(s.screen.sub) + '</span></p>' +
+      (s.say ? '<p class="say">“' + esc(s.say) + '”</p>' : "") +
+      (s.notes && s.notes.length ? '<ul class="notes">' + s.notes.map(function (n) { return "<li>" + esc(n) + "</li>"; }).join("") + "</ul>" : "") +
+      rounds + extra + (items ? '<div class="items-ref">' + items + "</div>" : "") +
+      '<div class="prompt"><b>CHAT</b>' + esc(s.screen.prompt) + '</div>' +
+      (s.why ? '<p class="why">' + esc(s.why) + "</p>" : "") +
+      '<div class="fb-tray">' + fb("segment", s.id, s.name) + '</div>' +
+      '</div><div class="row-acts"><button type="button" class="go" data-air-seg="' + i + '" title="Put this segment on air">on air</button><label class="tick"><input type="checkbox" data-done="' + esc(s.id) + '"' + (done[s.id] ? " checked" : "") + '><span>done</span></label></div></article>');
+  });
+  h.push('</div></section>');
+
+  h.push('<div><section><div class="sh"><h2>Where to go live</h2><span class="tag">tonight</span></div><div class="stack">');
+  (B.platforms || []).forEach(function (p, i) {
+    h.push('<div class="card plat"><div class="plat-h"><strong>' + esc(p.name) + '</strong><span class="chip ' + (i === 0 ? "acc" : "") + '">' + esc(p.role) + '</span></div><div class="act">' + esc(p.action) + '</div><p>' + esc(p.why) + '</p></div>');
+  });
+  if (B.timing) h.push('<div class="card timing"><div class="big">' + esc(B.go_live.start_aedt) + ' AEDT <span class="muted">=</span> ' + esc(B.go_live.start_ist) + ' IST</div><div class="muted">' + esc(B.timing.now) + ' ' + esc(B.timing.india_prime) + '</div><div>' + esc(B.timing.test) + '</div></div>');
+  h.push('</div></section>');
+  h.push('<section><div class="sh"><h2>Title options</h2><span class="tag">click to copy</span></div><div class="card titles">');
+  (B.go_live.titles || []).forEach(function (t) { h.push('<button type="button" class="titlebtn" data-copy="' + esc(t) + '"><span>' + esc(t) + '</span><span>COPY</span></button>'); });
+  h.push('</div></section>');
+  h.push('<section><div class="sh"><h2>Before you hit start</h2></div><div class="card"><ol class="list">');
+  (B.go_live.checklist || []).forEach(function (c) { h.push("<li>" + esc(c) + "</li>"); });
+  h.push('</ol></div></section>');
+  if (B.last_stream) {
+    var L = B.last_stream, ch = (L.chapters || []), mk = (L.markers || []);
+    h.push('<section id="last"><div class="sh"><h2>Last stream</h2><span class="tag">' + esc(L.date) + ' · ' + esc(L.platform) + '</span></div><div class="card plat" data-comment-target><div class="plat-h"><strong style="font-size:14px">' + esc(L.title) + '</strong></div>' +
+      '<div class="plat-line"><span class="chip">' + esc(L.length) + '</span><span class="chip acc">' + fmtN(L.per_hour) + ' msgs/hr</span><span class="chip">' + fmtN(L.messages) + ' messages</span><span class="chip">' + fmtN(L.chatters) + ' chatters</span></div>' +
+      '<p>' + esc(L.note) + '</p><div class="act">Callback: ' + esc(L.callback) + '</div>' +
+      (ch.length ? '<div class="act" style="margin-top:6px">YouTube chapters</div><ol class="mini-list">' + ch.map(function (c) { return "<li>" + esc(c.t) + " " + esc(c.label) + "</li>"; }).join("") + '</ol><button type="button" class="btn-sub" data-copy="' + esc(ch.map(function (c) { return c.t + " " + c.label; }).join("\n")) + '">Copy chapters</button>' : "") +
+      (mk.length ? '<div class="act" style="margin-top:6px">Clip markers for the editors</div><ol class="mini-list">' + mk.map(function (c) { return "<li>" + esc(c.t) + " " + esc(c.label) + "</li>"; }).join("") + "</ol>" : "") +
+      (!ch.length && !mk.length ? '<p>No markers yet. Press clip (C, or the dock\'s CLIP) while live, and tomorrow\'s brief turns tonight\'s segments and markers into YouTube chapters and a clip list for the editors.</p>' : "") +
+      '</div></section>');
+  }
+  h.push('</div></div>');
+
+  // scenes + OBS setup
+  var urls = [
+    { name: "Chat cam overlay", scene: "your Cam scene", path: "/brief/overlay/chat", size: "1920 × 1080" },
+    { name: "Game overlay", scene: "Game Scene", path: "/brief/overlay/game", size: "1920 × 1080" },
+    { name: "Full scene", scene: "Intro (pre-show, switches)", path: "/brief/overlay/full", size: "1920 × 1080" },
+    { name: "Vertical overlay", scene: "Camera Verical", path: "/brief/overlay/vertical", size: "1080 × 1920" },
+    { name: "Sound source", scene: "one always-on scene (tick Control audio via OBS)", path: "/brief/overlay/sound", size: "any, 1 × 1 is fine" },
+    { name: "Control dock", scene: "Docks → Custom Browser Docks", path: "/brief/dock", size: "any" }
+  ];
+  var base = B.local_base || "http://127.0.0.1:8765";
+  h.push('<section id="scenes"><div class="sh"><h2>How it looks on stream</h2><span class="tag">click a scene to preview it</span></div><div class="scenes" id="sceneGrid"></div>' +
+    '<div class="card obs" id="obs" style="margin-top:14px" data-comment-target><strong>Putting it in OBS</strong>' +
+    (LOCAL ? "" : '<p class="muted" style="margin:0">These run from the ClipBot dashboard on your PC: start it with <b>python -m clipbot.server</b> and the addresses below work in OBS. No sign-in, no green screen.</p>') +
+    '<div class="urls">' + urls.map(function (u) { return '<div class="url"><b>' + esc(u.name) + '</b><code>' + esc(base + u.path) + '</code><button type="button" data-copy="' + esc(base + u.path) + '">copy</button><span class="muted" style="grid-column:1/-1;font-size:12px">Add to ' + esc(u.scene) + ' · ' + esc(u.size) + '</span></div>'; }).join("") + '</div>' +
+    '<ol><li>In each scene: <b>+ → Browser</b>, paste the address, set the size shown, leave the background transparent, and put it at the top of the source list.</li>' +
+    '<li>Add the dock once: <b>Docks → Custom Browser Docks</b>, name it Teck Cue, paste the dock address. Press <b>Start</b> there when you go live.</li>' +
+    '<li>The overlays stay invisible until you press Start, and follow whatever you press in the dock. Tomorrow\'s brief loads by itself.</li></ol>' +
+    '<div class="keys"><span><kbd>→ ←</kbd>segment</span><span><kbd>↓ ↑</kbd>item or round</span><span><kbd>R</kbd>reveal answer</span><span><kbd>C</kbd>clip marker</span><span><kbd>K D</kbd>kill / death (shift −1)</span><span><kbd>L</kbd>lower third only</span><span><kbd>Space</kbd>pause timer</span><span><kbd>G</kbd>safe-area guides (preview)</span></div></div></section>');
+
+  h.push('<section id="docket"><div class="sh"><h2>Reaction docket</h2><span class="tag">' + (B.docket || []).length + ' items · the dark top is what viewers see</span></div>');
+  var blocks = [];
+  (B.docket || []).forEach(function (d) { if (blocks.indexOf(d.block) < 0) blocks.push(d.block); });
+  blocks.forEach(function (bl) {
+    h.push('<div class="block-h">' + esc(bl) + '</div><div class="docket">');
+    B.docket.filter(function (d) { return d.block === bl; }).forEach(function (d) {
+      var lvl = { high: 3, med: 2, low: 1 }[d.clip] || 1;
+      h.push('<article class="card dk" id="' + uid("dk", d.id) + '" data-comment-target><div class="dk-face"><div class="bugline"><span><b>T</b>ECK · ' + esc(d.block) + '</span><span class="pips" title="Clip potential: ' + esc(d.clip) + '">' + [1, 2, 3].map(function (n) { return '<i class="' + (n <= lvl ? "on" : "") + '"></i>'; }).join("") + '</span></div><p class="cardt">' + esc(d.card || d.headline) + '</p></div>' +
+        '<div class="dk-body"><h3>' + esc(d.headline) + '</h3>' +
+        '<p class="take">“' + esc(d.take) + '”</p><p class="q"><b>ASK</b>' + esc(d.question) + '</p>' +
+        (d.poll ? '<div class="polls">' + d.poll.map(function (o, j) { return '<span class="chip acc">' + (j + 1) + " · " + esc(o) + "</span>"; }).join("") + "</div>" : "") +
+        (d.angle ? '<p class="angle">Your angle: ' + esc(d.angle) + '</p>' : "") +
+        '<p class="risk">Careful: ' + esc(d.risk) + '</p>' +
+        '<div class="src"><span>' + esc(d.source) + ' · ' + esc(d.date) + '</span>' + (d.url ? '<a href="' + esc(d.url) + '" target="_blank" rel="noopener">Open source ↗</a>' : "") + '</div>' +
+        ((d.links || []).length ? '<div class="polls">' + d.links.map(function (l) { return '<a class="chip" href="' + esc(l.url) + '" target="_blank" rel="noopener">' + esc(l.kind === "trailer" || l.kind === "video" ? "▶ " : "↗ ") + esc(l.label) + '</a>'; }).join("") + '</div>' : "") +
+        fb("docket", d.id, d.card || d.headline) + '</div></article>');
+    });
+    h.push('</div>');
+  });
+  h.push('</section>');
+
+  h.push('<section><div class="two"><div><div class="sh"><h2>Keep chat alive in the game</h2></div><div class="card"><ul class="beats">');
+  (B.keep_alive || []).forEach(function (k) { h.push('<li><span class="ev">' + esc(k.every) + '</span><span>' + esc(k.beat) + '</span></li>'); });
+  h.push('</ul></div><p class="why" style="margin-top:10px">' + esc(B.keep_alive_why) + '</p></div>');
+  h.push('<div><div class="sh"><h2>Clips to farm tonight</h2></div><div class="card"><ul class="beats">');
+  (B.clip_targets || []).forEach(function (c) { h.push('<li><span class="ev c">clip</span><span><strong>' + esc(c.what) + '</strong><br><span class="muted">' + esc(c.why) + '</span></span></li>'); });
+  h.push('</ul></div></div></div></section>');
+
+  var G = B.games || {}, ranked = G.ranked || [];
+  var maxV = Math.max.apply(null, ranked.map(function (g) { return g.vpc || 0; }).concat([1]));
+  var statusChip = function (s) { var c = /^Installed/.test(s) ? "good" : /Console/.test(s) ? "rec" : ""; return '<span class="chip ' + c + '">' + esc(s) + '</span>'; };
+  var gameRow = function (g, i) {
+    var gid = g.game.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    return '<article class="card gm' + (i === 0 ? " top" : "") + '" id="' + uid("gm", gid) + '" data-comment-target><div class="rk">' + (i + 1) + '</div>' +
+      '<div><h3>' + esc(g.game) + '</h3><div class="meta">' + statusChip(g.status) + '<span class="chip acc">' + esc(g.slot) + '</span></div></div>' +
+      '<div class="metrics" style="display:grid;gap:10px">' +
+        '<div class="metric"><span>Steam players now</span><span class="v">' + fmtN(g.steam_players) + '</span></div>' +
+        '<div class="metric"><span>Twitch viewers per channel</span><span class="v">' + (g.vpc != null ? g.vpc : "–") + '</span><div class="bar"><i style="width:' + ((g.vpc || 0) / maxV * 100) + '%"></i></div></div>' +
+      '</div>' +
+      '<div class="vtext"><p class="verdict">' + esc(g.verdict) + '</p><p class="up">Coming up: ' + esc(g.upcoming) + '</p>' +
+      '<div class="meta"><span class="chip">Talk room: ' + esc(g.talk) + '</span><span class="chip">' + esc(g.collab) + '</span><span class="chip">India: ' + esc(g.india) + '</span></div>' +
+      '<p class="fit">Platform: ' + esc(g.fit) + '</p><div class="fb-tray">' + fb("game", gid, g.game) + '</div></div></article>';
+  };
+  h.push('<section id="games"><div class="sh"><h2>What to play</h2><span class="tag">from your library · chat vote: ' + esc((G.vote || []).join(" vs ")) + '</span></div><div class="games">');
+  ranked.slice(0, 6).forEach(function (g, i) { h.push(gameRow(g, i)); });
+  h.push('</div>');
+  if (ranked.length > 6) {
+    h.push('<details class="gm-more"><summary>' + (ranked.length - 6) + ' more from your library</summary><div class="games">');
+    ranked.slice(6).forEach(function (g, i) { h.push(gameRow(g, i + 6)); });
+    h.push('</div></details>');
+  }
+  h.push('<p class="why" style="margin-top:10px">' + esc(G.twitch_note) + (G.steam_fetched_at ? " Steam counts fetched " + esc(String(G.steam_fetched_at).replace("T", " ")) + "." : "") + '</p></section>');
+
+  h.push('<section><div class="sh"><h2>This week</h2><span class="tag">' + esc(B.week_note) + '</span></div><div class="week">');
+  (B.week || []).forEach(function (w, i) { h.push('<div class="card day' + (i === 0 ? " today" : "") + '" data-comment-target><span class="d">' + esc(w.day) + '</span><p>' + esc(w.plan) + '</p><span class="chip ' + (w.tag === "event" ? "rec" : i === 0 ? "acc" : "") + '">' + esc(w.tag) + '</span></div>'); });
+  h.push('</div></section>');
+  h.push('<section><div class="sh"><h2>Coming up</h2></div><div class="card"><ul class="cal">');
+  (B.calendar || []).forEach(function (c) { h.push('<li><span class="cd">' + esc(c.date) + (c.time ? "<small>" + esc(c.time) + "</small>" : "") + '</span><span>' + esc(c.event) + '</span></li>'); });
+  h.push('</ul></div></section>');
+
+  var E = B.evidence || {};
+  var chart = E.chart || [], cmax = Math.max.apply(null, chart.map(function (c) { return c.value; }).concat([1]));
+  h.push('<section id="why"><div class="sh"><h2>Why the brief runs this way</h2><span class="tag">your own streams</span></div><p class="scope">' + esc(E.scope) + '</p><div class="evi">');
+  h.push('<div class="card chart"><h3>' + esc(E.chart_title) + '</h3>');
+  chart.forEach(function (c) {
+    h.push('<div class="cr" tabindex="0" data-tip="' + esc(c.label + ": " + fmtN(c.value) + " msgs/hr · " + c.detail) + '"><span class="lb">' + esc(c.label) + '</span><span class="vb"><i style="width:' + (c.value / cmax * 100) + '%"></i></span><span class="vl">' + fmtN(c.value) + '</span></div>');
+  });
+  h.push('<details class="tablev"><summary>Show as a table</summary><table><thead><tr><th>Stream type</th><th>Basis</th><th>Msgs/hr</th></tr></thead><tbody>' +
+    chart.map(function (c) { return "<tr><td>" + esc(c.label) + "</td><td>" + esc(c.detail) + "</td><td>" + fmtN(c.value) + "</td></tr>"; }).join("") + '</tbody></table></details></div>');
+  h.push('<div class="lessons">');
+  (E.lessons || []).forEach(function (l) { h.push('<div class="card lesson"><h3>' + esc(l.title) + '</h3><p>' + esc(l.body) + '</p></div>'); });
+  h.push('</div></div></section>');
+
+  h.push('<footer><div>Sources</div><ul>' + (B.sources || []).map(function (s) { return "<li>" + (s.url ? '<a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.label) + "</a>" : esc(s.label)) + "</li>"; }).join("") + '</ul>' +
+    '<div>Numbers marked reported or estimated come from secondary sources. Check a claim before you state it as fact on stream. ▲ ▼ ✕ and comments you leave here shape tomorrow\'s brief.</div></footer>');
+  app.innerHTML = h.join("");
+
+  // ---------- scene previews ----------
+  var MOCK_CHAT = '<div class="mock chatcam"><div class="body"></div><div class="face"></div><div class="logo"><b>T</b>ECK</div><div class="chatlines"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>';
+  var MOCK_GAME = '<div class="mock game"><div class="mini"></div><div class="cam"></div><div class="chatlines"><i></i><i></i><i></i><i></i></div></div>';
+  var MOCK_V = '<div class="mock vcam"><div class="face"></div></div>';
+  function segIdx(pred) { for (var i = 0; i < B.run.length; i++) if (pred(B.run[i])) return i; return 0; }
+  var tiles = [
+    { name: "Starting soon", note: "Full scene with tonight's agenda and the question of the day, instead of a music-only intro. Goes in your Intro scene.", seg: segIdx(function (s) { return sceneOf(s) === "starting"; }), look: { bg: "brand", frame: "full" } },
+    { name: "Topic card on your chat cam", note: "Between your logo and your chat, with the question as a lower third. The source credit is built in, so react clips stand on their own.", seg: segIdx(function (s) { return sceneOf(s) === "topic"; }), look: { bg: "clear", frame: "chat", mock: MOCK_CHAT } },
+    { name: "Guess the price", note: "Round on screen, R reveals the answer. The reveal is the clip.", seg: segIdx(function (s) { return sceneOf(s) === "guess"; }), look: { bg: "clear", frame: "chat", mock: MOCK_CHAT }, state: { reveal: true } },
+    { name: "Chat picks the game", note: "Two big options and tonight's rule, so the switch to gaming stays interactive.", seg: segIdx(function (s) { return sceneOf(s) === "vote"; }), look: { bg: "brand", frame: "full" } },
+    { name: "Game overlay", note: "Under your cam box, clear of the minimap, squad list and kill feed. K and D update the counters.", seg: segIdx(function (s) { return sceneOf(s) === "game"; }), look: { bg: "clear", frame: "game", mock: MOCK_GAME }, state: { kills: 4, deaths: 1 } },
+    { name: "Vertical topic card", note: "For your vertical scenes: below the cam half, clear of the Shorts buttons and caption area.", seg: segIdx(function (s) { return sceneOf(s) === "topic"; }), look: { bg: "clear", frame: "vertical", mock: MOCK_V } }
+  ];
+  var grid = document.getElementById("sceneGrid");
+  grid.innerHTML = tiles.map(function (t, i) {
+    return '<div class="card scene-tile" id="' + uid("scene", i) + '" data-comment-target><div class="frame' + (t.look.frame === "vertical" ? " tall" : "") + '" data-tile="' + i + '" role="button" tabindex="0" aria-label="Preview ' + esc(t.name) + ' on air"><div class="stage"></div></div><h3>' + esc(t.name) + '</h3><p>' + esc(t.note) + '</p>' + fb("scene", "s" + i, t.name) + '</div>';
+  }).join("");
+  function paintTiles() {
+    tiles.forEach(function (t, i) {
+      var frame = grid.querySelector('[data-tile="' + i + '"]'); if (!frame) return;
+      var stEl = frame.querySelector(".stage");
+      var st = Object.assign(SC.defaultState(B.date), { startedAt: Date.now() }, t.state || {});
+      SC.paintStage(stEl, B.run[t.seg], st, t.look);
+      stEl.style.transform = "scale(" + (frame.clientWidth / (t.look.frame === "vertical" ? 1080 : 1920)) + ")";
+    });
+  }
+  paintTiles();
+  window.addEventListener("resize", paintTiles);
+
+  // ---------- backends: where state, markers and feedback go ----------
+  // local: this PC's dashboard (/api/brief/*). claude: the artifact's database, room and comments.
+  var S = SC.defaultState(B.date);
+  var view = "page";
+  var BK = { feedback: false, comments: false, remote: false, peersAir: 0 };
+  function setSync(on, text) { document.getElementById("syncDot").classList.toggle("on", on); document.getElementById("syncTxt").textContent = text; }
+  function applyRemote(data) {
+    if (!data || typeof data !== "object" || data.date !== B.date) return;
+    if (typeof data.v !== "number" || data.v <= S.v) return;
+    S = Object.assign({}, S, data);
+    S.seg = Math.max(0, Math.min(B.run.length - 1, S.seg | 0));
+    render();
+  }
+
+  if (LOCAL) {
+    var Live = window.BriefLive;
+    BK.push = function () { Live.putState(S); };
+    BK.mark = function (doc) { return Live.mark(doc); };
+    BK.saveFeedback = function (row) { return Live.setFeedback(row); };
+    Live.getState().then(applyRemote, function () {});
+    Live.onState(applyRemote);
+    Live.onConnection(function (ok) { setSync(ok, ok ? "connected" : "reconnecting"); });
+    Live.onBriefChanged(function () { toast("A new brief is ready: reload to see it"); });
+    Live.getFeedback(B.date).then(function (res) {
+      BK.feedback = true; document.body.classList.add("has-fb");
+      (res.feedback || []).forEach(function (x) { reactions[x.kind + ":" + x.target] = x.reaction || null; });
+      paintReactions();
+    }, function () {});
+  } else {
+    var cap = { db: null, room: null, comments: null }, writing = false, pendingWrite = null;
+    BK.push = function () {
+      if (cap.room) cap.room.emit("air", S).catch(function () {});
+      if (!cap.db) return;
+      pendingWrite = Object.assign({}, S);
+      if (writing) return;
+      writing = true;
+      (function loop() {
+        var snap = pendingWrite; pendingWrite = null;
+        cap.db.doc("air/state").set(snap).catch(function () {}).then(function () { if (pendingWrite) loop(); else writing = false; });
+      })();
+    };
+    BK.mark = function (doc) {
+      if (!cap.db) return Promise.reject(new Error("no db"));
+      var now = new Date();
+      return cap.db.doc("markers/" + B.date + "_" + now.getTime()).set(Object.assign({ at: now.toISOString() }, doc));
+    };
+    BK.saveFeedback = function (row) {
+      if (!cap.db) return Promise.reject(new Error("no db"));
+      var ref = cap.db.doc("feedback/" + row.date + "_" + row.kind + "_" + row.target);
+      return row.reaction ? ref.set(Object.assign({ at: new Date().toISOString() }, row)) : ref.delete();
+    };
+    BK.comment = function (el) { return cap.comments ? cap.comments.openComposer({ element: el }) : Promise.reject({ code: "unavailable" }); };
+    var C = window.claude;
+    if (C && typeof C.use === "function") {
+      C.use("db").then(function (db) {
+        if (!db) return;
+        cap.db = db; BK.feedback = true;
+        document.body.classList.add("has-fb"); setSync(true, "saving");
+        db.collection("feedback").where("date", "==", B.date).get().then(function (snap) {
+          snap.docs.forEach(function (d) { var x = d.data(); if (x && x.kind && x.target) reactions[x.kind + ":" + x.target] = x.reaction || null; });
+          paintReactions();
+        }, function () {});
+        db.doc("air/state").onSnapshot(function (snap) { if (snap.exists) applyRemote(snap.data()); }, function () {});
+      }, function () {});
+      C.use("comments").then(function (cm) { if (cm) { cap.comments = cm; BK.comments = true; document.body.classList.add("has-cm"); } }, function () {});
+      C.use("room").then(function (room) {
+        if (!room) return;
+        cap.room = room; BK.remote = true;
+        room.on("air", function (msg) { if (!msg.sameTab) applyRemote(msg.data); });
+        room.onPeers(function (chg) {
+          BK.peersAir = chg.peers.filter(function (p) { return !p.sameTab && p.presence && p.presence.view === "air"; }).length;
+          if (view === "remote") renderRemote();
+        });
+        room.presence({ view: view }).catch(function () {});
+      }, function () {});
+    }
+  }
+  function presence(v) { if (!LOCAL && BK.remote && window.claude) window.claude.use("room").then(function (r) { if (r) r.presence({ view: v }).catch(function () {}); }); }
+
+  // every control goes through act(): new state, render, sync, markers
+  function act(a, shift) {
+    var res = SC.reduce(S, a, shift);
+    if (!res) return;
+    if (res.clip) {
+      BK.mark(SC.markerDoc(S, "clip")).then(function () { toast("Clip marked"); }, function () { toast("Marker not saved here"); });
+      return;
+    }
+    S = res.state;
+    render(); BK.push();
+    if (res.segChanged) BK.mark(SC.markerDoc(S, "segment")).catch(function () {});
+  }
+
+  // ---------- on-air view (preview here; the claude.ai route to OBS) ----------
+  var air = document.getElementById("air"), stage = document.getElementById("stage");
+  var tick = null, idleT = null, guides = false, hostlines = false, lastKey = "";
+  function fit() {
+    var W = S.lay === "v" ? 1080 : 1920, H = S.lay === "v" ? 1920 : 1080;
+    var k = Math.min(window.innerWidth / W, window.innerHeight / H);
+    stage.style.transform = "translate(-50%,-50%) scale(" + k + ")";
+  }
+  function renderAir() {
+    var s = B.run[S.seg];
+    var key = [S.seg, S.item, S.reveal, S.kills, S.deaths, S.bg, S.lay, S.l3only, guides, sceneOf(s) === "starting" ? Math.floor(elapsedOf(S)) : ""].join("|");
+    if (key !== lastKey) {
+      var keep = lastKey && lastKey.split("|").slice(0, 3).join("|") === key.split("|").slice(0, 3).join("|");
+      SC.paintStage(stage, s, S, { bg: S.bg, lay: S.lay, guides: guides });
+      if (keep) stage.classList.add("noanim");
+      lastKey = key;
+    }
+    air.className = "air on bg-" + S.bg + (hostlines ? " hostlines" : "") + (air.classList.contains("idle") ? " idle" : "");
+    document.documentElement.classList.toggle("clear-bg", S.bg === "clear");
+    var it = itemsOf(s)[S.item];
+    document.getElementById("hSeg").innerHTML = '<strong>' + esc(s.name) + '</strong>' + (B.run[S.seg + 1] ? ' · next ' + esc(B.run[S.seg + 1].name) : "");
+    document.getElementById("hLine").textContent = it && it.take ? "“" + it.take + "”" : (s.say ? "“" + s.say + "”" : "");
+    renderClock(); fit();
+  }
+  function renderClock() {
+    var s = B.run[S.seg];
+    document.getElementById("hClock").innerHTML = '<strong>' + mmss(elapsedOf(S)) + '</strong> / ' + mmss(s.dur * 60) + (S.pausedAt ? " paused" : "");
+  }
+  function tickAir() { if (view !== "air") return; if (sceneOf(B.run[S.seg]) === "starting") renderAir(); else renderClock(); }
+  function wake() { air.classList.remove("idle"); clearTimeout(idleT); idleT = setTimeout(function () { air.classList.add("idle"); }, 2500); }
+  function modeHash() { return (S.lay === "v" ? "vertical" : "onair") + (S.bg === "green" ? "-green" : S.bg === "clear" ? "-clear" : ""); }
+  function openAir(bg, lay, gesture) {
+    view = "air";
+    if ((bg && bg !== S.bg) || (lay && lay !== S.lay)) { S = Object.assign({}, S, { bg: bg || S.bg, lay: lay || S.lay, v: Math.max(Date.now(), S.v + 1) }); BK.push(); }
+    document.getElementById("remote").classList.remove("on");
+    air.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+    lastKey = ""; renderAir(); wake();
+    clearInterval(tick); tick = setInterval(tickAir, 1000);
+    if (gesture && air.requestFullscreen) air.requestFullscreen().catch(function () {});
+    presence("air");
+  }
+  function closeAir() {
+    view = "page"; curMode = "";
+    air.className = "air"; air.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = ""; clearInterval(tick);
+    document.documentElement.classList.remove("clear-bg");
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function () {});
+    setHash("");
+    presence("page");
+  }
+  air.addEventListener("mousemove", wake);
+  air.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-a]"); if (!b) return;
+    var a = b.getAttribute("data-a");
+    if (a === "exit") closeAir(); else act(a);
+  });
+  window.addEventListener("resize", function () { if (view === "air") fit(); });
+
+  // ---------- phone remote (claude.ai only: needs the room) ----------
+  var remote = document.getElementById("remote");
+  function renderRemote() {
+    var s = B.run[S.seg], items = itemsOf(s), it = items[S.item];
+    remote.innerHTML = '<div class="rm-top"><div class="mark" style="font-size:16px"><b>T</b>ECK CUE REMOTE</div><button type="button" class="btn-sub" data-rm="close">Back to brief</button></div>' +
+      '<div class="card rm-now"><span class="rs">' + esc(KIND[s.kind] || s.kind) + ' · ' + tc(s.t) + (items.length > 1 ? " · " + (S.item + 1) + "/" + items.length : "") + '</span>' +
+      '<span class="rt">' + esc(s.screen.title) + '</span>' + (it ? '<span class="ri">' + esc(it.card || it.q || "") + (sceneOf(s) === "guess" && S.reveal ? " → " + esc(it.a) : "") + '</span>' : "") +
+      '<span class="rc">' + mmss(elapsedOf(S)) + ' / ' + mmss(s.dur * 60) + (sceneOf(s) === "game" ? " · K " + S.kills + " D " + S.deaths : "") + '</span>' +
+      '<span class="ri">' + (BK.remote ? (BK.peersAir ? "On-air window connected" : "No on-air window open yet") : "The remote needs the claude.ai page") + '</span></div>' +
+      '<div class="rm-grid"><button type="button" data-ra="prev">◀ Segment</button><button type="button" data-ra="next">Segment ▶</button>' +
+      '<button type="button" data-ra="itemup">▲ Item</button><button type="button" data-ra="item">Item ▼</button>' +
+      '<button type="button" data-ra="reveal">' + (S.reveal ? "Hide answer" : "Reveal answer") + '</button><button type="button" data-ra="l3">' + (S.l3only ? "Show card" : "Lower third only") + '</button>' +
+      '<button type="button" class="wide clipbig" data-ra="clip">● CLIP THAT</button>' +
+      '<button type="button" class="kill" data-ra="kill">Kill +1</button><button type="button" class="death" data-ra="death">Death +1</button>' +
+      '<button type="button" data-ra="kill" data-shift="1">Kill −1</button><button type="button" data-ra="death" data-shift="1">Death −1</button>' +
+      '<button type="button" data-ra="pause">' + (S.pausedAt ? "Resume timer" : "Pause timer") + '</button><button type="button" data-ra="bg">Background: ' + esc(S.bg) + '</button></div>' +
+      '<p class="rm-note">Open the same brief on your PC and press Go on air. This remote drives it live.</p>';
+  }
+  function openRemote() {
+    view = "remote";
+    air.className = "air"; air.setAttribute("aria-hidden", "true"); document.documentElement.classList.remove("clear-bg");
+    remote.classList.add("on"); renderRemote();
+    clearInterval(tick); tick = setInterval(function () { if (view === "remote") renderRemote(); }, 1000);
+    presence("remote");
+  }
+  remote.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-ra],[data-rm]"); if (!b) return;
+    if (b.getAttribute("data-rm") === "close") { remote.classList.remove("on"); view = "page"; curMode = ""; setHash(""); return; }
+    act(b.getAttribute("data-ra"), b.getAttribute("data-shift") === "1");
+  });
+
+  function markLive() {
+    document.querySelectorAll(".row.live").forEach(function (r) { r.classList.remove("live"); });
+    if (S.on && B.run[S.seg]) { var r = document.getElementById(uid("seg", B.run[S.seg].id)); if (r) r.classList.add("live"); }
+  }
+  function render() {
+    markLive();
+    if (view === "air") renderAir();
+    else if (view === "remote") renderRemote();
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if (view !== "air") return;
+    var k = e.key, map = { ArrowRight: "next", PageDown: "next", ArrowLeft: "prev", PageUp: "prev", ArrowDown: "item", ArrowUp: "itemup", " ": "pause" };
+    if (map[k]) { e.preventDefault(); act(map[k]); return; }
+    var lk = k.toLowerCase();
+    if (lk === "r") act("reveal");
+    else if (lk === "c") act("clip");
+    else if (lk === "k") act("kill", e.shiftKey);
+    else if (lk === "d") act("death", e.shiftKey);
+    else if (lk === "b") act("bg");
+    else if (lk === "v") act("lay");
+    else if (lk === "l") act("l3");
+    else if (lk === "g") { guides = !guides; lastKey = ""; renderAir(); }
+    else if (lk === "h") { hostlines = !hostlines; renderAir(); wake(); }
+    else if (k === "Escape") closeAir();
+  });
+
+  // ---------- page interactions ----------
+  app.addEventListener("change", function (e) {
+    var id = e.target.getAttribute("data-done"); if (!id) return;
+    done[id] = e.target.checked; store.set(doneKey, done);
+    var row = document.getElementById(uid("seg", id)); if (row) row.classList.toggle("done", e.target.checked);
+  });
+  app.addEventListener("click", function (e) {
+    var c = e.target.closest("[data-copy]");
+    if (c) { copy(c.getAttribute("data-copy")); return; }
+    var o = e.target.closest("[data-open]");
+    if (o) { goMode(o.getAttribute("data-open")); return; }
+    var g = e.target.closest("[data-air-seg]");
+    if (g) { act("goto:" + g.getAttribute("data-air-seg")); if (!LOCAL) goMode(modeHash()); else toast("On air: " + B.run[S.seg].name); return; }
+    var j = e.target.closest("[data-jump]");
+    if (j) { var s = B.run[+j.getAttribute("data-jump")]; var el = document.getElementById(uid("seg", s.id)); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
+    var r = e.target.closest(".fb [data-r]");
+    if (r) { react(r); return; }
+    var cm = e.target.closest(".fb [data-cm]");
+    if (cm) { comment(cm); return; }
+  });
+  grid.addEventListener("click", function (e) {
+    var f = e.target.closest("[data-tile]"); if (!f) return;
+    var t = tiles[+f.getAttribute("data-tile")];
+    S = Object.assign({}, S, { seg: t.seg, item: 0, reveal: !!(t.state && t.state.reveal), startedAt: Date.now() });
+    var bg = t.look.bg === "clear" ? "green" : t.look.bg;
+    openAir(bg, t.look.frame === "vertical" ? "v" : "h", true);
+  });
+  grid.addEventListener("keydown", function (e) { if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-tile]")) { e.preventDefault(); e.target.click(); } });
+
+  var tip = document.getElementById("tip");
+  function showTip(el) {
+    tip.textContent = el.getAttribute("data-tip");
+    var r = el.getBoundingClientRect();
+    tip.style.left = Math.min(window.innerWidth - 250, r.left + window.scrollX + 150) + "px";
+    tip.style.top = (r.top + window.scrollY - 40) + "px";
+    tip.classList.add("on");
+  }
+  app.addEventListener("mouseover", function (e) { var el = e.target.closest("[data-tip]"); if (el) showTip(el); });
+  app.addEventListener("mouseout", function (e) { if (e.target.closest("[data-tip]")) tip.classList.remove("on"); });
+  app.addEventListener("focusin", function (e) { var el = e.target.closest("[data-tip]"); if (el) showTip(el); });
+  app.addEventListener("focusout", function () { tip.classList.remove("on"); });
+
+  // ---------- feedback (▲ ▼ ✕) and comments ----------
+  var reactions = {};
+  function paintReactions() {
+    document.querySelectorAll(".fb").forEach(function (f) {
+      var cur = reactions[f.getAttribute("data-fb-kind") + ":" + f.getAttribute("data-fb-id")];
+      f.querySelectorAll("[data-r]").forEach(function (b) { b.classList.toggle("on", b.getAttribute("data-r") === cur); });
+      var host = f.closest("[data-comment-target]");
+      if (host) host.classList.toggle("dropped", cur === "drop");
+    });
+  }
+  function react(btn) {
+    if (!BK.feedback) { toast("Feedback isn't saving here"); return; }
+    var f = btn.closest(".fb"), kind = f.getAttribute("data-fb-kind"), id = f.getAttribute("data-fb-id"), key = kind + ":" + id;
+    var r = btn.getAttribute("data-r"), next = reactions[key] === r ? null : r;
+    reactions[key] = next; paintReactions();
+    BK.saveFeedback({ date: B.date, edition: B.edition, kind: kind, target: id, label: f.getAttribute("data-fb-label"), reaction: next })
+      .then(function () { toast(next ? "Noted for tomorrow's brief" : "Cleared"); }, function () { toast("Couldn't save that. Try again in a moment"); });
+  }
+  function comment(btn) {
+    if (!BK.comments) { toast("Comments to Claude work on the claude.ai page"); return; }
+    var el = btn.closest("[data-comment-target]") || btn;
+    BK.comment(el).then(function (res) { if (res && res.opened) toast("Type your change, then Send to Claude"); }, function (err) {
+      if (err && err.code === "unavailable") document.body.classList.remove("has-cm");
+      toast("Commenting isn't available here");
+    });
+  }
+
+  // ---------- routes ----------
+  var curMode = "";
+  function setHash(hh) { try { if (location.hash.slice(1) !== hh) history.replaceState(null, "", hh ? "#" + hh : location.pathname + location.search); } catch (e) {} }
+  function goMode(mode) { setHash(mode); route(true, mode); }
+  function route(gesture, forced) {
+    var hsh = typeof forced === "string" ? forced : (location.hash || "").slice(1);
+    gesture = gesture === true;
+    if (hsh === curMode && (view === "air" || view === "remote")) return;
+    curMode = /^(onair|vertical)(-green|-clear)?$|^remote$/.test(hsh) ? hsh : "";
+    var m = /^(onair|vertical)(?:-(green|clear))?$/.exec(hsh);
+    if (m) openAir(m[2] || "brand", m[1] === "vertical" ? "v" : "h", gesture);
+    else if (hsh === "remote" && !LOCAL) openRemote();
+    else if (view === "air") closeAir();
+    else if (view === "remote") { remote.classList.remove("on"); view = "page"; }
+  }
+  window.addEventListener("hashchange", function () { route(false); });
+  route(false);
+})();
+</script>
+</body>
+</html>

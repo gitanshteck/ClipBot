@@ -17,6 +17,8 @@
     <div class="tabs">
       <a href="/kick" class="{{ 'active' if active_platform == 'kick' else '' }}"{% if active_platform == 'kick' %} aria-current="page"{% endif %}>Kick</a>
       <a href="/youtube" class="{{ 'active' if active_platform == 'youtube' else '' }}"{% if active_platform == 'youtube' %} aria-current="page"{% endif %}>YouTube</a>
+      {# Cue (the stream brief and live control) is its own set of pages; this tab is the way in. #}
+      <a href="/brief" class="cue-tab" title="Tonight's stream brief, the OBS overlays and the control dock">Cue</a>
     </div>
     <nav>
       <button id="doctor-btn" class="link">Doctor</button>

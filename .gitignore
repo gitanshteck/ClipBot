@@ -17,3 +17,11 @@ ffmpeg-*-essentials_build/
 # session/runtime state are not.
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# YouTube upload credentials (stage 6a). The OAuth client JSON is downloaded
+# from Google Cloud Console and the login token lives under work/_cache/, which
+# is already ignored via work/. These patterns make sure a client secret can
+# never be committed by accident, wherever it ends up.
+config/youtube_client_secret.json
+client_secret*.json
+youtube_token*.json

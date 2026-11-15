@@ -138,3 +138,7 @@ dialog { background: var(--panel); color: var(--text); border: 1px solid var(--l
 dialog::backdrop { background: rgba(0,0,0,.6); }
 table.doctor { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.doctor td { padding: 5px 6px; border-bottom: 1px solid var(--line); }
+
+/* the way into Cue (stream brief), set apart from the platform libraries */
+.tabs a.cue-tab { margin-left: 10px; color: var(--accent); border-color: var(--line); }
+.tabs a.cue-tab:hover { color: var(--text); border-color: var(--accent); }

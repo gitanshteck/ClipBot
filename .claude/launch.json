@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "clipbot.server"],
       "port": 8765
+    },
+    {
+      "name": "clipbot-dashboard-alt",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-c", "import os, runpy, sys; os.environ['CLIPBOT_SERVER_PORT'] = '8766'; sys.argv = ['clipbot.server', '--no-browser']; runpy.run_module('clipbot.server', run_name='__main__')"],
+      "port": 8766
     }
   ]
 }

@@ -13,7 +13,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,12 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .. import brief as brief_module
+from .. import aimoments
+from .. import briefchat
+from .. import chatfeed as chatfeed_module
+from .. import kickchat
+from .. import lore as lore_module
 from .. import chatsync
 from .. import compilations
 from .. import fxspec
@@ -35,7 +43,9 @@ from .. import manifest as manifest_module
 from .. import platforms
 from .. import review
 from .. import speakerfx
+from .. import youtube_auth
 from .. import ytsegments
+from .. import ytupload
 from ..config import PROJECT_ROOT, load_settings
 from ..ffrun import run_ffmpeg
 from ..preview import PreviewRunner
@@ -49,6 +59,7 @@ from ..stages import reel as reel_stage
 from ..stages import transcribe as transcribe_stage
 from ..stages import diarize as diarize_stage
 from ..stages import transliterate as transliterate_stage
+from ..stages import upload as upload_stage
 from ..stages import youtube as youtube_stage
 from .. import reelspec
 from .. import speakers as speakers_module
@@ -90,6 +101,8 @@ def _asset_version() -> str:
     for name in (
         "app.css", "app.js", "review.css", "review.js", "reel.js", "fx.js",
         "compile.css", "compile.js", "player.js",
+        "brief/scenes.css", "brief/scenes.js", "brief/live.js",
+        "brief/overlay.js", "brief/dock.js", "brief/dock.css", "brief/sounds.js",
     ):
         path = static_dir / name
         if path.is_file():
@@ -218,6 +231,22 @@ def _h_compile(ws, st, job, progress):
     )
 
 
+def _h_upload(ws, st, job, progress):
+    record = upload_stage.upload_vod(
+        ws,
+        st,
+        force=job.options.get("force", False),
+        privacy=job.options.get("privacy") or None,
+        title=job.options.get("title") or None,
+        description=job.options.get("description"),
+        mode=job.options.get("mode") or None,
+        quality=job.options.get("quality") or None,
+        progress=progress,
+    )
+    # The job's `result` is shown in the dashboard, so make it the address.
+    return record.get("url")
+
+
 def _h_manifest(ws, st, job, progress):
     json_path, _ = manifest_module.write_manifest(ws, st)
     return json_path
@@ -306,6 +335,7 @@ for _kind, _handler in (
     ("compile", _h_compile),
     ("manifest", _h_manifest),
     ("cleanup", _h_cleanup),
+    ("upload", _h_upload),
     ("pipeline", _h_pipeline),
 ):
     runner.register(_kind, _handler)
@@ -319,7 +349,26 @@ async def _startup():
     bus.bind_loop(asyncio.get_event_loop())
     BusLogHandler(bus).install()
     runner.start()
+    asyncio.get_event_loop().create_task(_watch_brief())
+    asyncio.get_event_loop().create_task(_feed_loop())
+    asyncio.get_event_loop().create_task(_moments_loop())
     log.info("Dashboard ready on http://%s:%s", settings.get("server.host", "127.0.0.1"), settings.get("server.port", 8765))
+
+
+async def _watch_brief():
+    """Tell open overlays, the dock and /brief when a new day's brief lands, so
+    OBS picks it up without anyone pressing refresh."""
+    last = None
+    while True:
+        try:
+            path = brief_module.brief_dir(settings) / "brief.json"
+            mtime = path.stat().st_mtime_ns if path.is_file() else None
+            if last is not None and mtime != last:
+                bus.publish("brief", {"changed": True})
+            last = mtime
+        except OSError:
+            pass
+        await asyncio.sleep(20)
 
 
 # --- status helpers -------------------------------------------------------
@@ -426,6 +475,15 @@ def stage_states(ws: Workspace) -> List[Dict[str, Any]]:
             bool(stages.get("reel")),
             has_video and bool(approved),
             "needs the video and at least one approved clip",
+        ),
+        # Needs only the URL: with no video on disk the VOD is relayed straight
+        # from Kick to YouTube, so this is deliberately NOT gated on has_video.
+        entry(
+            "upload",
+            "Upload to YouTube",
+            bool(stages.get("upload")),
+            bool(state.get("url")),
+            "needs a VOD URL",
         ),
         entry(
             "cleanup",
@@ -791,7 +849,41 @@ async def api_create_workspace(payload: Dict[str, Any] = Body(...)):
             status_code=400,
             detail="Expected a kick.com or youtube.com VOD URL",
         )
+    action = payload.get("action") or "pipeline"
+    if action not in ("pipeline", "upload"):
+        raise HTTPException(status_code=400, detail="unknown action")
+
+    if action == "upload":
+        # Checked before the workspace exists, so a refusal leaves nothing
+        # behind (an empty workspace directory is clutter the library lists).
+        if parsed is not None and parsed.platform == platforms.YOUTUBE:
+            raise HTTPException(
+                status_code=400,
+                detail="That is already a YouTube video - there is nothing to upload.",
+            )
+        privacy = payload.get("privacy") or settings.get("upload.youtube.privacy", "private")
+        if privacy not in ytupload.PRIVACY_CHOICES:
+            raise HTTPException(status_code=400, detail="unknown privacy")
+        auth = youtube_auth.status(settings)
+        if not auth["authorized"]:
+            raise HTTPException(
+                status_code=400,
+                detail="YouTube upload is not set up: " + auth["detail"],
+            )
+
     ws = Workspace.for_url(settings.work_root, canonical)
+    if action == "upload":
+        job = runner.submit(
+            "upload",
+            ws.slug,
+            {
+                "url": canonical,
+                "privacy": privacy,
+                "quality": payload.get("quality"),
+                "force": bool(payload.get("force")),
+            },
+        )
+        return {"slug": ws.slug, "job": job.to_dict()}
     job = runner.submit(
         "pipeline",
         ws.slug,
@@ -1441,6 +1533,17 @@ async def api_doctor():
         }
     )
 
+    # Optional feature: "not set up" is not a failure, only a client that is
+    # present but not yet authorised is worth flagging.
+    yt_up = youtube_auth.status(settings)
+    checks.append(
+        {
+            "name": "YouTube upload (OAuth)",
+            "ok": yt_up["state"] != "needs_auth",
+            "detail": yt_up["detail"],
+        }
+    )
+
     try:
         import ctranslate2
 
@@ -1553,6 +1656,590 @@ async def media_manifest(slug: str):
     if not ws.manifest_csv_path.exists():
         raise HTTPException(status_code=404, detail="no manifest yet")
     return serve_file(ws.manifest_csv_path, "", download_name="{0}-manifest.csv".format(slug))
+
+
+# --- stream brief -----------------------------------------------------------
+# The daily run of show (clipbot/brief.py). /brief is the rundown page,
+# /brief/overlay/<frame> are OBS Browser Sources (transparent, 1920x1080 or
+# 1080x1920), /brief/dock is the control panel for an OBS Custom Browser Dock.
+# Live state travels over /api/events as "brief" events.
+
+
+def _brief_local_base() -> str:
+    return "http://{0}:{1}".format(settings.get("server.host", "127.0.0.1"), settings.get("server.port", 8765))
+
+
+def _brief_date() -> str:
+    try:
+        return str(brief_module.load_brief(settings).get("date", ""))
+    except (FileNotFoundError, ValueError):
+        return ""
+
+
+@app.get("/brief", response_class=HTMLResponse)
+async def page_brief():
+    try:
+        data = brief_module.load_brief(settings)
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Stream brief</title>"
+            "<body style='font:16px system-ui;background:#0B1220;color:#E9EEF7;padding:40px'>"
+            "<h1>No stream brief yet</h1><p>The daily run writes it to {0}. "
+            "See tools/stream-brief/DAILY.md.</p>".format(brief_module.brief_dir(settings)),
+            status_code=404,
+        )
+    html = brief_module.render_page(data, "local", _brief_local_base())
+    return HTMLResponse(html, headers={"cache-control": "no-store"})
+
+
+@app.get("/brief/overlay/{frame}", response_class=HTMLResponse)
+async def page_brief_overlay(request: Request, frame: str, bg: Optional[str] = None):
+    if frame not in brief_module.FRAMES:
+        raise HTTPException(status_code=404, detail="Unknown overlay '{0}': use one of {1}".format(frame, ", ".join(brief_module.FRAMES)))
+    bg = bg or ("brand" if frame == "full" else "clear")
+    if bg not in ("brand", "green", "clear"):
+        raise HTTPException(status_code=400, detail="bg must be brand, green or clear")
+    return templates.TemplateResponse("brief_overlay.html", {"request": request, "frame": frame, "bg": bg})
+
+
+@app.get("/brief/dock", response_class=HTMLResponse)
+async def page_brief_dock(request: Request):
+    return templates.TemplateResponse("brief_dock.html", {"request": request, "base": _brief_local_base(), "frames": brief_module.FRAMES})
+
+
+@app.get("/api/brief")
+async def api_brief():
+    try:
+        return brief_module.load_brief(settings)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/brief/sounds")
+async def api_brief_sounds():
+    return {"sounds": brief_module.sounds_map(settings)}
+
+
+# The OBS "sound" Browser Source pings every few seconds so the dock can say whether OBS is
+# actually listening, and plays a sound on request ("play on stream") without touching state.
+_sound_ping = {"at": 0.0}
+SOUND_PING_FRESH_SECONDS = 25
+
+
+@app.post("/api/brief/sounds/ping")
+async def api_brief_sounds_ping():
+    _sound_ping["at"] = time.time()
+    return {"ok": True}
+
+
+@app.get("/api/brief/sounds/status")
+async def api_brief_sounds_status():
+    age = time.time() - _sound_ping["at"] if _sound_ping["at"] else None
+    return {"connected": age is not None and age < SOUND_PING_FRESH_SECONDS,
+            "age_seconds": None if age is None else round(age, 1)}
+
+
+@app.post("/api/brief/open")
+async def api_brief_open(payload: Dict[str, Any] = Body(...)):
+    """Open one of the brief's own links in this PC's default browser. The OBS dock is an
+    embedded browser that may not hand links to the system, so the dock asks the server.
+    Only URLs the brief itself lists are accepted: this is not a general URL opener."""
+    url = str(payload.get("url") or "")
+    brief_data = _cached_brief()
+    if not brief_module.URL_RE.match(url) or url not in brief_module.link_urls(brief_data):
+        raise HTTPException(status_code=400, detail="That link is not in tonight's brief")
+    opened = await asyncio.get_event_loop().run_in_executor(None, webbrowser.open, url)
+    return {"ok": bool(opened), "url": url}
+
+
+@app.post("/api/brief/sounds/play")
+async def api_brief_sounds_play(payload: Dict[str, Any] = Body(...)):
+    event = str(payload.get("event") or "")
+    if event not in brief_module.SOUND_EVENTS:
+        raise HTTPException(status_code=400, detail="event must be one of {0}".format(", ".join(brief_module.SOUND_EVENTS)))
+    bus.publish("brief", {"play": event})
+    return {"ok": True, "event": event}
+
+
+@app.get("/brief/brand/{name}")
+async def brief_brand(name: str):
+    path = brief_module.asset_path(settings, "brand", name)
+    if not path:
+        raise HTTPException(status_code=404, detail="no such brand file")
+    return serve_file(path, "")
+
+
+@app.get("/brief/font/{name}")
+async def brief_font(name: str):
+    path = brief_module.asset_path(settings, "fonts", name)
+    if not path:
+        raise HTTPException(status_code=404, detail="no such font file")
+    return serve_file(path, "")
+
+
+# --- live chat feed (Kick, read-only; clipbot/chatfeed.py, clipbot/kickchat.py) -------------
+_feed = None   # type: Optional[chatfeed_module.ChatFeed]
+_kick = None   # type: Optional[kickchat.KickPoller]
+_vote = {"on": True, "card": None, "since": 0.0, "last": []}  # type: Dict[str, Any]
+_feed_last = {"hash": ""}
+_brief_cache = {"mtime": None, "data": None}  # type: Dict[str, Any]
+_engine = None   # type: Optional[aimoments.Engine]
+_callout = {"rec": None, "until": 0.0}   # the AI line on stream right now
+_widgets_last = {"hash": ""}
+_verdict = {"pending": None}   # set when a vote card closes; the moments loop turns it into a verdict
+_step = {"task": None}
+_chatlog_lock = threading.Lock()
+
+
+def _chat_sink(row: Dict[str, Any]) -> None:
+    """Keep every accepted live chat message on disk, one JSON line each, per day: the nightly
+    batch (lore, clip titles) reads these once the stream is over."""
+    day = time.strftime("%Y-%m-%d", time.localtime(float(row.get("at") or time.time())))
+    path = brief_module.brief_dir(settings) / "chatlogs" / "{0}.jsonl".format(day)
+    line = json.dumps({"at": row.get("at"), "user": row.get("user"), "slug": row.get("slug"), "text": row.get("text")}, ensure_ascii=False)
+    with _chatlog_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+def _get_engine() -> aimoments.Engine:
+    global _engine
+    if _engine is None:
+        _engine = aimoments.Engine(settings)
+    return _engine
+
+
+def _callout_view() -> Optional[Dict[str, Any]]:
+    rec = _callout["rec"]
+    left = _callout["until"] - time.time()
+    if not rec or left <= 0:
+        return None
+    return {"id": rec["id"], "text": rec["text"], "kind": rec["kind"], "ms_left": int(left * 1000)}
+
+
+def _widgets_view() -> Dict[str, Any]:
+    """What the OBS overlays draw beside the card: the +1 tally, the vibe meter, the word wall and the AI line."""
+    live = _kick is not None and _feed is not None and _kick.status == "live"
+    plus = _feed.plus(_vote["since"]) if live and _vote["on"] else [0, 0]
+    return {"plus": plus, "mood": _feed.mood() if live else 0, "words": _feed.words() if live else [], "callout": _callout_view()}
+
+
+def _publish_widgets(force: bool = False) -> None:
+    view = _widgets_view()
+    shown = dict(view, mood=int(round(view["mood"] / 5.0)) * 5)
+    if shown["callout"]:
+        shown["callout"] = {k: v for k, v in shown["callout"].items() if k != "ms_left"}
+    digest = json.dumps(shown, sort_keys=True)
+    if force or digest != _widgets_last["hash"]:
+        _widgets_last["hash"] = digest
+        bus.publish("brief", {"widgets": view})
+
+
+def _apply_events(events: List[Any]) -> None:
+    for kind, rec in events:
+        if kind == "moment" and rec:
+            bus.publish("brief", {"moment": rec})
+        elif kind == "callout":
+            if rec:
+                cfg = aimoments.config(settings)
+                _callout["rec"], _callout["until"] = rec, time.time() + cfg["show_seconds"]
+            else:
+                _callout["rec"], _callout["until"] = None, 0.0
+            _publish_widgets(force=True)
+
+
+def _cached_brief() -> Optional[Dict[str, Any]]:
+    path = brief_module.brief_dir(settings) / "brief.json"
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    if _brief_cache["mtime"] != mtime:
+        try:
+            _brief_cache["data"] = brief_module.load_brief(settings)
+            _brief_cache["mtime"] = mtime
+        except (OSError, ValueError):
+            return None
+    return _brief_cache["data"]
+
+
+def _feed_view() -> Dict[str, Any]:
+    running = _kick is not None
+    view = {"connection": _kick.state() if running else {"status": "off", "channel": str(settings.get("brief.kick.channel", "") or ""), "error": "",
+                                                          "last_ok_age": None},
+            "votesFromChat": bool(_vote["on"])}
+    view.update(_feed.snapshot() if _feed is not None else {})
+    return view
+
+
+def _card_desc(brief_data: Dict[str, Any], state: Dict[str, Any], opts: int) -> Dict[str, Any]:
+    """The card on screen and what its 1/2/3 options mean, kept so a closing vote can be named."""
+    run = brief_data.get("run") or []
+    seg = run[max(0, min(len(run) - 1, int(state.get("seg", 0) or 0)))] if run else {}
+    docket = {d.get("id"): d for d in brief_data.get("docket") or []}
+    items = [docket[i] for i in seg.get("items", []) if i in docket]
+    it = items[min(int(state.get("item", 0) or 0), len(items) - 1)] if items else None
+    poll = (it.get("poll") if it and it.get("poll") else seg.get("poll")) or []
+    title = (it.get("card") if it else None) or (seg.get("screen") or {}).get("title") or seg.get("name") or "the card"
+    return {"title": "'{0}'".format(title), "options": [str(o)[:40] for o in poll[:opts]]}
+
+
+async def _moments_loop():
+    """Every second: put an AI line on stream once its veto window has passed; every few seconds
+    let the engine look at chat and maybe write a new one (in a worker thread: a model call is slow)."""
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            now = time.time()
+            if _callout["rec"] and now >= _callout["until"]:
+                _callout["rec"], _callout["until"] = None, 0.0
+                _publish_widgets(force=True)
+            brief_data = _cached_brief()
+            if brief_data is None:
+                continue
+            engine = _get_engine()
+            date = str(brief_data.get("date", ""))
+            _apply_events(engine.promote(date))
+            task = _step["task"]
+            if task is not None and not task.done():
+                continue
+            if _kick is None or _feed is None:
+                continue
+            state = brief_module.read_state(settings, date)
+            live = _kick.status == "live"
+            chat_now = {"rate": _feed.rate_per_minute(), "recent": _feed.recent(6)}
+            seg_name = ""
+            run = brief_data.get("run") or []
+            if run and state.get("date") == date:
+                seg_name = str(run[max(0, min(len(run) - 1, int(state.get("seg", 0) or 0)))].get("name", ""))
+            view = {"date": date, "live": live, "on": bool(state.get("on")) and state.get("date") == date,
+                    "snap": _feed.snapshot(), "chat": _feed.recent(10), "seg_name": seg_name,
+                    "context": briefchat.stream_context(brief_data, state, "AI moment", chat_now),
+                    "background": lore_module.context(settings, ""), "verdict": _verdict["pending"]}
+            if _verdict["pending"] is not None and not live:
+                _verdict["pending"] = None
+            loop = asyncio.get_event_loop()
+
+            async def run_step(v=view):
+                try:
+                    events = await loop.run_in_executor(None, engine.step, v)
+                    if any(k == "moment" and r and r.get("kind") == "verdict" for k, r in events):
+                        _verdict["pending"] = None
+                    _apply_events(events)
+                except Exception as exc:
+                    log.warning("ai moments step: %s", exc)
+
+            _step["task"] = loop.create_task(run_step())
+            if _verdict["pending"] is not None and not view["on"]:
+                _verdict["pending"] = None   # a vote closed while the show was off: nothing to say
+        except Exception as exc:  # never let the loop die
+            log.warning("ai moments loop: %s", exc)
+
+
+async def _feed_loop():
+    """Once a second: count "1/2/3" votes for the card on screen into the live state, and push
+    the chat snapshot to the dock when it changed. Does nothing while the feed is off."""
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            if _kick is None or _feed is None:
+                continue
+            brief_data = _cached_brief()
+            if brief_data is not None:
+                state = brief_module.read_state(settings, str(brief_data.get("date", "")))
+                card = (state.get("date"), state.get("seg"), state.get("item"), state.get("startedAt"))
+                if card != _vote["card"]:
+                    last = _vote.get("last") or []
+                    if sum(last) >= 4 and _vote.get("desc"):
+                        _verdict["pending"] = {"reason": "a chat vote just closed",
+                                               "extra": "Chat voted on {0}: {1} ({2} chatters voted).".format(
+                                                   _vote["desc"]["title"], ", ".join("{0} = {1}".format(o, n) for o, n in zip(_vote["desc"]["options"], last)), sum(last))}
+                    _vote["card"], _vote["since"], _vote["last"], _vote["desc"] = card, time.time(), [], None
+                opts = brief_module.options_for(brief_data, state)
+                if opts >= 2:
+                    _vote["desc"] = _card_desc(brief_data, state, opts)
+                if _kick.status == "live" and _vote["on"] and state.get("on") and opts >= 2:
+                    counts = _feed.tally(opts, _vote["since"])
+                    mine = [v for v in (state.get("votes") or [])]
+                    if not any(mine) and any(_vote["last"]):
+                        _vote["since"] = time.time()          # the dock pressed reset: count from now
+                        counts = [0] * opts
+                    if (counts if any(counts) else []) != (mine if any(mine) else []):
+                        new = dict(state, votes=counts if any(counts) else [], v=max(int(time.time() * 1000), int(state.get("v", 0)) + 1))
+                        stored = brief_module.write_state(settings, new)
+                        bus.publish("brief", {"state": stored})
+                    _vote["last"] = counts
+            view = _feed_view()
+            digest = json.dumps(view, sort_keys=True, default=str)
+            if digest != _feed_last["hash"]:
+                _feed_last["hash"] = digest
+                bus.publish("brief", {"feed": view})
+            _publish_widgets()
+        except Exception as exc:  # never let the loop die
+            log.warning("chat feed loop: %s", exc)
+
+
+@app.get("/api/brief/widgets")
+async def api_brief_widgets():
+    return _widgets_view()
+
+
+def _moments_date() -> str:
+    brief_data = _cached_brief() or {}
+    return str(brief_data.get("date") or time.strftime("%Y-%m-%d"))
+
+
+def _moments_view(date: str) -> Dict[str, Any]:
+    rows = aimoments.read_log(settings, date)
+    skipped = sum(1 for r in rows if r.get("status") == "skipped")
+    shown = [r for r in rows if r.get("status") != "skipped"][-60:]
+    return {"date": date, "status": _get_engine().status(date), "moments": shown[::-1], "skipped": skipped}
+
+
+@app.get("/api/brief/moments")
+async def api_brief_moments(date: Optional[str] = None):
+    return _moments_view(date or _moments_date())
+
+
+@app.put("/api/brief/moments/settings")
+async def api_brief_moments_settings(payload: Dict[str, Any] = Body(...)):
+    try:
+        aimoments.save_config(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    view = _moments_view(_moments_date())
+    bus.publish("brief", {"momentsStatus": view["status"]})
+    return view
+
+
+@app.post("/api/brief/moments/{moment_id}/veto")
+async def api_brief_moment_veto(moment_id: str):
+    events = _get_engine().veto(_moments_date(), moment_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="That moment is not waiting or on screen any more")
+    _apply_events(events)
+    return {"ok": True}
+
+
+@app.post("/api/brief/moments/{moment_id}/reshow")
+async def api_brief_moment_reshow(moment_id: str):
+    events = _get_engine().reshow(_moments_date(), moment_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="That moment cannot be shown again")
+    _apply_events(events)
+    return {"ok": True}
+
+
+@app.post("/api/brief/moments/fire")
+async def api_brief_moment_fire(payload: Dict[str, Any] = Body(default={})):
+    """Try one now from the dock (a test, or a nudge): ``kind`` is "random" (default) or "recap"."""
+    kind = str((payload or {}).get("kind") or "random")
+    if kind not in ("random", "recap"):
+        raise HTTPException(status_code=400, detail="kind must be random or recap")
+    if _kick is None or _feed is None or _kick.status != "live":
+        raise HTTPException(status_code=409, detail="Connect the Chat panel first: the AI reacts to live chat")
+    brief_data = _cached_brief() or {}
+    date = _moments_date()
+    state = brief_module.read_state(settings, str(brief_data.get("date", "")))
+    chat_now = {"rate": _feed.rate_per_minute(), "recent": _feed.recent(6)}
+    view = {"date": date, "chat": _feed.recent(10), "seg_name": "", "snap": _feed.snapshot(),
+            "context": briefchat.stream_context(brief_data or None, state, "AI moment", chat_now),
+            "background": lore_module.context(settings, "")}
+    reason = "fired from the dock" if kind == "random" else "recap asked for from the dock"
+    events = await asyncio.get_event_loop().run_in_executor(None, _get_engine().fire, view, kind, reason)
+    _apply_events(events)
+    return events[-1][1] if events else {}
+
+
+@app.post("/api/brief/shoutout")
+async def api_brief_shoutout(payload: Dict[str, Any] = Body(...)):
+    """Welcome a chatter on stream (the dock's one tap on a "New here" name). Plain text, no model."""
+    user = re.sub(r"[^\w .\-]", "", str(payload.get("user") or "")).strip()[:30]
+    if not user:
+        raise HTTPException(status_code=400, detail="Say who to welcome")
+    rec = {"id": "s{0}".format(int(time.time() * 1000)), "kind": "shoutout", "text": "welcome to the chat, {0}".format(user)}
+    _apply_events([("callout", rec)])
+    return {"ok": True}
+
+
+@app.post("/api/brief/pulse/reset")
+async def api_brief_pulse_reset():
+    """Count 1/2/3 votes and +1s again from now (the dock's reset)."""
+    _vote["since"], _vote["last"] = time.time(), []
+    _publish_widgets(force=True)
+    return {"ok": True}
+
+
+@app.get("/api/brief/feed")
+async def api_brief_feed():
+    return _feed_view()
+
+
+@app.post("/api/brief/feed/start")
+async def api_brief_feed_start(payload: Dict[str, Any] = Body(default={})):
+    global _feed, _kick
+    channel = str((payload or {}).get("channel") or settings.get("brief.kick.channel", "") or "").strip().lower()
+    if not re.match(r"^[a-z0-9_-]{2,40}$", channel):
+        raise HTTPException(status_code=400, detail="Give your Kick channel name (the part after kick.com/)")
+    if _kick is not None:
+        _kick.stop()
+    bots = settings.get("chat.bots", []) or []
+    _feed = chatfeed_module.ChatFeed(bots=list(bots), sink=_chat_sink)
+    _kick = kickchat.KickPoller(channel, _feed, interval=float(settings.get("brief.kick.interval_seconds", 3.0)),
+                                impersonate=str(settings.get("download.impersonate", "chrome") or "chrome"))
+    _kick.start()
+    _feed_last["hash"] = ""
+    return _feed_view()
+
+
+@app.post("/api/brief/feed/stop")
+async def api_brief_feed_stop():
+    global _kick
+    if _kick is not None:
+        _kick.stop()
+        _kick = None
+    _feed_last["hash"] = ""
+    bus.publish("brief", {"feed": _feed_view()})
+    return _feed_view()
+
+
+@app.post("/api/brief/feed/votes")
+async def api_brief_feed_votes(payload: Dict[str, Any] = Body(...)):
+    _vote["on"] = bool(payload.get("on"))
+    return {"votesFromChat": _vote["on"]}
+
+
+@app.post("/api/brief/feed/dismiss")
+async def api_brief_feed_dismiss(payload: Dict[str, Any] = Body(...)):
+    if _feed is not None:
+        _feed.dismiss(str(payload.get("id") or ""))
+    return {"ok": True}
+
+
+@app.post("/api/brief/feed/pin")
+async def api_brief_feed_pin(payload: Dict[str, Any] = Body(...)):
+    """Put a chat message on screen (``id``), or take the pinned one down (no id)."""
+    brief_data = _cached_brief() or {}
+    state = brief_module.read_state(settings, str(brief_data.get("date", "")))
+    mid = str(payload.get("id") or "")
+    pin = None
+    if mid:
+        msg = _feed.find(mid) if _feed is not None else None
+        if msg is None:
+            raise HTTPException(status_code=404, detail="That message is no longer in the feed")
+        pin = {"u": msg["user"], "t": msg["text"], "id": msg["id"]}
+    new = dict(state, pin=pin, v=max(int(time.time() * 1000), int(state.get("v", 0)) + 1), date=brief_data.get("date", state.get("date", "")))
+    try:
+        stored = brief_module.write_state(settings, new)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("brief", {"state": stored})
+    return stored
+
+
+@app.get("/api/brief/state")
+async def api_brief_state():
+    return brief_module.read_state(settings, _brief_date())
+
+
+@app.put("/api/brief/state")
+async def api_brief_state_put(payload: Dict[str, Any] = Body(...)):
+    try:
+        stored = brief_module.write_state(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("brief", {"state": stored})
+    return stored
+
+
+@app.post("/api/brief/markers")
+async def api_brief_marker(payload: Dict[str, Any] = Body(...)):
+    try:
+        marker = brief_module.add_marker(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    bus.publish("brief", {"marker": marker})
+    return marker
+
+
+@app.get("/api/brief/markers")
+async def api_brief_markers(date: str):
+    try:
+        return brief_module.read_markers(settings, date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/brief/feedback")
+async def api_brief_feedback(date: Optional[str] = None):
+    return {"feedback": brief_module.list_feedback(settings, date)}
+
+
+@app.post("/api/brief/feedback")
+async def api_brief_feedback_set(payload: Dict[str, Any] = Body(...)):
+    try:
+        row = brief_module.set_feedback(settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"row": row}
+
+
+# Live chat: ask a small model a question on air (clipbot/briefchat.py). The
+# answer streams to the dock and overlays as "brief" events {chat: {...}}.
+_brief_asks = {}  # type: Dict[str, briefchat.Ask]
+_brief_asks_order = []  # type: List[str]
+
+
+@app.get("/api/brief/chat/status")
+async def api_brief_chat_status():
+    provider = briefchat.pick_provider(settings)
+    return {"provider": provider, "available": briefchat.available(settings),
+            "hint": "" if provider else briefchat.setup_hint(settings)}
+
+
+@app.post("/api/brief/chat")
+async def api_brief_chat(payload: Dict[str, Any] = Body(...)):
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Ask a question first")
+    if len(question) > briefchat.QUESTION_MAX:
+        raise HTTPException(status_code=400, detail="Keep the question under {0} characters".format(briefchat.QUESTION_MAX))
+    provider = briefchat.pick_provider(settings)
+    if not provider:
+        raise HTTPException(status_code=503, detail=briefchat.setup_hint(settings))
+    try:
+        brief_data = brief_module.load_brief(settings)
+    except FileNotFoundError:
+        brief_data = None
+    state = brief_module.read_state(settings, str((brief_data or {}).get("date", "")))
+    history = briefchat.history_payload(payload.get("history") or [])
+    chat_now = None
+    if _kick is not None and _kick.status == "live" and _feed is not None:
+        chat_now = {"rate": _feed.rate_per_minute(), "recent": _feed.recent(6)}
+    context = briefchat.stream_context(brief_data, state, str(payload.get("page") or "")[:80], chat_now)
+    search = payload.get("search")
+    if not isinstance(search, bool):
+        search = bool(settings.get("brief.chat.search", True))
+    search = search and provider != "gemini-cli"   # the Gemini CLI path has no search switch
+    prompt = briefchat.build_prompt(question, history, context, search, lore_module.context(settings, question))
+    ask_id = "a{0}".format(int(time.time() * 1000))
+    ask_obj = briefchat.Ask(ask_id, question, provider, search)
+    _brief_asks[ask_id] = ask_obj
+    _brief_asks_order.append(ask_id)
+    while len(_brief_asks_order) > 30:
+        _brief_asks.pop(_brief_asks_order.pop(0), None)
+    on_delta = lambda d: bus.publish("brief", {"chat": d})  # noqa: E731
+    threading.Thread(target=briefchat.ask, args=(settings, ask_obj, prompt, on_delta), daemon=True).start()
+    return ask_obj.to_dict()
+
+
+@app.get("/api/brief/chat/{ask_id}")
+async def api_brief_chat_get(ask_id: str):
+    ask_obj = _brief_asks.get(ask_id)
+    if not ask_obj:
+        raise HTTPException(status_code=404, detail="No such question (the dashboard keeps the last 30)")
+    return ask_obj.to_dict()
 
 
 # --- events ---------------------------------------------------------------

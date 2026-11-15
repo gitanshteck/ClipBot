@@ -6,7 +6,8 @@ stage functions already have the right shape, none of the work is Python-bound
 (CTranslate2 releases the GIL, ffmpeg/yt-dlp are subprocesses, Claude is
 network I/O), and the 3 GB Whisper model stays loaded between runs.
 
-Two lanes so a three-second clip cut never queues behind a 90-minute transcribe.
+Three lanes: a three-second clip cut never queues behind a 90-minute transcribe,
+and a multi-hour YouTube upload (its own lane) blocks neither.
 """
 
 import json
@@ -45,6 +46,11 @@ HEAVY_KINDS = (
 # (transcribe's --max-seconds benchmark mode is CLI-only) - removed rather
 # than left as a second unregistered kind.
 LIGHT_KINDS = ("cut", "chat", "transliterate", "manifest", "cleanup", "waveform")
+# "upload" gets a lane of its own. It is network-bound for as long as the VOD is
+# long (hours), so in the heavy lane it would hold up downloads and transcribes,
+# and in the light lane it would hold up chat harvest - which must not wait,
+# because chat expires with the VOD.
+NET_KINDS = ("upload",)
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -162,6 +168,7 @@ class JobRunner(object):
         self._queues = {
             "heavy": queue.Queue(),
             "light": queue.Queue(),
+            "net": queue.Queue(),
         }
         self._threads = []
         self._stopping = threading.Event()
@@ -171,14 +178,14 @@ class JobRunner(object):
         self._handlers[kind] = handler
 
     def start(self) -> None:
-        for lane in ("heavy", "light"):
+        for lane in ("heavy", "light", "net"):
             t = threading.Thread(
                 target=self._worker, args=(lane,), name="clipbot-{0}".format(lane)
             )
             t.daemon = True
             t.start()
             self._threads.append(t)
-        log.info("Job runner started (2 lanes)")
+        log.info("Job runner started (3 lanes)")
 
     def stop(self) -> None:
         self._stopping.set()
@@ -208,7 +215,10 @@ class JobRunner(object):
             self.jobs[job.id] = job
             self._order.append(job.id)
 
-        lane = "heavy" if kind in HEAVY_KINDS else "light"
+        if kind in NET_KINDS:
+            lane = "net"
+        else:
+            lane = "heavy" if kind in HEAVY_KINDS else "light"
         self._queues[lane].put(job.id)
         self.bus.publish("job", job.to_dict())
         log.info("Queued %s for %s (%s)", kind, slug, job.id)

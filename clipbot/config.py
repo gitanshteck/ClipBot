@@ -17,6 +17,8 @@ DEFAULT_SETTINGS_FILE = PROJECT_ROOT / "config" / "settings.json"
 ENV_OVERRIDES = {
     "CLIPBOT_WORK_ROOT": "work_root",
     "CLIPBOT_LIBRARY_DIR": "library.dir",
+    "CLIPBOT_BRIEF_DIR": "brief.dir",
+    "CLIPBOT_SERVER_PORT": "server.port",
     "CLIPBOT_FFMPEG": "tools.ffmpeg",
     "CLIPBOT_FFPROBE": "tools.ffprobe",
     "CLIPBOT_YT_DLP": "tools.yt_dlp",
@@ -27,6 +29,7 @@ ENV_OVERRIDES = {
     "CLIPBOT_TRANSCRIBE_BACKEND": "transcribe.backend",
     "CLIPBOT_CLAUDE_MODEL": "analyze.model",
     "CLIPBOT_RUBRIC_FILE": "analyze.rubric_file",
+    "CLIPBOT_YOUTUBE_CLIENT_SECRET": "upload.youtube.client_secret_file",
 }
 
 

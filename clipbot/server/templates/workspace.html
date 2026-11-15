@@ -67,6 +67,13 @@ async function load() {
     const detail = s.detail && Object.keys(s.detail).length
       ? Object.entries(s.detail).filter(([k]) => k !== 'completed_at').map(([k,v]) => `${k}: ${v}`).join(' · ')
       : (s.blocked || '');
+    // An uploaded VOD shows its YouTube address as a link instead of the raw
+    // key: value dump the other stages use.
+    const isUpload = s.key === 'upload';
+    const detailHtml = (isUpload && s.done && s.detail && s.detail.url)
+      ? `<a href="${esc(s.detail.url)}" target="_blank" rel="noreferrer">${esc(s.detail.url)}</a>`
+        + ` · ${esc(s.detail.privacy || '')} · ${esc(s.detail.mode || '')}`
+      : esc(detail);
     const isTranscribe = s.key === 'transcribe';
     // The quality picker is a Kick thing: a YouTube workspace's download stage
     // fetches audio only, so there is no resolution to choose.
@@ -78,6 +85,13 @@ async function load() {
          </select>`
       : '';
     const qualityPicker = isDownload ? qualityPickerHtml('download-quality') : '';
+    const privacyPicker = isUpload
+      ? `<select id="upload-privacy" title="Visibility on YouTube">
+           <option value="private">Private</option>
+           <option value="unlisted">Unlisted</option>
+           <option value="public">Public</option>
+         </select>`
+      : '';
     const jobOpts = isTranscribe
       ? `{force:${s.done ? 'true' : 'false'}, backend: document.getElementById('transcribe-backend').value}`
       : isDownload
@@ -85,10 +99,13 @@ async function load() {
       : `{force:${s.done ? 'true' : 'false'}}`;
     return `<div class="stage ${state}">
       <div class="stage-head"><span class="dot ${state}"></span><b>${s.label}</b></div>
-      <div class="stage-detail">${esc(detail)}</div>
+      <div class="stage-detail">${detailHtml}</div>
       ${backendPicker}
       ${qualityPicker}
-      <button ${disabled} onclick="submitJob('${s.key}',${jobOpts})">${label}</button>
+      ${privacyPicker}
+      <button ${disabled} onclick="${isUpload
+        ? `submitUpload(${s.done ? 'true' : 'false'})`
+        : `submitJob('${s.key}',${jobOpts})`}">${isUpload && !s.done ? 'Upload' : label}</button>
     </div>`;
   }).join('');
 
@@ -100,6 +117,12 @@ async function load() {
     backendSel.value = localStorage.getItem('clipbot.transcribeBackend') || 'openai';
     backendSel.addEventListener('change', () =>
       localStorage.setItem('clipbot.transcribeBackend', backendSel.value));
+  }
+  const privacySel = document.getElementById('upload-privacy');
+  if (privacySel) {
+    privacySel.value = localStorage.getItem('clipbot.uploadPrivacy') || 'private';
+    privacySel.addEventListener('change', () =>
+      localStorage.setItem('clipbot.uploadPrivacy', privacySel.value));
   }
   const qualitySel = document.getElementById('download-quality');
   if (qualitySel) {
@@ -126,6 +149,18 @@ async function submitJob(kind, opts) {
   catch (e) { alert(e.message); }
 }
 window.submitJob = submitJob;
+
+// Publishing leaves this machine, so it always asks first - and asks harder
+// before making a second copy of a VOD that is already on YouTube.
+function submitUpload(redo) {
+  const vis = document.getElementById('upload-privacy').value;
+  const question = redo
+    ? 'This VOD is already on YouTube. Upload it AGAIN as a second ' + vis.toUpperCase() + ' video?'
+    : 'Upload this VOD to YouTube as ' + vis.toUpperCase() + '?';
+  if (!confirm(question)) return;
+  submitJob('upload', { force: !!redo, privacy: vis });
+}
+window.submitUpload = submitUpload;
 
 document.getElementById('run-all').addEventListener('click', () => {
   // The download stage row (always present) carries the quality picker;

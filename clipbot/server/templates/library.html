@@ -16,6 +16,11 @@
   <form id="browse-channel" class="row">
     <input type="text" id="channel-name" placeholder="kick channel name, e.g. gitanshteck" required>
     <button type="submit">Fetch VODs</button>
+    <select id="upload-privacy" title="Visibility of videos sent to YouTube with &quot;To YouTube&quot;">
+      <option value="private">YouTube: private</option>
+      <option value="unlisted">YouTube: unlisted</option>
+      <option value="public">YouTube: public</option>
+    </select>
   </form>
   <p class="hint" id="browse-hint"></p>
   <div id="channel-vods" class="grid"></div>
@@ -33,6 +38,11 @@ const grid = document.getElementById('workspaces');
 // uses, so a choice made here carries over there too.
 document.getElementById('quality-picker-slot').innerHTML = qualityPickerHtml('quality-picker');
 const qualityPicker = document.getElementById('quality-picker');
+// Visibility for "To YouTube". Remembered, but it always starts as private.
+const privacyPicker = document.getElementById('upload-privacy');
+privacyPicker.value = localStorage.getItem('clipbot.uploadPrivacy') || 'private';
+privacyPicker.addEventListener('change', () =>
+  localStorage.setItem('clipbot.uploadPrivacy', privacyPicker.value));
 qualityPicker.value = localStorage.getItem('clipbot.downloadQuality') || '';
 qualityPicker.addEventListener('change', () =>
   localStorage.setItem('clipbot.downloadQuality', qualityPicker.value));
@@ -89,7 +99,9 @@ async function loadChannelVods(channel) {
         <div class="row">
           ${v.workspace_exists
             ? `<a class="btn" href="/w/${esc(v.slug)}">Open</a>`
-            : `<button class="btn download-vod" data-url="${esc(v.url)}">Download</button>`}
+            : `<button class="btn download-vod" data-url="${esc(v.url)}">Download</button>
+               <button class="btn upload-vod" data-url="${esc(v.url)}"
+                       title="Send this VOD straight to your YouTube channel - nothing is saved on this computer">To YouTube</button>`}
         </div>
       </article>`).join('');
   } catch (err) {
@@ -107,17 +119,28 @@ document.getElementById('browse-channel').addEventListener('submit', (e) => {
 });
 
 vodGrid.addEventListener('click', async (e) => {
-  const btn = e.target.closest('.download-vod');
+  const up = e.target.closest('.upload-vod');
+  const btn = up || e.target.closest('.download-vod');
   if (!btn) return;
+  const label = btn.textContent;
+  const body = { url: btn.dataset.url, quality: qualityPicker.value || null };
+  if (up) {
+    // Publishing is the one action here that leaves this machine, so confirm it.
+    const vis = privacyPicker.value;
+    if (!confirm('Upload this VOD to YouTube as ' + vis.toUpperCase() + '?\n\n' +
+                 'It is relayed straight from Kick - nothing is saved on this computer.')) return;
+    body.action = 'upload';
+    body.privacy = vis;
+  }
   btn.disabled = true;
   btn.textContent = 'Starting…';
   try {
-    const res = await api('/api/workspaces', 'POST', { url: btn.dataset.url, quality: qualityPicker.value || null });
+    const res = await api('/api/workspaces', 'POST', body);
     location.href = '/w/' + res.slug;
   } catch (err) {
     alert(err.message);
     btn.disabled = false;
-    btn.textContent = 'Download';
+    btn.textContent = label;
   }
 });
 
