@@ -1948,6 +1948,10 @@ CLI-only. Removed outright rather than left as a second dead kind.)
     the counts. The dock's vote buttons count by hand (Shift takes one back);
     with the live chat feed connected and counting on, the server writes the
     same field from chat instead (see "Live chat feed").
+- **Moving between ClipBot and Cue.** `base.html`'s topbar has a "Cue" tab (`/brief`)
+  beside Kick | YouTube; the rundown (`/brief`, local backend only) shows a nav strip
+  back to ClipBot, the libraries and the dock; the dock header and footer link to
+  ClipBot (`/`). Tests: `tests/test_brief_nav.py`.
 - **Chat +1 tally, widgets, AI moments.** `ChatFeed.plus(since)` counts "+1"/"++"
   (up) and "-1"/"--" (down), one per chatter, latest wins (`PLUS_RE`/`MINUS_RE`;
   those messages are excluded from questions, repeats and the word wall);

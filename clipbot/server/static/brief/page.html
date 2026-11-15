@@ -21,6 +21,10 @@ h1, h2, h3 { margin: 0; text-wrap: balance; }
 .wrap { max-width: 1240px; margin: 0 auto; padding: 0 20px 64px; }
 .muted { color: var(--muted); }
 
+.xnav { display: flex; gap: 6px; flex-wrap: wrap; padding-top: 14px; font: 600 12px/1 var(--mono); letter-spacing: .06em; }
+.xnav a { color: var(--muted); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; }
+.xnav a:first-child { color: var(--text); }
+.xnav a:hover { color: var(--accent); border-color: var(--accent); }
 .slate { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .mark { font: 900 20px/1 var(--display); letter-spacing: .02em; }
 .mark b { color: var(--accent); font-weight: 900; }
@@ -362,6 +366,7 @@ html.clear-bg .wrap { visibility: hidden; }
   var dateLabel = new Date(B.date + "T12:00:00").toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" });
   var preEnd = 0; B.run.forEach(function (s) { if (s.kind === "game") preEnd = s.t; });
   var h = [];
+  if (LOCAL) h.push('<nav class="xnav" aria-label="ClipBot"><a href="/">&larr; ClipBot</a><a href="/kick">Kick library</a><a href="/youtube">YouTube library</a><a href="/brief/dock" target="_blank" rel="noopener">Control dock</a></nav>');
   h.push('<header class="slate"><div class="mark"><b>T</b>ECK IS LIVE<small>CUE' + (LOCAL ? " · THIS PC" : "") + '</small></div>' +
     '<div class="slate-meta"><span>' + esc(dateLabel) + '</span><span>Edition <strong>' + esc(B.edition) + '</strong></span>' +
     '<span>Built <strong>' + esc((B.generated_at || "").replace("T", " ").slice(0, 16)) + '</strong></span>' +
