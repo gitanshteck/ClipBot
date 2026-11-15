@@ -175,6 +175,21 @@ class TestRunCli(unittest.TestCase):
             briefchat._run_cli([sys.executable, "-c", script], "x", a, lambda: None)
         self.assertIn("boom happened", str(cm.exception))
 
+    def test_nonzero_exit_never_shows_stdout_as_the_answer(self):
+        a = briefchat.Ask("a1", "q", "claude-cli")
+        script = "import sys; sys.stdin.read(); print('Not logged in'); sys.exit(1)"
+        with self.assertRaises(RuntimeError) as cm:
+            briefchat._run_cli([sys.executable, "-c", script], "x", a, lambda: None)
+        self.assertIn("Not logged in", str(cm.exception))
+        self.assertEqual(a.text, "")
+
+    def test_search_uses_the_longer_timer(self):
+        for search, expected in ((True, briefchat.SEARCH_TIMEOUT_SECONDS), (False, briefchat.TIMEOUT_SECONDS)):
+            a = briefchat.Ask("a1", "q", "claude-cli", search)
+            with mock.patch.object(briefchat.threading, "Timer") as timer:
+                briefchat._run_cli([sys.executable, "-c", self.SCRIPT], "hi", a, lambda: None)
+            self.assertEqual(timer.call_args.args[0], expected)
+
     def test_claude_cli_child_env_drops_api_key(self):
         a = briefchat.Ask("a1", "q", "claude-cli")
         with mock.patch.object(briefchat, "_run_cli") as run, \
@@ -187,6 +202,131 @@ class TestRunCli(unittest.TestCase):
         self.assertEqual(env.get("KEEP_ME"), "1")
         self.assertEqual(run.call_args.kwargs["cwd"], os.path.expanduser("~"))
         self.assertEqual(run.call_args.args[1], "prompt")
+
+
+class TestFindExe(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "home"
+        self.appdata = Path(self._tmp.name) / "appdata"
+        self.home.mkdir()
+        self.appdata.mkdir()
+
+    def patches(self, which=None):
+        return (mock.patch.object(briefchat.shutil, "which", return_value=which),
+                mock.patch.object(briefchat.os.path, "expanduser", return_value=str(self.home)),
+                mock.patch.dict(os.environ, {"APPDATA": str(self.appdata)}))
+
+    def fake_claude(self):
+        d = self.home / ".local" / "bin"
+        d.mkdir(parents=True)
+        (d / "claude.exe").write_bytes(b"")
+        return str(d / "claude.exe")
+
+    def test_path_hit_wins(self):
+        self.fake_claude()
+        w, e, env = self.patches(which="/usr/bin/claude")
+        with w, e, env:
+            self.assertEqual(briefchat.find_exe("claude"), "/usr/bin/claude")
+
+    def test_falls_back_to_local_bin(self):
+        path = self.fake_claude()
+        w, e, env = self.patches()
+        with w, e, env:
+            self.assertEqual(briefchat.find_exe("claude"), path)
+
+    def test_none_when_nothing_exists(self):
+        w, e, env = self.patches()
+        with w, e, env:
+            self.assertIsNone(briefchat.find_exe("claude"))
+
+    def test_available_lists_claude_cli_from_the_fallback(self):
+        self.fake_claude()
+        w, e, env = self.patches()
+        with w, e, env, mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(briefchat, "_have_anthropic_profile", return_value=False):
+            for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+                os.environ.pop(k, None)
+            self.assertEqual(briefchat.available(Settings({}, Path("s.json"))), ["claude-cli"])
+
+
+class TestWithSearch(unittest.TestCase):
+    def test_replaces_tools_and_max_turns_and_adds_allowed_tools(self):
+        argv = list(briefchat.DEFAULT_CLAUDE_CLI)
+        out = briefchat.with_search(argv)
+        self.assertEqual(out[out.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(out[out.index("--max-turns") + 1], "6")
+        self.assertEqual(out.count("--allowedTools"), 1)
+        self.assertEqual(out[out.index("--allowedTools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(argv, briefchat.DEFAULT_CLAUDE_CLI)   # input untouched
+        self.assertNotIn("WebSearch,WebFetch", argv)
+
+    def test_not_added_twice(self):
+        once = briefchat.with_search(["claude", "-p"])
+        twice = briefchat.with_search(once)
+        self.assertEqual(twice.count("--allowedTools"), 1)
+        self.assertEqual(twice.count("--tools"), 1)
+
+    def test_works_without_tools_or_max_turns(self):
+        out = briefchat.with_search(["claude", "-p"])
+        self.assertEqual(out[:2], ["claude", "-p"])
+        self.assertEqual(out[out.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(out[out.index("--max-turns") + 1], "6")
+
+
+class TestSearchPromptAndAsk(unittest.TestCase):
+    def test_build_prompt_search_rules(self):
+        self.assertIn(briefchat.SEARCH_RULES, briefchat.build_prompt("q", [], "c", search=True))
+        self.assertNotIn(briefchat.SEARCH_RULES, briefchat.build_prompt("q", [], "c", search=False))
+        self.assertNotIn(briefchat.SEARCH_RULES, briefchat.build_prompt("q", [], "c"))
+
+    def test_to_dict_search_fields(self):
+        a = briefchat.Ask("a1", "q", "anthropic", search=True)
+        a.searching = True
+        a.sources = [{"title": "t", "host": h} for h in ("a.com", "b.com", "c.com")]
+        d = a.to_dict()
+        self.assertIs(d["search"], True)
+        self.assertIs(d["searching"], True)
+        self.assertEqual([s["host"] for s in d["sources"]], ["a.com", "b.com"])
+        a.done = True
+        self.assertIs(a.to_dict()["searching"], False)
+
+
+class TestAutoFallback(unittest.TestCase):
+    def run_ask(self, settings, search=False):
+        a = briefchat.Ask("a1", "q", "claude-cli", search)
+
+        def fake_anthropic(s, prompt, ask_obj, emit):
+            ask_obj.text = "fallback text"
+
+        cli = mock.Mock(side_effect=RuntimeError("claude exited 1: Not logged in"))
+        with mock.patch.object(briefchat, "_run_cli", cli), \
+                mock.patch.object(briefchat, "available", return_value=["claude-cli", "anthropic"]), \
+                mock.patch.object(briefchat, "_run_anthropic", side_effect=fake_anthropic) as anth:
+            briefchat.ask(settings, a, "prompt", lambda d: None)
+        return a, cli, anth
+
+    def test_auto_falls_back_to_anthropic(self):
+        a, cli, anth = self.run_ask(Settings({}, Path("s.json")))
+        self.assertEqual(a.provider, "anthropic")
+        self.assertEqual(a.text, "fallback text")
+        self.assertEqual(a.error, "")
+        self.assertTrue(a.done)
+        self.assertTrue(anth.called)
+
+    def test_pinned_provider_reports_the_error(self):
+        a, cli, anth = self.run_ask(Settings({"brief": {"chat": {"provider": "claude-cli"}}}, Path("s.json")))
+        self.assertEqual(a.provider, "claude-cli")
+        self.assertIn("/login", a.error)    # the code turns "Not logged in" into sign-in advice
+        self.assertEqual(a.text, "")
+        self.assertFalse(anth.called)
+
+    def test_search_argv_contains_websearch(self):
+        _, cli, _ = self.run_ask(Settings({}, Path("s.json")), search=True)
+        self.assertIn("WebSearch", " ".join(cli.call_args.args[0]))
+        _, cli, _ = self.run_ask(Settings({}, Path("s.json")), search=False)
+        self.assertNotIn("WebSearch", " ".join(cli.call_args.args[0]))
 
 
 class TestAsk(unittest.TestCase):
@@ -219,9 +359,19 @@ class TestAsk(unittest.TestCase):
         self.assertTrue(a.done)
 
 
+def text_event(text):
+    return types.SimpleNamespace(type="text", text=text)
+
+
+def block_event(btype, **kw):
+    return types.SimpleNamespace(type="content_block_start", content_block=types.SimpleNamespace(type=btype, **kw))
+
+
 class FakeStream(object):
-    def __init__(self, chunks, stop_reason):
-        self.text_stream = iter(chunks)
+    """Iterable of event objects, like the SDK's message stream."""
+
+    def __init__(self, events, stop_reason):
+        self._events = list(events)
         self._stop = stop_reason
 
     def __enter__(self):
@@ -230,21 +380,53 @@ class FakeStream(object):
     def __exit__(self, *exc):
         return False
 
+    def __iter__(self):
+        return iter(self._events)
+
     def get_final_message(self):
         return types.SimpleNamespace(stop_reason=self._stop)
 
 
 class TestRunAnthropic(unittest.TestCase):
-    def run_it(self, chunks, stop="end_turn", settings=None):
-        stream_fn = mock.Mock(return_value=FakeStream(chunks, stop))
+    def run_events(self, events, stop="end_turn", settings=None, search=False, emit=None):
+        stream_fn = mock.Mock(return_value=FakeStream(events, stop))
         client = types.SimpleNamespace(messages=types.SimpleNamespace(stream=stream_fn))
         fake = types.ModuleType("anthropic")
         fake.Anthropic = mock.Mock(return_value=client)
-        a = briefchat.Ask("a1", "q", "anthropic")
-        prompt = briefchat.build_prompt("why?", [], "CTX")
+        a = briefchat.Ask("a1", "q", "anthropic", search)
+        prompt = briefchat.build_prompt("why?", [], "CTX", search)
         with mock.patch.dict(sys.modules, {"anthropic": fake}):
-            briefchat._run_anthropic(settings or Settings({}, Path("s.json")), prompt, a, lambda: None)
+            briefchat._run_anthropic(settings or Settings({}, Path("s.json")), prompt, a,
+                                     (lambda: emit(a)) if emit else (lambda: None))
         return a, stream_fn
+
+    def run_it(self, chunks, stop="end_turn", settings=None):
+        return self.run_events([text_event(c) for c in chunks], stop, settings)
+
+    def test_search_tool_events_sources_and_discarded_narration(self):
+        seen = []
+        events = [
+            text_event("Let me search."),
+            block_event("server_tool_use"),
+            block_event("web_search_tool_result", content=[
+                types.SimpleNamespace(url="https://www.pcgamer.com/a", title="A"),
+                types.SimpleNamespace(url="https://pcgamer.com/b", title="B"),
+                types.SimpleNamespace(url="https://www.ign.com/c", title="C"),
+            ]),
+            text_event("Real answer"),
+        ]
+        a, stream_fn = self.run_events(events, search=True, emit=lambda ask_obj: seen.append((ask_obj.searching, ask_obj.text)))
+        self.assertEqual(stream_fn.call_args.kwargs["tools"],
+                         [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}])
+        self.assertEqual(a.text, "Real answer")
+        self.assertNotIn("Let me search", a.text)
+        self.assertIn((True, ""), seen)            # searching, narration discarded
+        self.assertFalse(a.searching)              # first text turned it off
+        self.assertEqual([s["host"] for s in a.sources], ["pcgamer.com", "ign.com"])
+
+    def test_no_tools_kwarg_without_search(self):
+        _, stream_fn = self.run_events([text_event("x")], search=False)
+        self.assertNotIn("tools", stream_fn.call_args.kwargs)
 
     def test_streams_text_with_defaults(self):
         a, stream_fn = self.run_it(["Hello ", "there\n", "- pt"])
@@ -389,6 +571,50 @@ class TestChatRoutes(unittest.TestCase):
         r, captured = self.ask_once(True)
         self.assertEqual(r.status_code, 200)
         self.assertIn("Tonight's theme: k", captured["prompt"])
+
+    def post_search(self, payload, settings=None, provider="anthropic"):
+        created = {}
+
+        class SyncThread(object):
+            def __init__(self, target=None, args=(), daemon=None, **kw):
+                created["ask"] = args[1]
+
+            def start(self):
+                pass
+
+        real_build = briefchat.build_prompt
+
+        def spy(*a, **kw):
+            created["prompt"] = real_build(*a, **kw)
+            return created["prompt"]
+
+        body = dict({"question": "any news?"}, **payload)
+        with mock.patch.object(app_module, "settings", settings or self.settings), \
+                mock.patch.object(briefchat, "pick_provider", return_value=provider), \
+                mock.patch.object(briefchat, "build_prompt", side_effect=spy), \
+                mock.patch.object(app_module, "threading", types.SimpleNamespace(Thread=SyncThread)):
+            r = self.client.post("/api/brief/chat", json=body, headers=HEADERS)
+        self.assertEqual(r.status_code, 200)
+        return created
+
+    def test_search_true_in_payload(self):
+        c = self.post_search({"search": True}, settings=make_settings(self.work, search=False))
+        self.assertIs(c["ask"].search, True)
+        self.assertIn(briefchat.SEARCH_RULES, c["prompt"])
+
+    def test_search_false_in_payload(self):
+        c = self.post_search({"search": False})
+        self.assertIs(c["ask"].search, False)
+        self.assertNotIn(briefchat.SEARCH_RULES, c["prompt"])
+
+    def test_search_defaults_to_setting(self):
+        self.assertIs(self.post_search({})["ask"].search, True)
+        self.assertIs(self.post_search({}, settings=make_settings(self.work, search=False))["ask"].search, False)
+
+    def test_gemini_cli_forces_search_off(self):
+        c = self.post_search({"search": True}, provider="gemini-cli")
+        self.assertIs(c["ask"].search, False)
+        self.assertNotIn(briefchat.SEARCH_RULES, c["prompt"])
 
     def test_unknown_id_404(self):
         self.assertEqual(self.client.get("/api/brief/chat/nope").status_code, 404)

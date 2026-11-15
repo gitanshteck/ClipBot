@@ -42,8 +42,23 @@ REQUIRED = {
 SEGMENT_KEYS = ("id", "t", "dur", "name", "kind", "clip", "screen")
 KINDS = {"starting", "talk", "chat", "react", "transition", "game"}
 SCENES = {"starting", "card", "topic", "guess", "vote", "game", "next"}
-FRAMES = ("chat", "game", "vertical", "full")
+FRAMES = ("chat", "game", "vertical", "full", "sound")
+LOOKS = ("clean", "hud", "slash")   # card shapes; colour never changes (blue is the only accent)
+SOUND_EVENTS = ("start", "segment", "card", "reveal", "vote", "ask", "clip", "kill", "death")
+# event -> (file in the library's sfx folder, volume). Override or switch off with
+# settings brief.sounds.<event>: {"file": "x.ogg", "volume": 0.5} or false.
+SOUND_DEFAULTS = {
+    "start": ("powerup.ogg", 0.7), "segment": ("whoosh_switch.ogg", 0.6), "card": ("hud_blip.wav", 0.5),
+    "reveal": ("hud_stamp.wav", 0.8), "vote": ("hud_sweep.wav", 0.6), "ask": ("hud_contact.wav", 0.6),
+    "clip": ("confirm.ogg", 0.7), "kill": ("impact_punch.ogg", 0.5), "death": ("error.ogg", 0.4),
+}
+BRAND_FILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,60}\.(png|svg|webp|jpg)$")
+FONT_FILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,60}\.(otf|ttf|woff2?)$")
 CARD_MAX = 48
+LINK_KINDS = ("trailer", "video", "official", "article", "post", "source")
+LINKS_MAX = 6
+LINK_LABEL_MAX = 32
+URL_RE = re.compile(r"^https?://[^\s<>\"']{4,500}$", re.I)
 # Things that must never reach a page shown live on stream. A backstop, not the filter.
 PRIVATE = re.compile(r"\bvisa\b|\bemployer\b|passport|@gmail|notion\.so|\+61 ?4|\+91 ?[6-9]", re.I)
 
@@ -84,6 +99,46 @@ def _write_json(path: Path, data: Any) -> None:
 # --- the brief -------------------------------------------------------------
 
 
+def link_problems(where: str, links: Any) -> List[str]:
+    """``links`` on a docket item or run segment: what the dock offers to open live."""
+    if links is None:
+        return []
+    if not isinstance(links, list) or len(links) > LINKS_MAX:
+        return ["{0}: links must be a list of at most {1}".format(where, LINKS_MAX)]
+    out = []
+    for n, link in enumerate(links):
+        if not isinstance(link, dict):
+            out.append("{0}: links[{1}] is not an object".format(where, n))
+            continue
+        label, url = link.get("label"), link.get("url")
+        if not isinstance(label, str) or not 1 <= len(label) <= LINK_LABEL_MAX:
+            out.append("{0}: links[{1}].label must be 1-{2} characters".format(where, n, LINK_LABEL_MAX))
+        if not isinstance(url, str) or not URL_RE.match(url):
+            out.append("{0}: links[{1}].url must start with http:// or https://".format(where, n))
+        if link.get("kind", "article") not in LINK_KINDS:
+            out.append("{0}: links[{1}].kind must be one of {2}".format(where, n, list(LINK_KINDS)))
+    return out
+
+
+def link_urls(brief: Optional[Dict[str, Any]]) -> set:
+    """Every URL the brief itself offers (links, item urls, sources): the only ones the dock may open."""
+    found = set()
+    if not isinstance(brief, dict):
+        return found
+    for holder in list(brief.get("docket") or []) + list(brief.get("run") or []):
+        if not isinstance(holder, dict):
+            continue
+        if isinstance(holder.get("url"), str):
+            found.add(holder["url"])
+        for link in holder.get("links") or []:
+            if isinstance(link, dict) and isinstance(link.get("url"), str):
+                found.add(link["url"])
+    for src in brief.get("sources") or []:
+        if isinstance(src, dict) and isinstance(src.get("url"), str):
+            found.add(src["url"])
+    return found
+
+
 def problems(brief: Dict[str, Any]) -> List[str]:
     """Everything that would stop the page rendering properly, as readable lines."""
     out = []
@@ -115,6 +170,12 @@ def problems(brief: Dict[str, Any]) -> List[str]:
                 out.append("run[{0}] guess scene needs rounds with q and a".format(i))
         if scene == "vote" and len(seg.get("poll") or []) < 2:
             out.append("run[{0}] vote scene needs a poll with at least 2 options".format(i))
+    looks = [("look", brief.get("look"))] + [("run[{0}].look".format(i), s.get("look")) for i, s in enumerate(brief.get("run", []) or []) if isinstance(s, dict)]
+    for where, look in looks:
+        if look is None:
+            continue
+        if not isinstance(look, dict) or look.get("theme", "clean") not in LOOKS or len(str(look.get("tag", ""))) > 24:
+            out.append("{0} must be {{theme: one of {1}, tag: up to 24 characters}}".format(where, list(LOOKS)))
     for d in brief.get("docket", []) or []:
         if not isinstance(d, dict):
             continue
@@ -122,6 +183,11 @@ def problems(brief: Dict[str, Any]) -> List[str]:
             out.append("docket {0}: card title over {1} characters (it must read in one glance on stream)".format(d.get("id"), CARD_MAX))
         if "poll" in d and not (2 <= len(d["poll"] or []) <= 3):
             out.append("docket {0}: poll needs 2 or 3 options".format(d.get("id")))
+    holders = [("docket {0}".format(d.get("id")), d) for d in brief.get("docket", []) or [] if isinstance(d, dict)] +               [("run[{0}]".format(i), s) for i, s in enumerate(brief.get("run", []) or []) if isinstance(s, dict)]
+    for where, holder in holders:
+        if holder.get("url") and not URL_RE.match(str(holder["url"])):
+            out.append("{0}: url must start with http:// or https://".format(where))
+        out.extend(link_problems(where, holder.get("links")))
     if brief.get("run") and not any(isinstance(s, dict) and s.get("kind") == "game" for s in brief["run"]):
         out.append("run has no game segment")
     text = json.dumps(brief, ensure_ascii=False)
@@ -187,7 +253,7 @@ def render_page(brief: Dict[str, Any], backend: str, local_base: str = "http://1
 def default_state(date: str = "") -> Dict[str, Any]:
     return {"v": 0, "on": False, "seg": 0, "item": 0, "reveal": False, "kills": 0, "deaths": 0,
             "startedAt": 0, "pausedAt": 0, "pausedTotal": 0, "bg": "brand", "lay": "h",
-            "l3only": False, "ask": "", "askShow": False, "date": date}
+            "l3only": False, "ask": "", "askShow": False, "mute": False, "votes": [], "pin": None, "date": date}
 
 
 def read_state(settings: Settings, date: str = "") -> Dict[str, Any]:
@@ -225,6 +291,15 @@ def write_state(settings: Settings, incoming: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(clean["ask"], str) or not re.match(r"^[a-z0-9-]{0,40}$", clean["ask"]):
         raise ValueError("state.ask must be a chat id")
     clean["askShow"] = bool(clean["askShow"])
+    clean["mute"] = bool(clean["mute"])
+    pin = clean["pin"]
+    if pin is not None:
+        if not isinstance(pin, dict) or not isinstance(pin.get("u"), str) or not isinstance(pin.get("t"), str):
+            raise ValueError("state.pin must be null or {u, t}")
+        clean["pin"] = {"u": _text(pin["u"], 40), "t": _text(pin["t"], 300), "id": _text(pin.get("id", ""), 80)}
+    votes = clean["votes"]
+    if not isinstance(votes, list) or len(votes) > 3 or not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 100000 for v in votes):
+        raise ValueError("state.votes must be up to three whole numbers")
     path = brief_dir(settings) / "live" / "state.json"
     with _LOCK:
         current = _read_json(path, None)
@@ -318,3 +393,57 @@ def list_feedback(settings: Settings, date: Optional[str] = None) -> List[Dict[s
     if date:
         rows = [r for r in rows if r.get("date") == date]
     return sorted(rows, key=lambda r: r.get("at", ""))
+
+
+def options_for(brief: Dict[str, Any], state: Dict[str, Any]) -> int:
+    """How many "type 1 / 2 / 3" options the card on screen offers (0 when it is not a vote card)."""
+    run = brief.get("run") or []
+    if not run or state.get("date") != brief.get("date"):
+        return 0
+    seg = run[max(0, min(len(run) - 1, int(state.get("seg", 0) or 0)))]
+    if seg.get("scene") == "vote" or (seg.get("kind") == "transition" and seg.get("poll")):
+        return min(3, len(seg.get("poll") or []))
+    items = [d for d in brief.get("docket") or [] if d.get("id") in (seg.get("items") or [])]
+    if items:
+        it = items[min(int(state.get("item", 0) or 0), len(items) - 1)]
+        return min(3, len(it.get("poll") or []))
+    return min(3, len(seg.get("poll") or []))
+
+
+# --- sounds, brand files ---------------------------------------------------
+
+
+def sounds_map(settings: Settings) -> Dict[str, Dict[str, Any]]:
+    """event -> {url, file, volume} for every transition sound whose file exists in the
+    library's sfx folder (served by /media/library/sfx/<file>). Unknown files are skipped."""
+    from urllib.parse import quote
+
+    from . import library
+
+    out = {}  # type: Dict[str, Dict[str, Any]]
+    for event in SOUND_EVENTS:
+        cfg = settings.get("brief.sounds.{0}".format(event), None)
+        if cfg is False:
+            continue
+        name, volume = SOUND_DEFAULTS[event]
+        if isinstance(cfg, str):
+            name = cfg
+        elif isinstance(cfg, dict):
+            name = str(cfg.get("file", name))
+            volume = cfg.get("volume", volume)
+        try:
+            library.resolve_media(settings, "sfx", name)
+        except KeyError:
+            continue
+        vol = float(volume) if isinstance(volume, (int, float)) and not isinstance(volume, bool) else 0.6
+        out[event] = {"url": "/media/library/sfx/" + quote(name), "file": name, "volume": max(0.0, min(1.0, vol))}
+    return out
+
+
+def asset_path(settings: Settings, kind: str, name: str) -> Optional[Path]:
+    """A brand image (kind 'brand') or font (kind 'fonts') in the brief dir, or None."""
+    rx = BRAND_FILE_RE if kind == "brand" else FONT_FILE_RE
+    if kind not in ("brand", "fonts") or not rx.match(name):
+        return None
+    path = brief_dir(settings) / kind / name
+    return path if path.is_file() else None

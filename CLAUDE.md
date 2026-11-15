@@ -183,11 +183,19 @@ clipbot/
                      stream): brief_dir(), problems() validation, load_brief() +
                      merge_steam(), render_page(brief, "claude"|"local"), and the
                      live on-air state / markers / feedback JSON files the
-                     dashboard's OBS overlays and dock read and write. See the
-                     "Stream brief" section
+                     dashboard's OBS overlays and dock read and write, plus
+                     sounds_map() (transition sounds from the library's sfx
+                     folder) and asset_path() (brand image / font files in the
+                     brief dir). See the "Stream brief" section
   briefchat.py       the brief's live "Ask the AI" chat: providers (claude-cli,
                      gemini-cli, anthropic), stream_context(), build_prompt(),
                      parse_answer(), ask(). See the "Stream brief" section
+  chatfeed.py        Cue's live chat awareness, pure logic (no network):
+                     ChatFeed - pulse, votes, questions, repeat asks,
+                     newcomers, snapshot(). See "Live chat feed"
+  kickchat.py        read-only Kick chat transport for ChatFeed: KickPoller
+                     thread polling the unofficial messages endpoint with
+                     curl_cffi (not Kick's official API). See "Live chat feed"
   stages/
     download.py       stage 1  (Kick: yt-dlp; kick-dl fallback currently disabled)
                        + acquire(), the platform dispatcher the CLI and jobs call
@@ -222,7 +230,9 @@ clipbot/
                        not Jinja - brief.render_page fills its placeholders),
                        scenes.css/scenes.js (on-air scene renderer + state
                        reducer, shared by page, overlays and dock), live.js
-                       (client for /api/brief/*), overlay.js, dock.js/.css
+                       (client for /api/brief/*), overlay.js, sounds.js
+                       (transition sounds, played only by the "sound" overlay),
+                       dock.js/.css
 
 config/
   settings.json         all tunables — see "Configuration" below
@@ -265,13 +275,30 @@ tests/
   test_player_js.py             runs tests/js/player_adapter.test.js under Node
                                 (skipped without Node); no browser test
                                 infrastructure exists in this repo
-  test_brief.py                 clipbot/brief.py (validation, render_page,
-                                state versioning, markers, feedback) and the
+  test_brief.py                 clipbot/brief.py (validation incl. look, render_page,
+                                state versioning incl. mute/votes, markers,
+                                feedback, sounds_map, asset_path) and the
                                 /brief* + /api/brief/* routes (TestClient)
+  test_scenes_js.py             runs tests/js/scenes.test.js under Node (skipped
+                                without Node): scenes.js soundEvents, reduce,
+                                tallyOf, sceneHTML in a vm with a stub window
   test_briefchat.py             clipbot/briefchat.py (answer parsing, prompt and
                                 context building, provider choice, the CLI and
                                 Anthropic runners with fakes) and the
                                 /api/brief/chat* routes
+  test_chatfeed.py              clipbot/chatfeed.py: add/dedupe/bots, pulse
+                                (rate, sparkline, quiet, spike), tally (one vote
+                                per chatter), questions, repeats, snapshot -
+                                injected clock, no network
+  test_kickchat.py              clipbot/kickchat.py against a fake http object:
+                                parse_message, poll_once (channel resolved once,
+                                cursor, first-poll seeding, non-200), the run
+                                loop's error/backoff/recovery/stop
+  test_brief_feed.py            the brief side of the chat feed: options_for,
+                                tally + card start, the pin in the live state,
+                                chat in stream_context, /api/brief/feed* routes
+                                with a fake poller (the 1 s loop itself is not run)
+  test_brief_soundlink.py       /api/brief/sounds/ping|status|play
 
 work/                    gitignored. Per-VOD workspaces + _cache/ + _library/
 scripts/setup-pc2.ps1     provisioning script for a second (CUDA-capable) machine
@@ -1845,6 +1872,9 @@ CLI-only. Removed outright rather than left as a second dead kind.)
 
 ## Stream brief (clipbot/brief.py, server/static/brief/, tools/stream-brief/)
 
+- **Name**: the project is called **Cue** (chosen 2026-11-15). Module, route,
+  directory and setting names keep "brief" (`clipbot/brief.py`, `/api/brief/*`,
+  `brief.*`, `tools/stream-brief/`); only the project's name changed.
 - A daily run of show for the start of each stream (pre-show, talk, reaction
   blocks, a chat game, the game vote, the game) plus game picks from the PC's
   library. A scheduled Claude task writes `<brief dir>/brief.json` each
@@ -1856,17 +1886,21 @@ CLI-only. Removed outright rather than left as a second dead kind.)
   `tools/stream-brief/build_page.py` (state, markers and feedback go to the
   artifact's own database; a phone remote uses its room). `backend="local"` is
   `GET /brief` on the dashboard, which talks to `/api/brief/*`.
-- **OBS.** `GET /brief/overlay/{chat|game|vertical|full}` are Browser Sources
+- **OBS.** `GET /brief/overlay/{chat|game|vertical|full|sound}` are Browser Sources
   (1920x1080, vertical 1080x1920; `?bg=brand|green|clear`, default clear except
   full = brand). Each frame places the cards around the user's real scene
   layout (measured from VOD frames): chat = full-frame cam with the chat overlay
   bottom right, game = compact card under the cam box, vertical = clear of the
-  Shorts UI, full = brand scene for the pre-show. Chat, game and vertical draw
-  nothing until Start is pressed. `GET /brief/dock` is the control panel for an
-  OBS Custom Browser Dock.
+  Shorts UI, full = brand scene for the pre-show; `sound` draws nothing and only
+  plays the transition sounds (see "Look and sounds"). Chat, game and vertical
+  draw nothing until Start is pressed. `GET /brief/dock` is the control panel for
+  an OBS Custom Browser Dock.
 - **Live state** is one JSON object (`brief.default_state`): `v` (ms timestamp
   of the change), `on`, `seg`, `item`, `reveal`, `kills`, `deaths`, timer
-  fields, `bg`, `lay`, `l3only`, `ask`, `askShow`, `date`. Every view applies controls with
+  fields, `bg`, `lay`, `l3only`, `ask`, `askShow`, `mute` (bool, coerced), `votes`
+  (a list of at most three whole numbers 0..100000), `pin` (`null` or `{u, t,
+  id}`: a chat message put on screen, user cut to 40 characters, text to 300;
+  anything else is a `ValueError`), `date`. Every view applies controls with
   `BriefScenes.reduce` and sends the whole object (`PUT /api/brief/state`);
   `brief.write_state` keeps it only if its `v` is newer (or the date is new),
   stores it at `<brief dir>/live/state.json`, and the route publishes a `brief`
@@ -1877,12 +1911,130 @@ CLI-only. Removed outright rather than left as a second dead kind.)
   UTC `at`; the next brief turns them into YouTube chapters and an editor list.
   **Feedback** (`POST /api/brief/feedback`, `feedback.json`): more / less / drop
   per item, keyed `<date>_<kind>_<target>`; `reaction: null` clears.
+- **Look and sounds.**
+  - *Look* follows the user's BRAND.md: Teck Blue `#19A2D2` is the only accent on
+    stream scenes, near-black `#0E0F11` the ground, and the caps display face is
+    Big John, served from `<brief dir>/fonts/BigJohn.woff2|otf|ttf` at
+    `GET /brief/font/{name}` (Unbounded stands in until the file is there). The
+    lockup is `<brief dir>/brand/lockup.png` at `GET /brief/brand/{name}`; the
+    text mark shows when it is absent. Both go through `brief.asset_path(settings,
+    "brand"|"fonts", name)`, which takes only a plain filename (`BRAND_FILE_RE`:
+    png/svg/webp/jpg, `FONT_FILE_RE`: otf/ttf/woff/woff2) that exists, else None
+    (the route answers 404). `brief["look"]` = `{theme: clean|hud|slash, tag: up
+    to 24 characters}` (`LOOKS`), checked by `problems()` at the brief level and
+    on each segment; a segment's `look` overrides the brief's. The themes are card
+    SHAPES, not colours: per-game colour tints were rejected because of the
+    one-accent rule. `tag` shows as a chip on the card's bug.
+  - *Sounds*: `SOUND_EVENTS` = start, segment, card, reveal, vote, ask, clip, kill,
+    death. `SOUND_DEFAULTS` maps each to a file in the library's sfx folder and a
+    volume (start `powerup.ogg`, segment `whoosh_switch.ogg`, card `hud_blip.wav`,
+    reveal `hud_stamp.wav`, vote `hud_sweep.wav`, ask `hud_contact.wav`, clip
+    `confirm.ogg`, kill `impact_punch.ogg`, death `error.ogg`).
+    `sounds_map(settings)` returns `{event: {url, file, volume}}` for those whose
+    file exists (via `library.resolve_media`, so a name with `..` or a backslash is
+    skipped); `GET /api/brief/sounds` serves it, and the files play from
+    `/media/library/sfx/<file>`. Override per event in settings
+    `brief.sounds.<event>`: `false` removes it, `"file.ogg"` swaps the file, and
+    `{"file": "x.ogg", "volume": 0.5}` sets both (volume clamped to 0..1; a
+    non-number falls back to 0.6). Only the `sound` overlay plays them: add it as
+    one Browser Source with "Control audio via OBS" so each sound reaches OBS once
+    with its own fader (several visual overlays would multiply them).
+    `BriefScenes.soundEvents(prev, next)` decides what plays on a state change and
+    plays nothing on the first load or a new day; `state.mute` silences them; a
+    `clip` marker event plays `clip`.
+  - *Votes*: `state.votes` holds the live tallies for a "type 1 or 2" poll. It
+    resets on a segment change and on an item change (or with `votesreset`). The
+    vote scene draws the tallies as bars (leader highlighted) and poll chips show
+    the counts. The dock's vote buttons count by hand (Shift takes one back);
+    with the live chat feed connected and counting on, the server writes the
+    same field from chat instead (see "Live chat feed").
+- **Chat +1 tally, widgets, AI moments.** `ChatFeed.plus(since)` counts "+1"/"++"
+  (up) and "-1"/"--" (down), one per chatter, latest wins (`PLUS_RE`/`MINUS_RE`;
+  those messages are excluded from questions, repeats and the word wall);
+  `mood()` (0-100, activity against the feed's own baseline plus laughing/hype
+  words) and `words()` (top words of the last five minutes) are in `snapshot()`.
+  `ChatFeed(sink=...)` is called with every accepted message: the dashboard's
+  `_chat_sink` appends it to `<brief dir>/chatlogs/<date>.jsonl`. The dashboard
+  turns these into **widgets**: `_widgets_view()` = `{plus: [up, down], mood,
+  words, callout}` (the +1 count starts at the card's start like the 1/2 votes,
+  and `POST /api/brief/pulse/reset` restarts it), published as a `brief` SSE event
+  `{widgets}` by `_feed_loop` and read by `GET /api/brief/widgets`. They are not
+  part of the live *state* object on purpose: a dock `PUT` of a stale state must
+  not erase an AI line. `overlay.js` draws them into `#wid` (top-right pill, vibe
+  bar, word wall, and the AI callout bottom-left); `?w=plus,callout,mood,words`
+  picks them, default `plus,callout`. `POST /api/brief/shoutout {user}` puts a plain
+  "welcome to the chat, <name>" callout (no model).
+  **`clipbot/aimoments.py`** is Cue's own voice: `Engine.step()` (run in a worker
+  thread by `_moments_loop`, which also promotes due lines every second) picks a
+  trigger from chat (`pick_trigger`: spike, 3+ chatters typing the same thing, 150 s
+  of quiet, or a jittered random check-in; `verdict` fires when a vote card closes
+  with at least four votes), asks the same provider as Ask the AI for ONE line
+  (persona + lore + stream context + the recent chat inside `<chat>` marked
+  untrusted + lines already said), checks it (`clean_line`: one line, at most 140
+  characters and 26 words, no URL, `#`, `@`, nothing matching `brief.PRIVATE`,
+  nothing in `brief.ai.blocklist`, no repeat; the model answering SKIP means it had
+  nothing better), and records it with status `pending` and a veto window
+  (`veto_seconds`, 5). Past the window it becomes `shown` and goes out as the
+  callout for `show_seconds` (9). A `recap` is private (status `dock`, never
+  promoted or re-shown). Limits: one on-stream line per `min_gap_seconds` (480),
+  `max_per_hour` (5), `daily_budget` model calls (40, counted from the log), only
+  while the feed is live and the show is on; settings `brief.ai.*` with the dock's
+  saved overrides in `live/ai.json` (`enabled` defaults to **off**; the dock's
+  "AI jumps in" switch turns it on). Every attempt is logged to
+  `live/ai_moments/<date>.json` (id, kind, reason, the chat at the time, text,
+  status, provider, segment). Routes: `GET /api/brief/moments`, `PUT
+  .../moments/settings`, `POST .../moments/{id}/veto|reshow`, `POST
+  .../moments/fire {kind: random|recap}`. SSE: `{moment}` and `{momentsStatus}`.
+  Viewers asking the AI by command is parked. Tests: `tests/test_aimoments.py`,
+  `tests/test_brief_moments.py`.
+- **Lore (what the AI remembers).** `clipbot/lore.py` reads a private pack in
+  `<brief dir>/lore/`: `lore.md` (voice, running bits, regulars, callbacks, a "Never
+  state on stream" list, answer rules; hand-editable), `recent.md` (digest of the
+  last streams and open threads) and `streams.json` (one record per past stream:
+  date, title, games, topics, `moments` [{t_min, what, kind}], `lines`; newest
+  first). `lore.context(settings, question)` returns the background block for the
+  Ask-the-AI prompt: lore (capped at 9,000 characters, cut on a whole line) +
+  recent (3,500) + up to four stream moments that keyword-match the question
+  (`lore.search`, stopwords dropped, no model, no network). `briefchat.build_prompt`
+  takes it as `background`; an empty block leaves the prompt byte-identical.
+  `/api/brief/chat` calls it for every question. Setting `brief.chat.lore` (default
+  true) switches it off. The pack is private context that may be paraphrased on
+  stream, so the preamble tells the model the "Never state on stream" list must not
+  appear in an answer. Refreshing it after each stream: `tools/stream-brief/DAILY.md`
+  Step 0e. Tests: `tests/test_lore.py`.
+- **Links on cards.** A docket item or run segment may carry `links`: up to 6
+  `{label (<=32 chars), url (http/https), kind: trailer|video|official|article|post|source}`.
+  `brief.link_problems()` validates them inside `problems()`; `brief.link_urls()` is
+  every URL the brief offers. The dock's "Notes & links" block (`dock.js`, from
+  `BriefScenes.linksOf`: item links, then the item's `url` as its source, then the
+  segment's links, de-duplicated, six at most) lists the card's notes (segment notes
+  plus the item's `risk`) with link buttons; a click calls `POST /api/brief/open`,
+  which opens the URL in the PC's default browser through `webbrowser.open`
+  (OBS's embedded dock may not hand links to the system). That route accepts only
+  URLs the brief lists, so it is not a general URL opener. The rundown page shows the
+  same links as chips on each card. Tests: `tests/test_brief_links.py`.
+- **Profile (private curation input).** The daily task reads `<brief dir>/profile/`
+  (`interview_*.md` > `profile_draft.md` > `log.md`, path in `knowledge.json`
+  `profile`) so the docket covers his whole life, not mostly gaming: at most about
+  four gaming items, at least three non-gaming, one `wildcard` block item, his own
+  limits on top of `never_on_stream`, and one dated line appended to `log.md` per
+  run. Procedure in `tools/stream-brief/DAILY.md` Step 0d. Nothing in the profile
+  is committed or copied into `brief.json`; code does not read it, only the task.
 - `_watch_brief()` (started in `_startup`) publishes `{changed: true}` when
   brief.json's mtime changes, so overlays and the dock load the new day without
   a refresh.
+- **Sound source link**: the `sound` overlay POSTs `/api/brief/sounds/ping` every
+  10 s; `GET /api/brief/sounds/status` answers `{connected, age_seconds}`
+  (connected = a ping in the last `SOUND_PING_FRESH_SECONDS` = 25 s) and the
+  dock shows "sound: OBS" or "sound: not in OBS". `POST /api/brief/sounds/play`
+  (`{event}`, one of `SOUND_EVENTS`, else 400) publishes a `brief` event
+  `{play: event}`: the dock's ▶ buttons go through the server to the OBS sound
+  source, so they test the real path into the OBS mixer, not the dock's own
+  speakers; the overlay plays it even when `state.mute` is on. Ping time is
+  process memory (`_sound_ping`).
 - `brief.problems()` is the build's gate: required keys, segment fields,
-  scene-specific fields (guess rounds, vote poll), card titles of at most 48
-  characters, and a backstop regex for private words, because the page is shown
+  scene-specific fields (guess rounds, vote poll), `look` shape, card titles of
+  at most 48 characters, and a backstop regex for private words, because the page is shown
   live on stream.
 - **Live chat ("Ask the AI")**, `clipbot/briefchat.py`: the dock sends a
   question and a small, fast model answers while on air. Providers
@@ -1906,8 +2058,167 @@ CLI-only. Removed outright rather than left as a second dead kind.)
   count, extra points are dropped). The dock's "Ask the AI" panel shows it;
   "Show on stream" sets state `ask` (the chat id, `^[a-z0-9-]{0,40}$`) and
   `askShow`, and every overlay then draws the answer card instead of the
-  current segment. `stream_context()` tells the model what segment and topic
+  current segment. `BriefScenes.reduce` sets `askShow` false when the segment
+  actually changes (next/prev/goto/start, via `goSeg`), on item/itemup and on
+  stop - not on reveal, kills, pause, votes, pin or l3 - so the answer never
+  outlives the card it was shown over (`ask` stays, so it can be shown again).
+  **Sizing**: the card has no length thresholds. Each frame sets `--ask-h` (the
+  room above the lower third / chat: 400 overlay, 480 game, 710 full, 570
+  vertical) and base sizes in scenes.css; every size is `calc(Npx * var(--k))`
+  and `scenes.js` `fitAsk()` (called from `paintAsk`) bisects `--k` in
+  [0.4, 1] until `offsetHeight <= --ask-h` (riff points and the question scale at
+  half that rate, `--kb`). Last resorts: `.tight` (points clamped to 2 lines),
+  dropping points from the end, `.clip` (headline clamped). While one answer
+  types out `k` only goes down; web fonts arriving refit. The card is
+  `box-sizing: border-box` and the question in the lower third is clamped to
+  2 lines. In the dock the stored answers are `.ask-item` cards (classes
+  `ask-top/ask-q/ask-a/ask-pts`, the on-air one `.is-onair`: never reuse
+  `.onair`, that is the dock's Start button) with the Show/Hide button first;
+  `renderAsks()` skips identical markup and keeps the list's scroll position.
+  `stream_context()` tells the model what segment and topic
   are on screen and never includes a guess round's answer.
+  **Search**: a dock checkbox (remembered in localStorage), default from
+  `brief.chat.search` (true), overridable per request with `"search"` in the
+  POST body; forced off for `gemini-cli`. When on, the prompt gets
+  `SEARCH_RULES`. The API path adds the `web_search_20250305` server tool with
+  `max_uses` 2 (`brief.chat.search_tool`; the 20260209 variant runs code and is
+  slower) and iterates the stream's events: text written before a
+  `server_tool_use` is discarded (`Ask.searching` is true until the first text),
+  and result hosts (one per host, `www.` stripped) become `sources`, shown on
+  the card as "via <host>" (`Ask.to_dict` caps them at 2). The `claude-cli`
+  path uses `with_search()`: `--tools WebSearch,WebFetch --allowedTools
+  WebSearch,WebFetch --max-turns 6` and a 90 s timeout (`SEARCH_TIMEOUT_SECONDS`;
+  60 s otherwise). Those flags are unverified against a signed-in install.
+  `find_exe()` checks `PATH`, then `~/.local/bin` (Claude Code's native
+  installer does not add it to `PATH`) and `%APPDATA%/npm`. The Claude Code CLI
+  has its own login, separate from the desktop app: run `claude`, then `/login`
+  once. In `auto` mode a failed `claude-cli` run (not signed in, plan limit)
+  falls back to the Anthropic API for that question when it is available; a
+  pinned provider reports the error instead. A non-zero CLI exit never shows
+  its stdout as the answer (the text is cleared and the error raised).
+
+### Live chat feed (Kick, read-only)
+
+`clipbot/chatfeed.py` (logic), `clipbot/kickchat.py` (transport), and the "live
+chat feed" block in `server/app.py`. The dock's Chat panel shows what chat is
+doing and can feed the vote cards.
+
+- **Not Kick's official API.** Kick's official chat delivery is webhooks to a
+  public HTTPS callback, which a loopback-only dashboard cannot receive (a
+  tunnel plus a Kick developer app would be needed; out of scope, the user chose
+  not to build it). This feed polls the same unofficial endpoint
+  `stages/chat.py` uses for VODs. It can break or be blocked without notice, and
+  Kick's terms restrict scraping (per the research in
+  `tools/stream-brief/ROADMAP.md`), so it is **opt-in** (the dock's Connect
+  button; nothing starts at launch or from a setting), **read-only** (nothing is
+  ever posted to chat) and meant for **the user's own channel** only. Settings:
+  `brief.kick.channel` (default empty) and `brief.kick.interval_seconds`
+  (default 3.0; `KickPoller` floors it at 1.5). Neither is in `settings.json`
+  yet, the defaults are in `app.py`. The dock remembers the channel in
+  localStorage (`teck-brief-channel`, default `"teckislive"`).
+- **`ChatFeed`** is pure logic, no network, injectable clock: a transport calls
+  `add(msg)` with `{id, user, slug, text, at, badges}`; the dock reads
+  `snapshot()`. `add` drops duplicates (by id), empty text and bots
+  (`chat.bots` from settings, matched on slug); text is cut to 300 characters;
+  the last `KEEP` = 600 messages are kept. It is thread-safe (one `RLock`).
+  - *Pulse*: `rate_per_minute()` (messages in the last 60 s), `sparkline()`
+    (`SPARK_BINS` = 20 bins of `SPARK_BIN_SECONDS` = 30 s, oldest first),
+    `quiet_seconds()` (since the last message; `None` before any),
+    `quietAlert` when that reaches `QUIET_ALERT_SECONDS` = 180, and `spike()`:
+    at least `SPIKE_MIN_MESSAGES` = 6 in the last 30 s and at least
+    `SPIKE_FACTOR` = 2.5 times the average 30 s bin of the 5 minutes before
+    (baseline floored at 1).
+  - *Votes*: `tally(options, since)`: a message that is only "1", "2" or "3"
+    (`VOTE_RE`, trailing `.`/`!`/`)` allowed) counts; **one vote per chatter, the
+    latest since `since` wins**; choices above the card's option count are
+    ignored; `options` is capped at 3 and under 2 gives `[]`.
+  - *Questions*: `looks_like_question()`: not a vote and not a `!command`; a
+    `?` anywhere, or (three or more words) a Hindi question word anywhere
+    (`HINDI_QUESTION_RE`: kya, kab, kaun, kyu, kyun, kaise, kitne, kitna,
+    kahan, kidhar), or a start of `QUESTION_WORDS` (how, what, can you...).
+    `questions()` lists the newest 6 not dismissed (`dismiss(id)` is
+    per-session memory).
+  - *Repeat asks*: `repeats()`: messages of at most 60 characters in the last
+    `REPEAT_WINDOW_SECONDS` = 20 min, normalised (case, punctuation, spacing
+    folded), not votes, said by at least `REPEAT_MIN_CHATTERS` = 3 **distinct
+    chatters**; most-chatters first, 5 at most.
+  - *Newcomers*: a chatter first seen since the feed started
+    (`count_newcomer=False` remembers someone without listing them).
+  - `snapshot()` = `{rate, spark, quiet, quietAlert, spike, total, chatters,
+    questions, repeats, newcomers, recent}`.
+- **`KickPoller`** is a daemon `threading.Thread` (named `kick-chat`). Its stop
+  flag is `_halt`, not `_stop`, because `Thread` owns `_stop`. It resolves
+  `https://kick.com/api/v2/channels/<name>` once (needs an integer `id`, else
+  "No Kick channel called ..."), then every `interval` seconds GETs
+  `/api/v2/channels/<id>/messages?cursor=<now in microseconds + 5 s>`, which
+  returns the 25 messages before that moment, newest first. Requests use
+  `curl_cffi` browser impersonation (`download.impersonate`, default `chrome`;
+  Kick is behind Cloudflare, same reason as the VOD download) with a 15 s
+  timeout; a missing `curl_cffi` or a non-200 is an error. The **first poll
+  seeds**: messages older than `SEED_WINDOW_SECONDS` = 120 are remembered by id
+  without counting, and nobody seen in it is listed as a newcomer. A failed
+  poll sets `status = "error"` and backs off `BACKOFF` = 3, 6, 12, 30 s (the
+  last repeating) until one succeeds. `status` is `connecting | live | error |
+  stopped`; `state()` adds `channel`, `error` and `last_ok_age`. `parse_message`
+  maps Kick's shape (`sender.username`/`slug`, `content`, `created_at`,
+  badge types) to the feed's. Nothing else in the feed knows about Kick, so a
+  different transport (YouTube chat, say) only has to call `ChatFeed.add`.
+- **Server side** (`app.py`): module globals `_feed` and `_kick` (one feed, one
+  poller per process; state is in memory and gone on restart), `_vote`
+  (`{on, card, since, last}`) and a `brief.json` mtime cache. Routes (mutating
+  ones need `X-ClipBot` as usual): `GET /api/brief/feed` (the view);
+  `POST /api/brief/feed/start` (`{channel}`, falling back to
+  `brief.kick.channel`; 400 unless it matches `^[a-z0-9_-]{2,40}$`; stops any
+  running poller and starts a fresh feed); `POST .../feed/stop`;
+  `POST .../feed/votes` (`{on}`: counting chat on or off, default on);
+  `POST .../feed/dismiss` (`{id}`); `POST .../feed/pin`. The view is
+  `{connection: {status, channel, error, last_ok_age}, votesFromChat,
+  ...snapshot}`, with `status: "off"` when no poller runs.
+  - **`_feed_loop`** (a task created in `_startup`) wakes every second and
+    does nothing while the feed is off. Otherwise: it tracks the card on screen
+    as `(date, seg, item, startedAt)` and, when it changes, restarts the count
+    (`since` = now); with the poller `live`, counting on, the show started
+    (`state.on`) and `brief.options_for(brief, state) >= 2` (the options the
+    card offers: a vote scene, a poll transition, or a docket item with a poll,
+    capped at 3; 0 for the wrong date) it writes `feed.tally(...)` into
+    `state.votes` through `write_state` (a newer `v`) and publishes a `brief`
+    `{state}` event, only when the numbers changed. A dock "reset" (the hand
+    count going back to empty while chat had counts) restarts counting from
+    now. It then publishes `{feed: view}` on the `brief` SSE stream when the
+    view changed (the dock listens via `Live.onFeed`). Errors are logged,
+    never fatal.
+  - **Pin**: `POST .../feed/pin` with a message `id` looks it up in the feed
+    (404 once it has scrolled out or the feed is off) and writes `state.pin =
+    {u, t, id}`; with no `id` it clears the pin. Every overlay draws a pinned
+    message as a **"FROM CHAT" card in place of the segment**
+    (`scenes.js` `pinHTML`/`paintPin`, `overlay.js` `draw()`); **an Ask-the-AI
+    card wins over a pin** when both are set. A new pin plays the `ask` sound
+    (`soundEvents`). The dock shows "On screen: ..." with "Take it down".
+  - **Ask the AI** gains chat context: when the poller is `live`, `POST
+    /api/brief/chat` passes `{rate, recent(6)}` to `briefchat.stream_context(
+    ..., chat=)`, which adds one line (rate and the last six messages). Nothing
+    is added when the feed is off or the connection is down.
+- **Dock panel** (`dock.js` `renderChat`): not connected shows a channel box
+  and Connect (with the unofficial-endpoint warning). Connected shows the pulse
+  (sparkline and messages a minute), a spike alert with a "Clip it" button (the
+  usual clip marker), a quiet alert ("Chat quiet for N min", with a keep-alive
+  beat from the brief's `keep_alive` list), the Questions queue (Ask AI fills
+  the Ask panel and submits it, Pin, dismiss), "Chat keeps asking" chips with
+  counts, "New here" chips, the "Count 1/2 votes from chat" checkbox and
+  Disconnect. While chat is `live` and counting is on, the dock's hand vote
+  buttons are disabled and the heading says "counting from chat" (the reset
+  button stays enabled). A re-render is skipped while the channel box has
+  focus.
+- **Verification status**: tested against a fake transport and a fake HTTP
+  object, and the real endpoint's response shape was checked while the channel
+  was offline. **Not verified on a live stream**: real message volume, whether
+  Kick serves the user's own channel this way while live, rate limiting and
+  Cloudflare behaviour over a long session are all unknown.
+- **Not built**: a lock-and-reveal moment for the winning option with its own
+  sound, auto-advance after a vote, closest-guess counting for guess-the-price,
+  follow/sub/gift alerts (the polling endpoint does not carry them; Kick's
+  webhooks do), YouTube chat, OBS WebSocket automation, and anything that
+  posts to chat. Details and status are in `tools/stream-brief/ROADMAP.md`.
 
 ## Configuration reference (config/settings.json)
 
@@ -2001,12 +2312,21 @@ Sections and the values worth knowing without opening the file:
   about three held in memory in stream mode), `max_retries` (`8`) and
   `stream_container` (`"mp4"`).
 - **`brief`** — `dir` (`""` = `<work_root>/_brief`; env `CLIPBOT_BRIEF_DIR`):
-  where the stream brief's brief.json, live state, markers and feedback live.
+  where the stream brief's brief.json, live state, markers, feedback, `brand/`
+  and `fonts/` live. Nested **`sounds.<event>`** (not in settings.json): `false`,
+  a file name, or `{file, volume}`, see "Look and sounds".
   Nested **`chat.*`** (`briefchat.py`): `provider` (`"auto"`; or `claude-cli`,
   `gemini-cli`, `anthropic`), `model` (`"claude-haiku-5-5"`, anthropic provider
-  only), `effort` (`"low"`, anthropic provider only), `claude_cli` /
+  only), `effort` (`"low"`, anthropic provider only), `search` (`true`; web
+  search default), `search_tool` (`"web_search_20250305"`, anthropic provider
+  only; not in settings.json), `claude_cli` /
   `gemini_cli` (argv lists; not in settings.json, the defaults live in
   `briefchat.py`).
+  Nested **`kick.*`** (live chat feed, `kickchat.py` / `app.py`; both read with
+  a code default, not yet in settings.json): `channel` (`""`; the Kick channel
+  the Connect button falls back to) and `interval_seconds` (`3.0`, floored at
+  1.5). The feed also reads `chat.bots` (names it ignores) and
+  `download.impersonate` (the browser fingerprint `curl_cffi` uses).
 - **`server`** — `host: 127.0.0.1`, `port: 8765` (env `CLIPBOT_SERVER_PORT`,
   handy for a second copy of the dashboard), no auth (see security
   posture above).
@@ -2128,7 +2448,14 @@ Sections and the values worth knowing without opening the file:
 - `tests/test_brief.py` — the stream brief: validation messages, Steam merge,
   `render_page` placeholders and the `</script>` escape, newest-`v`-wins state
   (and a new day replacing yesterday's), marker/feedback validation, and the
-  routes: overlays and dock load without a brief, mutations need `X-ClipBot`.
+  routes: overlays (including `sound`) and dock load without a brief, mutations
+  need `X-ClipBot`. Also the `look` rules, `mute`/`votes` validation, `sounds_map`
+  (a temp library sfx folder: defaults, `false`, string and dict overrides, volume
+  clamp, traversal names skipped), `asset_path`, and the sounds/brand/font routes.
+- `tests/test_scenes_js.py` + `tests/js/scenes.test.js` — `scenes.js` in a Node
+  vm with a stub `window`/`document` (dependency-free, skipped without Node):
+  `soundEvents` per transition, `reduce` for votes/mute/resets, `tallyOf`, and the
+  vote scene's tally bars and leader class.
 - `tests/test_briefchat.py` — the live chat: `parse_answer` shapes, the prompt
   (history cap, question cap), `stream_context` (a guess round's answer never
   appears), provider choice with `shutil.which`/environment patched,
@@ -2136,6 +2463,30 @@ Sections and the values worth knowing without opening the file:
   environment losing `ANTHROPIC_API_KEY`, `ask()` failure paths,
   `_run_anthropic` against a fake `anthropic` module, the `ask`/`askShow`
   state fields, and the chat routes (the worker thread run synchronously).
+- `tests/test_chatfeed.py` — `ChatFeed` with an injected clock: dedupe by id,
+  empty text, bots (case-insensitive), the 600-message cap, newcomers and
+  `count_newcomer=False`, rate/sparkline bins/quiet seconds, the spike rule (a
+  quiet baseline spikes, five messages or steady busy chat does not), `tally`
+  (punctuated digits, one vote per chatter with the latest winning, votes
+  before `since` and choices above the option count ignored, cap of three),
+  `looks_like_question`, question order/dismiss/limit, repeat asks (three
+  distinct chatters needed, case folded, votes/long/old messages excluded) and
+  the quiet alert in `snapshot()`.
+- `tests/test_kickchat.py` — `KickPoller` against a fake http object (no
+  network): `parse_message`, the channel resolved once, the cursor in the
+  request, the first poll marking old messages seen without counting them, no
+  re-adding, a non-200 raising, the interval floor, a poll after `stop()`
+  leaving the status `stopped`, and the run loop through errors, recovery and
+  stop with `BACKOFF` shrunk.
+- `tests/test_brief_feed.py` — `options_for` (vote scene, three-option poll,
+  cap, docket poll, wrong date), `tally` against a card's start, the `pin` field
+  (stored and truncated, `None` clears, bad shapes refused), chat in
+  `stream_context`, and the `/api/brief/feed*` routes with a fake poller class
+  (start validation, restart stops the old one, stop, votes toggle, dismiss,
+  pin write/clear/404, header required, the AI sees chat only while live).
+  The `_feed_loop` task is not run; its parts are tested together instead.
+- `tests/test_brief_soundlink.py` — the sound source ping/status (stale ping
+  reads as not connected) and `sounds/play` (known events only).
 - Run with `python -m unittest discover -s tests` (no `pytest` installed in
   this environment as of this writing; no CI config in this repo either).
   `tests/` is not a package, so `python -m unittest tests.test_x` fails; pass

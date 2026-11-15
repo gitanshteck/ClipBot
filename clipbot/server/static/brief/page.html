@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Teck Stream Brief</title>
+<title>Teck Cue</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Poppins:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -73,8 +73,8 @@ h1, h2, h3 { margin: 0; text-wrap: balance; }
 .seg .st { font: 500 10.5px/1 var(--mono); color: var(--muted); margin-top: 6px; }
 .seg::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--k, var(--line)); }
 .seg.clipbait::before { content: ""; position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--clip); }
-.seg.game { background: repeating-linear-gradient(135deg, var(--panel) 0 8px, #0f1727 8px 16px); }
-.seg.pre { background: repeating-linear-gradient(45deg, var(--panel) 0 6px, #131e33 6px 12px); }
+.seg.game { background: repeating-linear-gradient(135deg, var(--panel) 0 8px, #101215 8px 16px); }
+.seg.pre { background: repeating-linear-gradient(45deg, var(--panel) 0 6px, #14171a 6px 12px); }
 .ruler { position: relative; height: 22px; margin-top: 6px; font: 500 10.5px/1 var(--mono); color: var(--muted); }
 .ruler span { position: absolute; top: 6px; transform: translateX(-50%); white-space: nowrap; }
 .ruler span::before { content: ""; position: absolute; left: 50%; top: -7px; width: 1px; height: 5px; background: var(--line); }
@@ -153,7 +153,7 @@ section { margin-top: 44px; }
 
 .docket { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
 .dk { padding: 0; display: flex; flex-direction: column; overflow: hidden; }
-.dk-face { padding: 16px 16px 14px; background: linear-gradient(135deg, #12223D, #0E1729); border-bottom: 1px solid var(--line); position: relative; }
+.dk-face { padding: 16px 16px 14px; background: linear-gradient(135deg, #17191d, #0E0F11); border-bottom: 1px solid var(--line); position: relative; }
 .dk-face::before { content: ""; position: absolute; left: 0; top: 0; height: 3px; width: 100%; background: var(--accent); }
 .dk-face .bugline { font: 700 10.5px/1 var(--mono); letter-spacing: .12em; color: var(--muted); text-transform: uppercase; display: flex; justify-content: space-between; gap: 8px; }
 .dk-face .bugline b { color: var(--accent); }
@@ -207,7 +207,7 @@ section { margin-top: 44px; }
 .cr .vb::before { content: ""; position: absolute; left: 0; top: -4px; bottom: -4px; width: 1px; background: var(--line); }
 .cr .vl { font: 700 13px/1 var(--mono); text-align: right; }
 .cr:hover .vb i, .cr:focus-visible .vb i { filter: brightness(1.18); }
-.tip { position: absolute; z-index: 5; pointer-events: none; background: #0A1020; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4); opacity: 0; transition: opacity .12s; max-width: 240px; }
+.tip { position: absolute; z-index: 5; pointer-events: none; background: #0A0B0D; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4); opacity: 0; transition: opacity .12s; max-width: 240px; }
 .tip.on { opacity: 1; }
 .tablev summary { cursor: pointer; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
 .tablev table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
@@ -362,7 +362,7 @@ html.clear-bg .wrap { visibility: hidden; }
   var dateLabel = new Date(B.date + "T12:00:00").toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" });
   var preEnd = 0; B.run.forEach(function (s) { if (s.kind === "game") preEnd = s.t; });
   var h = [];
-  h.push('<header class="slate"><div class="mark"><b>T</b>ECK IS LIVE<small>STREAM BRIEF' + (LOCAL ? " · THIS PC" : "") + '</small></div>' +
+  h.push('<header class="slate"><div class="mark"><b>T</b>ECK IS LIVE<small>CUE' + (LOCAL ? " · THIS PC" : "") + '</small></div>' +
     '<div class="slate-meta"><span>' + esc(dateLabel) + '</span><span>Edition <strong>' + esc(B.edition) + '</strong></span>' +
     '<span>Built <strong>' + esc((B.generated_at || "").replace("T", " ").slice(0, 16)) + '</strong></span>' +
     '<span class="live-dot" id="syncDot" title="Saving feedback and markers"><i></i><span id="syncTxt">not saving</span></span></div></header>');
@@ -443,6 +443,7 @@ html.clear-bg .wrap { visibility: hidden; }
     { name: "Game overlay", scene: "Game Scene", path: "/brief/overlay/game", size: "1920 × 1080" },
     { name: "Full scene", scene: "Intro (pre-show, switches)", path: "/brief/overlay/full", size: "1920 × 1080" },
     { name: "Vertical overlay", scene: "Camera Verical", path: "/brief/overlay/vertical", size: "1080 × 1920" },
+    { name: "Sound source", scene: "one always-on scene (tick Control audio via OBS)", path: "/brief/overlay/sound", size: "any, 1 × 1 is fine" },
     { name: "Control dock", scene: "Docks → Custom Browser Docks", path: "/brief/dock", size: "any" }
   ];
   var base = B.local_base || "http://127.0.0.1:8765";
@@ -451,7 +452,7 @@ html.clear-bg .wrap { visibility: hidden; }
     (LOCAL ? "" : '<p class="muted" style="margin:0">These run from the ClipBot dashboard on your PC: start it with <b>python -m clipbot.server</b> and the addresses below work in OBS. No sign-in, no green screen.</p>') +
     '<div class="urls">' + urls.map(function (u) { return '<div class="url"><b>' + esc(u.name) + '</b><code>' + esc(base + u.path) + '</code><button type="button" data-copy="' + esc(base + u.path) + '">copy</button><span class="muted" style="grid-column:1/-1;font-size:12px">Add to ' + esc(u.scene) + ' · ' + esc(u.size) + '</span></div>'; }).join("") + '</div>' +
     '<ol><li>In each scene: <b>+ → Browser</b>, paste the address, set the size shown, leave the background transparent, and put it at the top of the source list.</li>' +
-    '<li>Add the dock once: <b>Docks → Custom Browser Docks</b>, name it Teck Brief, paste the dock address. Press <b>Start</b> there when you go live.</li>' +
+    '<li>Add the dock once: <b>Docks → Custom Browser Docks</b>, name it Teck Cue, paste the dock address. Press <b>Start</b> there when you go live.</li>' +
     '<li>The overlays stay invisible until you press Start, and follow whatever you press in the dock. Tomorrow\'s brief loads by itself.</li></ol>' +
     '<div class="keys"><span><kbd>→ ←</kbd>segment</span><span><kbd>↓ ↑</kbd>item or round</span><span><kbd>R</kbd>reveal answer</span><span><kbd>C</kbd>clip marker</span><span><kbd>K D</kbd>kill / death (shift −1)</span><span><kbd>L</kbd>lower third only</span><span><kbd>Space</kbd>pause timer</span><span><kbd>G</kbd>safe-area guides (preview)</span></div></div></section>');
 
@@ -469,6 +470,7 @@ html.clear-bg .wrap { visibility: hidden; }
         (d.angle ? '<p class="angle">Your angle: ' + esc(d.angle) + '</p>' : "") +
         '<p class="risk">Careful: ' + esc(d.risk) + '</p>' +
         '<div class="src"><span>' + esc(d.source) + ' · ' + esc(d.date) + '</span>' + (d.url ? '<a href="' + esc(d.url) + '" target="_blank" rel="noopener">Open source ↗</a>' : "") + '</div>' +
+        ((d.links || []).length ? '<div class="polls">' + d.links.map(function (l) { return '<a class="chip" href="' + esc(l.url) + '" target="_blank" rel="noopener">' + esc(l.kind === "trailer" || l.kind === "video" ? "▶ " : "↗ ") + esc(l.label) + '</a>'; }).join("") + '</div>' : "") +
         fb("docket", d.id, d.card || d.headline) + '</div></article>');
     });
     h.push('</div>');
@@ -715,7 +717,7 @@ html.clear-bg .wrap { visibility: hidden; }
   var remote = document.getElementById("remote");
   function renderRemote() {
     var s = B.run[S.seg], items = itemsOf(s), it = items[S.item];
-    remote.innerHTML = '<div class="rm-top"><div class="mark" style="font-size:16px"><b>T</b>ECK REMOTE</div><button type="button" class="btn-sub" data-rm="close">Back to brief</button></div>' +
+    remote.innerHTML = '<div class="rm-top"><div class="mark" style="font-size:16px"><b>T</b>ECK CUE REMOTE</div><button type="button" class="btn-sub" data-rm="close">Back to brief</button></div>' +
       '<div class="card rm-now"><span class="rs">' + esc(KIND[s.kind] || s.kind) + ' · ' + tc(s.t) + (items.length > 1 ? " · " + (S.item + 1) + "/" + items.length : "") + '</span>' +
       '<span class="rt">' + esc(s.screen.title) + '</span>' + (it ? '<span class="ri">' + esc(it.card || it.q || "") + (sceneOf(s) === "guess" && S.reveal ? " → " + esc(it.a) : "") + '</span>' : "") +
       '<span class="rc">' + mmss(elapsedOf(S)) + ' / ' + mmss(s.dur * 60) + (sceneOf(s) === "game" ? " · K " + S.kills + " D " + S.deaths : "") + '</span>' +

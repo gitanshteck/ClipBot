@@ -338,7 +338,8 @@
       "_comment": "Live 'Ask the AI' chat (clipbot/briefchat.py). provider: auto (tries claude-cli, then gemini-cli, then anthropic), or one of claude-cli (Claude Code on your Claude login), gemini-cli, anthropic (API key). model and effort apply to the anthropic provider only. CLI command lines can be overridden with claude_cli / gemini_cli (argv lists); the defaults are in the code.",
       "provider": "auto",
       "model": "claude-haiku-5-5",
-      "effort": "low"
+      "effort": "low",
+      "search": true
     }
   },
   "server": {

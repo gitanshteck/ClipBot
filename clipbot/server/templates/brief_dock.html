@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Teck Brief dock</title>
+  <title>Teck Cue dock</title>
   {# The control panel. Add it in OBS: Docks -> Custom Browser Docks, URL {{ base }}/brief/dock #}
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,15 +13,19 @@
 </head>
 <body data-base="{{ base }}">
   <header class="top">
-    <span class="mark"><b>T</b>ECK BRIEF</span>
+    <span class="mark"><b>T</b>ECK CUE</span>
     <span class="conn" id="conn" title="Connection to the ClipBot dashboard"><i></i><span>connecting</span></span>
+    <span class="conn" id="sndConn" title="Is the OBS sound Browser Source running?"><i></i><span>sound: ?</span></span>
   </header>
+  <section class="chat" id="chat" aria-label="Chat awareness"></section>
+  <section class="aim" id="aim" aria-label="AI jumps in"></section>
   <section class="ask" id="ask" aria-label="Ask the AI">
     <div class="ask-h"><h2>Ask the AI</h2><span class="ask-prov" id="askProv">checking…</span></div>
     <form id="askForm" autocomplete="off">
       <label for="askQ" class="sr">Question</label>
       <textarea id="askQ" rows="2" maxlength="600" placeholder="Ask anything. Enter sends, Shift+Enter for a new line"></textarea>
       <button type="submit" id="askGo">Ask</button>
+      <label class="ask-search" for="askSearch"><input type="checkbox" id="askSearch"><span>Search the web <em>(slower, up to a few seconds)</em></span></label>
     </form>
     <ol class="ask-list" id="askList"></ol>
   </section>
@@ -30,6 +34,12 @@
   </main>
   <footer class="foot">
     <a href="/brief" target="_blank" rel="noopener">Open the full brief</a>
+    <details>
+      <summary>Transition sounds</summary>
+      <ul class="snd" id="sndList"><li class="muted">loading…</li></ul>
+      <p class="muted" id="sndHelp">▶ plays the sound through OBS (the sound source), so you can watch it in the mixer.</p>
+      <p class="muted">Add <code>{{ base }}/brief/overlay/sound</code> as a Browser Source once (any always-on scene), tick "Control audio via OBS", and these play through OBS with their own fader. Change them in settings: brief.sounds.</p>
+    </details>
     <details>
       <summary>Overlay addresses for OBS</summary>
       <ul class="addr">
@@ -42,6 +52,7 @@
   </footer>
   <script src="/static/brief/scenes.js?v={{ ASSET_V }}"></script>
   <script src="/static/brief/live.js?v={{ ASSET_V }}"></script>
+  <script src="/static/brief/sounds.js?v={{ ASSET_V }}"></script>
   <script src="/static/brief/dock.js?v={{ ASSET_V }}"></script>
 </body>
 </html>

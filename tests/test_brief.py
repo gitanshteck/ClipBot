@@ -95,6 +95,23 @@ class TestBriefData(BriefTestCase):
         b["headline"]["why"] = "my visa ends soon"
         self.assertTrue(any("private-looking" in p for p in brief.problems(b)))
 
+    def test_a_valid_look_is_accepted_at_both_levels(self):
+        b = sample_brief(look={"theme": "hud", "tag": "WARZONE"})
+        b["run"][3]["look"] = {"theme": "slash"}
+        b["run"][1]["look"] = {"tag": "x" * 24}
+        self.assertEqual(brief.problems(b), [])
+
+    def test_a_bad_look_is_refused(self):
+        bad_looks = [{"theme": "neon"}, {"theme": "hud", "tag": "x" * 25}, "hud", ["hud"], 3]
+        for look in bad_looks:
+            text = "\n".join(brief.problems(sample_brief(look=look)))
+            self.assertIn("look must be", text, look)
+            self.assertNotIn("run[", text, look)
+            b = sample_brief()
+            b["run"][2]["look"] = look
+            text = "\n".join(brief.problems(b))
+            self.assertIn("run[2].look must be", text, look)
+
     def test_load_brief_merges_steam_players_by_appid(self):
         self.write_brief(ccu={"fetched_at": "now", "games": {"X": {"appid": "10", "players": 1234}}})
         data = brief.load_brief(self.settings)
@@ -149,6 +166,34 @@ class TestLiveState(BriefTestCase):
         self.assertNotIn("extra", stored)
 
 
+    def test_a_state_without_mute_or_votes_gets_defaults(self):
+        incoming = self.state()
+        del incoming["mute"], incoming["votes"]
+        stored = brief.write_state(self.settings, incoming)
+        self.assertIs(stored["mute"], False)
+        self.assertEqual(stored["votes"], [])
+        d = brief.default_state("2026-11-14")
+        self.assertIs(d["mute"], False)
+        self.assertEqual(d["votes"], [])
+
+    def test_mute_is_coerced_to_a_bool(self):
+        stored = brief.write_state(self.settings, self.state(mute=1))
+        self.assertIs(stored["mute"], True)
+        stored = brief.write_state(self.settings, self.state(v=200, mute=""))
+        self.assertIs(stored["mute"], False)
+
+    def test_votes_are_stored(self):
+        stored = brief.write_state(self.settings, self.state(votes=[3, 1]))
+        self.assertEqual(stored["votes"], [3, 1])
+        self.assertEqual(brief.read_state(self.settings, "2026-11-14")["votes"], [3, 1])
+        self.assertEqual(brief.write_state(self.settings, self.state(v=300, votes=[1, 2, 100000]))["votes"], [1, 2, 100000])
+
+    def test_bad_votes_are_refused(self):
+        for bad in ([1, 2, 3, 4], [-1], [1.5], ["2"], [True], [100001], 5, "12", {"a": 1}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                brief.write_state(self.settings, self.state(votes=bad))
+
+
 class TestMarkersAndFeedback(BriefTestCase):
     def test_markers_append_per_day(self):
         brief.add_marker(self.settings, {"date": "2026-11-14", "kind": "segment", "seg_id": "react", "label": "news"})
@@ -177,6 +222,112 @@ class TestMarkersAndFeedback(BriefTestCase):
             brief.set_feedback(self.settings, {"date": "2026-11-14", "kind": "docket", "target": "d1", "reaction": "love"})
         with self.assertRaises(ValueError):
             brief.set_feedback(self.settings, {"date": "2026-11-14", "kind": "weather", "target": "d1", "reaction": "more"})
+
+
+class TestSounds(BriefTestCase):
+    def sfx(self, *names):
+        folder = self.work / "_library" / "sfx"
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (folder / name).write_bytes(b"RIFFdummy")
+
+    def with_sounds(self, sounds):
+        return Settings({"work_root": str(self.work), "brief": {"sounds": sounds}}, Path("settings.json"))
+
+    def test_a_default_file_in_the_sfx_folder_makes_its_event(self):
+        self.sfx("powerup.ogg")
+        sounds = brief.sounds_map(self.settings)
+        self.assertEqual(list(sounds), ["start"])
+        self.assertEqual(sounds["start"]["url"], "/media/library/sfx/powerup.ogg")
+        self.assertEqual(sounds["start"]["file"], "powerup.ogg")
+        self.assertEqual(sounds["start"]["volume"], 0.7)
+
+    def test_events_whose_file_is_missing_are_skipped(self):
+        self.assertEqual(brief.sounds_map(self.settings), {})
+        self.sfx("powerup.ogg", "confirm.ogg")
+        self.assertEqual(sorted(brief.sounds_map(self.settings)), ["clip", "start"])
+
+    def test_a_setting_of_false_removes_an_event(self):
+        self.sfx("powerup.ogg", "confirm.ogg")
+        sounds = brief.sounds_map(self.with_sounds({"clip": False}))
+        self.assertEqual(sorted(sounds), ["start"])
+
+    def test_a_string_setting_picks_another_file(self):
+        self.sfx("impact_punch.ogg", "other.ogg")
+        sounds = brief.sounds_map(self.with_sounds({"kill": "other.ogg"}))
+        self.assertEqual(sounds["kill"]["file"], "other.ogg")
+        self.assertEqual(sounds["kill"]["url"], "/media/library/sfx/other.ogg")
+        self.assertEqual(sounds["kill"]["volume"], 0.5)   # the default's volume is kept
+
+    def test_a_dict_setting_picks_file_and_volume_and_clamps_it(self):
+        self.sfx("other.ogg")
+        sounds = brief.sounds_map(self.with_sounds({"kill": {"file": "other.ogg", "volume": 5}, "death": {"file": "other.ogg", "volume": -2}}))
+        self.assertEqual(sounds["kill"]["volume"], 1.0)
+        self.assertEqual(sounds["death"]["volume"], 0.0)
+
+    def test_a_bad_volume_type_falls_back_to_point_six(self):
+        self.sfx("other.ogg")
+        for bad in ("loud", None, True, [1]):
+            sounds = brief.sounds_map(self.with_sounds({"kill": {"file": "other.ogg", "volume": bad}}))
+            self.assertEqual(sounds["kill"]["volume"], 0.6, repr(bad))
+
+    def test_names_that_leave_the_folder_are_skipped(self):
+        self.sfx("powerup.ogg")
+        (self.work / "_library" / "secret.ogg").write_bytes(b"x")
+        for bad in ("../secret.ogg", "..\\secret.ogg", "sub\\x.ogg", "/etc/passwd"):
+            sounds = brief.sounds_map(self.with_sounds({"kill": bad}))
+            self.assertNotIn("kill", sounds, bad)
+            self.assertIn("start", sounds)
+
+    def test_a_name_with_odd_characters_is_url_quoted(self):
+        self.sfx("my sound.ogg")
+        sounds = brief.sounds_map(self.with_sounds({"kill": "my sound.ogg"}))
+        self.assertEqual(sounds["kill"]["url"], "/media/library/sfx/my%20sound.ogg")
+
+
+class TestAssetPath(BriefTestCase):
+    def put(self, kind, name, data=b"data"):
+        folder = self.dir / kind
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(data)
+        return folder / name
+
+    def test_valid_brand_and_font_files_resolve(self):
+        logo = self.put("brand", "lockup.png")
+        font = self.put("fonts", "BigJohn.otf")
+        self.assertEqual(brief.asset_path(self.settings, "brand", "lockup.png"), logo)
+        self.assertEqual(brief.asset_path(self.settings, "fonts", "BigJohn.otf"), font)
+        for name in ("a.woff2", "a.woff", "a.ttf"):
+            self.put("fonts", name)
+            self.assertIsNotNone(brief.asset_path(self.settings, "fonts", name))
+        for name in ("a.svg", "a.webp", "a.jpg"):
+            self.put("brand", name)
+            self.assertIsNotNone(brief.asset_path(self.settings, "brand", name))
+
+    def test_a_missing_file_is_none(self):
+        self.assertIsNone(brief.asset_path(self.settings, "brand", "lockup.png"))
+        self.assertIsNone(brief.asset_path(self.settings, "fonts", "BigJohn.otf"))
+
+    def test_traversal_names_are_none(self):
+        self.put("brand", "lockup.png")
+        (self.dir / "secret.png").write_bytes(b"x")
+        for bad in ("../secret.png", "..\\secret.png", "/secret.png", "sub/lockup.png", "..", ""):
+            self.assertIsNone(brief.asset_path(self.settings, "brand", bad), bad)
+
+    def test_a_wrong_extension_is_none(self):
+        self.put("brand", "lockup.exe")
+        self.put("fonts", "BigJohn.png")
+        self.put("brand", "lockup.otf")
+        self.assertIsNone(brief.asset_path(self.settings, "brand", "lockup.exe"))
+        self.assertIsNone(brief.asset_path(self.settings, "fonts", "BigJohn.png"))
+        self.assertIsNone(brief.asset_path(self.settings, "brand", "lockup.otf"))
+
+    def test_the_wrong_kind_is_none(self):
+        self.put("brand", "lockup.png")
+        self.put("fonts", "BigJohn.otf")
+        self.assertIsNone(brief.asset_path(self.settings, "fonts", "lockup.png"))
+        self.assertIsNone(brief.asset_path(self.settings, "brand", "BigJohn.otf"))
+        self.assertIsNone(brief.asset_path(self.settings, "other", "lockup.png"))
 
 
 @unittest.skipIf(TestClient is None, "server dependencies not installed")
@@ -210,6 +361,59 @@ class TestBriefRoutes(BriefTestCase):
         self.assertEqual(self.client.get("/brief/overlay/sideways").status_code, 404)
         self.assertEqual(self.client.get("/brief/overlay/chat?bg=pink").status_code, 400)
         self.assertIn("/brief/overlay/game", self.client.get("/brief/dock").text)
+
+    def test_sound_overlay_renders_and_the_dock_lists_it(self):
+        self.write_brief()
+        r = self.client.get("/brief/overlay/sound")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('data-frame="sound"', r.text)
+        dock = self.client.get("/brief/dock").text
+        self.assertIn("http://127.0.0.1:8765/brief/overlay/sound", dock)
+
+    def test_sounds_route_returns_the_map(self):
+        r = self.client.get("/api/brief/sounds")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"sounds": {}})
+        folder = self.work / "_library" / "sfx"
+        folder.mkdir(parents=True)
+        (folder / "powerup.ogg").write_bytes(b"x")
+        sounds = self.client.get("/api/brief/sounds").json()["sounds"]
+        self.assertEqual(sounds["start"]["url"], "/media/library/sfx/powerup.ogg")
+        self.assertEqual(sorted(sounds), ["start"])
+
+    def test_brand_route_serves_the_lockup_or_404s(self):
+        self.assertEqual(self.client.get("/brief/brand/lockup.png").status_code, 404)
+        folder = self.dir / "brand"
+        folder.mkdir(parents=True)
+        payload = b"\x89PNG\r\n\x1a\nlockup-bytes"
+        (folder / "lockup.png").write_bytes(payload)
+        r = self.client.get("/brief/brand/lockup.png")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, payload)
+        self.assertEqual(self.client.get("/brief/brand/nope.png").status_code, 404)
+        self.assertEqual(self.client.get("/brief/brand/lockup.exe").status_code, 404)
+
+    def test_font_route_serves_the_font_or_404s(self):
+        self.assertEqual(self.client.get("/brief/font/BigJohn.otf").status_code, 404)
+        folder = self.dir / "fonts"
+        folder.mkdir(parents=True)
+        payload = b"OTTOfont-bytes"
+        (folder / "BigJohn.otf").write_bytes(payload)
+        r = self.client.get("/brief/font/BigJohn.otf")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, payload)
+        self.assertEqual(self.client.get("/brief/font/BigJohn.woff2").status_code, 404)
+
+    def test_state_keeps_mute_and_votes_over_the_wire(self):
+        self.write_brief()
+        st = brief.default_state("2026-11-14")
+        st.update({"v": 50, "on": True, "mute": True, "votes": [3, 1]})
+        self.assertEqual(self.client.put("/api/brief/state", json=st, headers=HEADERS).status_code, 200)
+        got = self.client.get("/api/brief/state").json()
+        self.assertIs(got["mute"], True)
+        self.assertEqual(got["votes"], [3, 1])
+        bad = dict(st, v=60, votes=[1, 2, 3, 4])
+        self.assertEqual(self.client.put("/api/brief/state", json=bad, headers=HEADERS).status_code, 400)
 
     def test_state_needs_the_header_and_keeps_the_newest(self):
         self.write_brief()

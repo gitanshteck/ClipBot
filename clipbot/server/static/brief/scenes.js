@@ -28,13 +28,42 @@
     if (sceneOf(s) === "guess") return s.rounds || [];
     return (s.items || []).map(function (id) { return docketById[id]; }).filter(Boolean);
   }
+  // What the dock offers to open for the card on screen: the item's own links, then its source
+  // article, then links on the segment itself. De-duplicated by URL, six at most.
+  var LINK_ICON = { trailer: "▶", video: "▶", official: "★", article: "↗", post: "↗", source: "↗" };
+  function linksOf(seg, it) {
+    var out = [], seen = {};
+    function add(l, fallbackKind) {
+      if (!l || !l.url || seen[l.url]) return;
+      seen[l.url] = true;
+      var kind = LINK_ICON[l.kind] ? l.kind : (fallbackKind || "article");
+      out.push({ label: l.label || l.url, url: l.url, kind: kind, icon: LINK_ICON[kind] });
+    }
+    if (it) {
+      (it.links || []).forEach(function (l) { add(l); });
+      if (it.url) add({ label: (it.source || "Source"), url: it.url, kind: "source" });
+    }
+    (seg && seg.links || []).forEach(function (l) { add(l); });
+    return out.slice(0, 6);
+  }
   function elapsedOf(st) {
     if (!st.startedAt) return 0;
     var now = st.pausedAt || Date.now();
     return Math.max(0, (now - st.startedAt - (st.pausedTotal || 0)) / 1000);
   }
 
+  // The card shape (clean | hud | slash) and an optional game tag come from the brief, with the segment able to override.
+  function lookOf(s) { return Object.assign({ theme: "clean", tag: "" }, B.look || {}, (s && s.look) || {}); }
+  // "Type 1 or 2" cards show live tallies when the state carries votes (typed in chat, or counted by hand in the dock).
+  function tallyOf(st, i) {
+    var v = (st && st.votes) || [];
+    if (!v.length) return null;
+    var total = v.reduce(function (a, b) { return a + (b || 0); }, 0);
+    return { n: v[i] || 0, pct: total ? Math.round((v[i] || 0) / total * 100) : 0, lead: total > 0 && (v[i] || 0) === Math.max.apply(null, v) };
+  }
+
   function sceneHTML(s, st) {
+    var lk = lookOf(s);
     var type = sceneOf(s), items = itemsOf(s), idx = Math.min(st.item || 0, Math.max(0, items.length - 1)), it = items[idx];
     var kicker = esc(KIND[s.kind] || s.kind) + (type === "topic" && s.screen ? " · " + esc(s.screen.title) : "");
     var count = items.length > 1 ? (idx + 1) + " / " + items.length : "";
@@ -53,7 +82,11 @@
       title = it.q; sub = "";
       body = st.reveal ? '<div class="reveal">' + esc(it.a) + (it.note ? '<small>' + esc(it.note) + '</small>' : "") + '</div>' : '<div class="locked">GUESSES OPEN · TYPE IT IN CHAT</div>';
     } else if (type === "vote") {
-      body = '<div class="opts">' + (s.poll || []).map(function (o, i) { return '<div class="opt"><span class="n">' + (i + 1) + '</span>' + esc(o) + '</div>'; }).join("") + '</div>' +
+      body = '<div class="opts">' + (s.poll || []).map(function (o, i) {
+        var t = tallyOf(st, i);
+        return '<div class="opt' + (t && t.lead ? " lead" : "") + '"><span class="n">' + (i + 1) + '</span><span class="ot">' + esc(o) + '</span>' +
+          (t ? '<span class="vt"><i style="width:' + t.pct + '%"></i></span><span class="vn">' + t.n + '</span>' : "") + '</div>';
+      }).join("") + '</div>' +
         (s.rule ? '<div class="rule"><b>TONIGHT\'S RULE</b>' + esc(s.rule) + '</div>' : "");
       prompt = "type 1 or 2";
     } else if (type === "game") {
@@ -63,12 +96,12 @@
     } else if (s.poll) {
       opts = s.poll;
     }
-    var html = '<div class="oc"><div class="bug"><span class="tk"><b>T</b>ECK</span><span>' + kicker + '</span>' + (count ? '<span class="ct-n">' + count + '</span>' : "") + '</div>' +
+    var html = '<div class="oc"><div class="bug">' + markHTML() + '<span>' + kicker + '</span>' + (lk.tag ? '<span class="gt">' + esc(lk.tag) + '</span>' : "") + (count ? '<span class="ct-n">' + count + '</span>' : "") + '</div>' +
       '<h2 class="tt">' + esc(title) + '</h2>' + (sub ? '<p class="st">' + esc(sub) + '</p>' : "") + body + credit +
       (prompt ? '<div class="pr"><b>CHAT</b>' + esc(prompt) + '</div>' : "") + '</div>';
     if (prompt) {
       html += '<div class="l3"><span class="lk">CHAT</span><span class="lt">' + esc(prompt) +
-        (opts ? opts.map(function (o, i) { return '<span class="o"><b>' + (i + 1) + '</b>' + esc(o) + '</span>'; }).join("") : "") + '</span></div>';
+        (opts ? opts.map(function (o, i) { var t = tallyOf(st, i); return '<span class="o' + (t && t.lead ? " lead" : "") + '"><b>' + (i + 1) + '</b>' + esc(o) + (t ? ' <em>' + t.n + '</em>' : "") + '</span>'; }).join("") : "") + '</span></div>';
     }
     return { html: html, type: type };
   }
@@ -91,33 +124,97 @@
   function paintStage(el, s, st, look) {
     var lay = layoutFor(look);
     var sc = sceneHTML(s, st);
-    el.className = "stage" + (lay === "vertical" ? " vert" : "") + " bg-" + (look.bg || "clear") + " lay-" + lay + " s-" + sc.type +
+    el.className = "stage" + (lay === "vertical" ? " vert" : "") + " bg-" + (look.bg || "clear") + " lay-" + lay + " th-" + lk2(s) + " s-" + sc.type +
       (st.l3only ? " l3only" : "") + (look.guides ? " show-guides" : "");
     el.innerHTML = (look.mock || "") + sc.html + guidesHTML(lay);
     return lay;
   }
 
+  function lk2(s) { return lookOf(s).theme; }
+  // Brand lockup if <brief dir>/brand/lockup.png exists (served at /brief/brand/lockup.png), else the text mark.
+  function markHTML() {
+    return '<span class="tk"><img class="wm" src="/brief/brand/lockup.png" alt="TECK"><span class="txt"><b>T</b>ECK</span></span>';
+  }
+  document.addEventListener("error", function (e) {
+    var t = e.target;
+    if (t && t.classList && t.classList.contains("wm") && t.parentNode) t.parentNode.classList.add("nowm");
+  }, true);
+
   function defaultState(date) {
-    return { v: 0, on: false, seg: 0, item: 0, reveal: false, kills: 0, deaths: 0, startedAt: 0, pausedAt: 0, pausedTotal: 0, bg: "brand", lay: "h", l3only: false, ask: "", askShow: false, date: date || B.date };
+    return { v: 0, on: false, seg: 0, item: 0, reveal: false, kills: 0, deaths: 0, startedAt: 0, pausedAt: 0, pausedTotal: 0, bg: "brand", lay: "h", l3only: false, ask: "", askShow: false, mute: false, votes: [], pin: null, date: date || B.date };
   }
 
   // The live-chat answer card: the question as the kicker, the one-breath answer big,
   // up to three riff points, an honest "AI answer" tag. Types out while it streams.
   function askHTML(c) {
-    var head = c.head || (c.done ? "" : "thinking…");
+    var head = c.head || (c.done ? "" : (c.searching ? "searching the web…" : "thinking…"));
+    var srcs = (c.sources || []).map(function (x) { return esc(x.host); }).join(" · ");
     var pts = (c.points || []).map(function (p) { return "<li>" + esc(p) + "</li>"; }).join("");
-    var html = '<div class="oc oc-ask"><div class="bug"><span class="tk"><b>T</b>ECK</span><span>ASKED THE AI</span><span class="ai-tag">AI · CAN BE WRONG</span></div>' +
+    var html = '<div class="oc oc-ask"><div class="bug">' + markHTML() + '<span>ASKED THE AI</span><span class="ai-tag">AI · CAN BE WRONG</span></div>' +
       '<p class="aq">“' + esc(c.q) + '”</p>' +
-      '<h2 class="tt at' + (head.length > 150 ? " xlong" : head.length > 85 ? " long" : "") + '">' + esc(head) + (c.done ? "" : '<span class="caret"></span>') + '</h2>' +
+      '<h2 class="tt at">' + esc(head) + (c.done ? "" : '<span class="caret"></span>') + '</h2>' +
       (pts ? '<ul class="ap">' + pts + '</ul>' : "") +
+      (srcs && c.done ? '<div class="credit">via <b>' + srcs + '</b></div>' : "") +
       '<div class="pr"><b>CHAT</b>agree? tell me in chat</div></div>';
-    html += '<div class="l3"><span class="lk">ASKED</span><span class="lt">' + esc(c.q) + '</span></div>';
+    html += '<div class="l3 l3-ask"><span class="lk">ASKED</span><span class="lt">' + esc(c.q) + '</span></div>';
     return html;
+  }
+  // Fit the answer card to the room its frame leaves it (--ask-h on the card, set per layout in
+  // scenes.css) instead of guessing from text length. Every size in the card is calc(Npx * var(--k)),
+  // so one number scales it all: find the largest k in [ASK_KMIN, 1] whose card fits. Last resorts,
+  // in order: clamp the riff points to two lines, drop riff points from the end, shrink further and
+  // clamp the headline. While an answer types out the text only grows, so k never goes back up for
+  // the same answer (no size flicker on stream).
+  var ASK_KMIN = 0.4;
+  function fitAsk(stage, id) {
+    var card = stage && typeof stage.querySelector === "function" && stage.querySelector(".oc-ask");
+    if (!card || !card.offsetHeight || typeof window.getComputedStyle !== "function") return;
+    var lim = parseFloat(window.getComputedStyle(card).getPropertyValue("--ask-h")) || 400;
+    card.style.maxHeight = "none";
+    var over = function (k) { card.style.setProperty("--k", String(k)); return card.offsetHeight > lim; };
+    var hi = (stage._askId === id && stage._askK) ? stage._askK : 1, lo = ASK_KMIN, k = hi;
+    if (over(hi)) {
+      if (!over(lo)) {
+        for (var i = 0; i < 9; i++) { var mid = (lo + hi) / 2; if (over(mid)) hi = mid; else lo = mid; }
+        k = lo;
+      } else {
+        k = lo;
+        card.classList.add("tight");
+        var lis = card.querySelectorAll(".ap li"), n = lis.length;
+        while (over(k) && n > 0) lis[--n].style.display = "none";
+        if (over(k)) { k = 0.34; card.classList.add("clip"); over(k); }
+      }
+    }
+    card.style.setProperty("--k", String(k));
+    card.style.maxHeight = "";
+    stage._askId = id; stage._askK = k;
+  }
+  // Web fonts change the text metrics when they arrive: fit again from scratch.
+  function refitAsks() {
+    if (typeof document.querySelectorAll !== "function") return;
+    var all = document.querySelectorAll(".stage");
+    for (var i = 0; i < all.length; i++) { var st = all[i], id = st._askId; st._askK = 0; if (st.querySelector(".oc-ask")) fitAsk(st, id); }
+  }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(refitAsks);
+    if (document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", refitAsks);
+  }
+  // A chat message pinned to the screen from the dock.
+  function pinHTML(p) {
+    return '<div class="oc oc-pin"><div class="bug">' + markHTML() + '<span>FROM CHAT</span></div>' +
+      '<p class="pm">“' + esc(p.t) + '”</p><p class="pu">' + esc(p.u) + '</p></div>';
+  }
+  function paintPin(el, p, look) {
+    var lay = layoutFor(look);
+    el.className = "stage" + (lay === "vertical" ? " vert" : "") + " bg-" + (look.bg || "clear") + " lay-" + lay + " th-" + lk2(null) + " s-pin" + (look.guides ? " show-guides" : "");
+    el.innerHTML = (look.mock || "") + pinHTML(p) + guidesHTML(lay);
+    return lay;
   }
   function paintAsk(el, c, look) {
     var lay = layoutFor(look);
-    el.className = "stage" + (lay === "vertical" ? " vert" : "") + " bg-" + (look.bg || "clear") + " lay-" + lay + " s-ask" + (look.guides ? " show-guides" : "");
+    el.className = "stage" + (lay === "vertical" ? " vert" : "") + " bg-" + (look.bg || "clear") + " lay-" + lay + " th-" + lk2(null) + " s-ask" + (look.guides ? " show-guides" : "");
     el.innerHTML = (look.mock || "") + askHTML(c) + guidesHTML(lay);
+    fitAsk(el, c.id);
     return lay;
   }
   // Apply one control to a copy of the state. Returns {state, segChanged, clip} or null when nothing changes.
@@ -126,15 +223,16 @@
     var goSeg = function (to) {
       to = Math.max(0, Math.min(B.run.length - 1, to));
       if (to === s.seg && s.startedAt) return false;
-      s.seg = to; s.item = 0; s.reveal = false; s.startedAt = now; s.pausedAt = 0; s.pausedTotal = 0;
+      s.seg = to; s.item = 0; s.reveal = false; s.votes = []; s.startedAt = now; s.pausedAt = 0; s.pausedTotal = 0;
+      s.askShow = false;   // an AI answer belongs to the card it was shown over: a new segment takes it down
       return true;
     };
     if (a === "next") { if (s.seg >= B.run.length - 1) return null; segChanged = goSeg(s.seg + 1); }
     else if (a === "prev") { if (s.seg <= 0) return null; segChanged = goSeg(s.seg - 1); }
     else if (a.indexOf("goto:") === 0) { segChanged = goSeg(parseInt(a.slice(5), 10) || 0); if (!segChanged) return null; }
     else if (a === "start") { s.on = true; s.date = B.date; s.kills = 0; s.deaths = 0; s.startedAt = 0; segChanged = goSeg(0); }
-    else if (a === "stop") { s.on = false; }
-    else if (a === "item" || a === "itemup") { if (n < 2) return null; s.item = (s.item + (a === "item" ? 1 : -1) + n) % n; s.reveal = false; }
+    else if (a === "stop") { s.on = false; s.askShow = false; }
+    else if (a === "item" || a === "itemup") { if (n < 2) return null; s.item = (s.item + (a === "item" ? 1 : -1) + n) % n; s.reveal = false; s.votes = []; s.askShow = false; }
     else if (a === "reveal") { s.reveal = !s.reveal; }
     else if (a === "kill") { s.kills = Math.max(0, s.kills + (shift ? -1 : 1)); }
     else if (a === "death") { s.deaths = Math.max(0, s.deaths + (shift ? -1 : 1)); }
@@ -145,10 +243,31 @@
     else if (a === "clip") { return { state: S, segChanged: false, clip: true }; }
     else if (a.indexOf("ask:") === 0) { s.ask = a.slice(4); s.askShow = true; }
     else if (a === "askhide") { s.askShow = false; }
+    else if (a === "mute") { s.mute = !s.mute; }
+    else if (/^vote[1-3]$/.test(a)) { var vi = parseInt(a.slice(4), 10) - 1; s.votes = (s.votes || []).slice(); while (s.votes.length < 2) s.votes.push(0); while (s.votes.length <= vi) s.votes.push(0); s.votes[vi] = Math.max(0, s.votes[vi] + (shift ? -1 : 1)); }
+    else if (a === "votesreset") { s.votes = []; }
     else return null;
     s.date = B.date;
     s.v = Math.max(now, (S.v || 0) + 1);
     return { state: s, segChanged: segChanged, clip: false };
+  }
+  // Which transition sounds a state change should trigger (none on first load or a new day).
+  function soundEvents(prev, next) {
+    var ev = [];
+    if (!prev || !next || prev.date !== next.date) return ev;
+    if (!prev.on && next.on) return ["start"];
+    if (!next.on) return ev;
+    if (prev.seg !== next.seg) {
+      ev.push("segment");
+      var seg = B.run[next.seg];
+      if (seg && sceneOf(seg) === "vote") ev.push("vote");
+    } else if (prev.item !== next.item || prev.l3only !== next.l3only) ev.push("card");
+    if (!prev.reveal && next.reveal) ev.push("reveal");
+    if ((!prev.askShow && next.askShow) || (next.askShow && prev.ask !== next.ask)) ev.push("ask");
+    if (next.pin && (!prev.pin || prev.pin.id !== next.pin.id)) ev.push("ask");   // a pinned chat message uses the answer sound
+    if ((next.kills || 0) > (prev.kills || 0)) ev.push("kill");
+    if ((next.deaths || 0) > (prev.deaths || 0)) ev.push("death");
+    return ev;
   }
   function markerDoc(S, kind) {
     var seg = B.run[S.seg] || B.run[0], it = itemsOf(seg)[S.item];
@@ -156,8 +275,8 @@
   }
 
   root.BriefScenes = {
-    init: init, esc: esc, tc: tc, mmss: mmss, KIND: KIND,
-    sceneOf: sceneOf, itemsOf: itemsOf, elapsedOf: elapsedOf, sceneHTML: sceneHTML, guidesHTML: guidesHTML,
-    layoutFor: layoutFor, paintStage: paintStage, askHTML: askHTML, paintAsk: paintAsk, defaultState: defaultState, reduce: reduce, markerDoc: markerDoc
+    init: init, markHTML: markHTML, esc: esc, tc: tc, mmss: mmss, KIND: KIND,
+    sceneOf: sceneOf, itemsOf: itemsOf, linksOf: linksOf, elapsedOf: elapsedOf, sceneHTML: sceneHTML, guidesHTML: guidesHTML,
+    lookOf: lookOf, tallyOf: tallyOf, soundEvents: soundEvents, layoutFor: layoutFor, paintStage: paintStage, askHTML: askHTML, paintAsk: paintAsk, pinHTML: pinHTML, paintPin: paintPin, defaultState: defaultState, reduce: reduce, markerDoc: markerDoc
   };
 })(window);
