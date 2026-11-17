@@ -84,10 +84,22 @@ def _workspace(settings: Settings, name: str) -> Workspace:
 def cmd_killfeed_scan(args: argparse.Namespace, settings: Settings) -> int:
     ws = _workspace(settings, args.workspace)
     path = killfeed_stage.scan_killfeed(ws, settings, player=args.player, force=args.force, keep_video=args.keep_video,
-                                        progress=_console_progress())
+                                        progress=_console_progress(), game=args.game, first=args.first, last=args.last,
+                                        text=not args.no_text)
     data = json.loads(path.read_text(encoding="utf-8"))
-    print("{0}: {1} kill(s), {2} grenade, {3} headshot ({4})".format(
-        path, data["kills"], data["nades"], data["headshots"], data["player"]))
+    print("{0}: {1} kill(s), {2} grenade, {3} headshot ({4}, {5})".format(
+        path, data["kills"], data["nades"], data["headshots"], data["player"], data.get("game", "wardogs")))
+    return 0
+
+
+def cmd_killfeed_text(args: argparse.Namespace, settings: Settings) -> int:
+    ws = _workspace(settings, args.workspace)
+    path = killfeed_stage.read_popup_text(ws, settings, video=args.video, progress=_console_progress())
+    data = json.loads(path.read_text(encoding="utf-8"))
+    pt = data["popup_text"]
+    print("{0}: {1} line(s); {2} of {3} kill(s) have a kind, {4} have no text".format(
+        path, pt["lines"], pt["kills_with_kind"], data["kills"], pt["kills_with_no_text"]))
+    print("  " + ", ".join("{0} x{1}".format(k, v) for k, v in pt["phrases"].items()))
     return 0
 
 
@@ -97,9 +109,14 @@ def cmd_killfeed_list(args: argparse.Namespace, settings: Settings) -> int:
     if data is None:
         raise StageError("{0} has no killfeed.json; run: clipbot killfeed scan --workspace {0}".format(args.workspace))
     for e in data["events"]:
-        print("{0}  {1:>9.1f}s  {2:>5}  {3:<8}{4}{5}  {6}".format(
+        pop = e.get("popup")
+        said = ""
+        if pop:   # mw4: what the game printed for this kill
+            said = "  [{0}]".format("; ".join(([pop["kind"]] if pop.get("kind") else []) + pop.get("medals", []) + pop.get("situations", [])
+                                              + pop.get("objective", []) + ([pop["multi"]] if pop.get("multi") else [])))
+        print("{0}  {1:>9.1f}s  {2:>5}  {3:<8}{4}{5}  {6}{7}".format(
             e["id"], e["t"], "{0:.0f}m".format(e["dist_m"]) if e.get("dist_m") is not None else "?", e["weapon"],
-            " headshot" if e.get("headshot") else "", " through-cover" if e.get("through_cover") else "", e.get("victim") or ""))
+            " headshot" if e.get("headshot") else "", " through-cover" if e.get("through_cover") else "", e.get("victim") or "", said))
     return 0
 
 
@@ -1008,9 +1025,18 @@ def add_parsers(sub: Any) -> None:
     p = kf.add_parser("scan", help="OCR the kill feed and write killfeed.json (Windows OCR; ~1 s of work per 15 s of video)")
     p.add_argument("--workspace", required=True, help="workspace slug or path")
     p.add_argument("--player", help="in-game name (default killfeed.player)")
+    p.add_argument("--game", choices=list(killfeed_stage.GAMES),
+                   help="which game's HUD to read (default killfeed.game, wardogs): mw4 = Call of Duty: Modern Warfare 4")
+    p.add_argument("--first", type=float, help="scan only from this video second")
+    p.add_argument("--last", type=float, help="scan only up to this video second")
     p.add_argument("--force", action="store_true", help="re-scan even if killfeed.json exists")
     p.add_argument("--keep-video", action="store_true", help="YouTube: keep the scratch video track")
+    p.add_argument("--no-text", action="store_true", help="mw4: skip reading what each kill's popup says (HEADSHOT KILL, medals)")
     p.set_defaults(func=cmd_killfeed_scan)
+    p = kf.add_parser("text", help="mw4: (re)read what each kill's popup says (kind, medals) into killfeed.json, no rescan (~1 min)")
+    p.add_argument("--workspace", required=True, help="workspace slug or path")
+    p.add_argument("--video", type=Path, help="a video file to read (default: the workspace's)")
+    p.set_defaults(func=cmd_killfeed_text)
     p = kf.add_parser("list", help="print the kills in killfeed.json")
     p.add_argument("--workspace", required=True)
     p.set_defaults(func=cmd_killfeed_list)

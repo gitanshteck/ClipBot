@@ -17,6 +17,20 @@ export const C = {
   grid: 'rgba(255,255,255,0.045)',
 };
 
+// The look of TECK HIGHLIGHTS (the `hl` look): a gaming-channel reel rather than a debrief. Near-black ink, the
+// channel's cyan (his facecam border), white type, a hot red for a headshot and gold for the game's own medals.
+export const H = {
+  ink: '#06080C',
+  panel: 'rgba(7,10,15,0.88)',
+  cyan: '#35D0FF',
+  cyanSoft: 'rgba(53,208,255,0.18)',
+  cyanLine: 'rgba(53,208,255,0.6)',
+  white: '#F6F8FB',
+  dim: '#9FB0BF',
+  hot: '#FF4D6D',
+  gold: '#FFC93C',
+};
+
 export const F = {
   display: '"Bebas Neue", Impact, sans-serif',
   heavy: 'Anton, Impact, sans-serif',

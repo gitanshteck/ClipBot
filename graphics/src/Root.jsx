@@ -2,6 +2,11 @@ import React from 'react';
 import {Composition} from 'remotion';
 import {Acquire} from './comps/Acquire.jsx';
 import {Contact} from './comps/Contact.jsx';
+import {HlChapter} from './comps/HlChapter.jsx';
+import {HlEnd} from './comps/HlEnd.jsx';
+import {HlKill} from './comps/HlKill.jsx';
+import {HlTag} from './comps/HlTag.jsx';
+import {HlTitle} from './comps/HlTitle.jsx';
 import {OpTitle} from './comps/OpTitle.jsx';
 import {Probe} from './comps/Probe.jsx';
 import {Stats} from './comps/Stats.jsx';
@@ -38,6 +43,11 @@ export const Root = () => (
     {def('Contact', Contact, 3.2, 0.55)}
     {def('Stats', Stats, 7.0, 0.6)}
     {def('Acquire', Acquire, 6.0, 0.8)}
+    {def('HlTitle', HlTitle, 3.2, 0.9)}
+    {def('HlChapter', HlChapter, 2.8, 0.45)}
+    {def('HlKill', HlKill, 3.0, 0.3)}
+    {def('HlTag', HlTag, 2.4, 0.3)}
+    {def('HlEnd', HlEnd, 4.0, 0.5)}
     {def('Probe', Probe, 1.0, 0.5)}
   </>
 );

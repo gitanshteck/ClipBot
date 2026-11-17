@@ -114,12 +114,15 @@ fix what you saw**, before ears and captions:
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **1a: Quality guard** | Q1 (done), Q2, Q3, Q4, Q5. | `edit compare` between v1 and any render prints no clip under 85% sharpness; the report lists every source's resolution. |
+| **1a: Quality guard - only Q1 built** | Q1 (done), Q2, Q3, Q4, Q5 (Q2-Q5 not built as of 2026-10-27: there is no `edit compare`). | `edit compare` between v1 and any render prints no clip under 85% sharpness; the report lists every source's resolution. |
 | **1b: Safe, dynamic framing - DONE 2026-10-24, see 0.5** | S1-S5 on the YouTube and Kick layouts. | `verify` "overlay clipped" passes on Mish Mash #1 re-rendered; no punch crops a cam; scenes map matches a hand check on 20 sampled frames. |
 | **1c: Moment engine v1 - BUILT 2026-10-24, see 0.6** | M1-M6; rebuild the Mish Mash lineup from evidence sheets, with kill context. | Every kill chapter clip has lead-up and aftermath; coverage report per game; you review a candidate sheet, not a list of descriptions. |
 | 2 | Ears: A1 word timestamps, A2 reaction map (also feeds M3), B1 captions, H checks. | as before |
 | 3: Review loop - BUILT 2026-10-25, see 0.9 | E1 review page with timestamped comments, E2 versions and changelog, E4 taste wiring, the `clipbot-review` skill. | as before |
 | 4: Look - BUILT 2026-10-26/27, see 0.10 and 0.11 | B4 punctuation, B5 transitions and B3 the graphics kit (Remotion motion graphics, the HUD look) built; B2 reaction framing not. | as before |
+| **R1: Reels, vertical layout - PLANNED 2026-10-27, see 0.12** | Stacked game+cam and full-cam layouts, vertical captions, a `reel` template and `clipbot edit reel` for one clip. | Three approved clips (Kick talk, Kick game, YouTube) render as 1080x1920 edits that pass `verify`. |
+| **R2: Reels, batch and delivery - PLANNED** | One command per workspace's approved clips, cover frame and post text per reel, a reels queue page. | A workspace's approved clips become a folder of finished reels with post text. |
+| **R3: Reels, hook and polish - PLANNED, optional** | A hook line, 9:16 versions of the graphics, sound. | A batch you have seen and would keep. |
 | 5 | Sound (A3, C2, C3, C5). | as before |
 | 6 | Finish and learn (B6, F upload, E5 analytics). | as before |
 
@@ -337,6 +340,37 @@ spectrograms and peak times only); eleven of the 14 distances were not checked b
 - A one-off script I wrote to patch `edittemplates.py` duplicated half of the file (`str.index` matched an earlier line); restored from a copy I had
   taken, byte-checked by the test suite. Patches to source now go through exact-match edits only.
 
+### 0.12 Reels for Instagram: workstream R, 2026-10-27 (planned, nothing built)
+
+**The ask.** After AFTER ACTION #1 looked good: "how much of a change will this need to get this functional to the point where you can
+pull out complete and edited Reels for Instagram from my streams?" Instagram is the channel's funnel (the rubric's first destination is
+`GitanshTeckClips`), so this is where the finish work reaches an audience. Answered from the code and the workspaces, then added here as a
+track. **Nothing in R is built yet.**
+
+**What exists (checked 2026-10-27).**
+
+| | State |
+|---|---|
+| Old reel stage (`clipbot reel`, `stages/reel.py`) | Works. 8 reels exist (Aug 5-10, three Kick workspaces, `cam_top`). Two frames of one looked at: facecam on top, game below, 1080x1920; no captions, no hook, no mastering to a target. It re-encodes from the VOD, so a workspace with no video on disk (every YouTube one) is refused ("Reels re-encode from the VOD"). Reels for YouTube were a non-goal of the *dashboard's reel editor* (it paints frames into a canvas); the edit engine has no such limit. |
+| Streams | 27 Kick workspaces, each with `video.mp4` on disk (720p era); 8 YouTube workspaces, none with video (`embed`: cut straight from YouTube by `ytsegments`). |
+| Picks waiting | 1,563 clips in `clips.json`. Kick 1,159 (1,016 pending, 139 approved, 3 rejected, 1 cut). YouTube 404 (314 pending, 73 cut as landscape clips, 12 approved, 5 rejected). **151 approved clips have never been made into reels.** |
+| Edit engine, vertical today | Output preset `shorts_1080x1920` exists, but its framing is `blur` (the 16:9 picture over a blurred copy of itself). `canvas_chain` has `fit`/`fill`/`blur` and an optional crop in fractions applied first; **there is no stacked game-plus-cam layout.** `edit deliver`'s `shorts` variant reframes a finished master the same way (<= 180 s, audio copied). |
+| What a reel would reuse | Sources from a Kick VOD or YouTube, cuts snapped to pauses and words, Hinglish word-timed captions, mastering, `verify`, versions and the review page, the webcam scene map, the 720 p source floor. |
+| Not vertical-ready | Motion graphics are drawn 16:9 and left out of any other shape (with a warning). The `captions` block defaults to a box left of centre for the 16:9 stream layout. The scene map and safe camera assume the webcam sits inside a 16:9 frame. The review page at 9:16 has not been checked. |
+
+**Phases** (sizes are estimates, in sessions like the earlier phases).
+
+| Phase | Scope | Done when | Size |
+|---|---|---|---|
+| **R1: vertical layout** | `stacked` (game panel + facecam panel) and `cam_full` layouts, a per-stream layout profile, captions in a vertical safe zone, `edittemplates.reel` and `clipbot edit reel` for one clip. | An approved Kick talk clip, a Kick game clip and a YouTube clip each render as a 1080x1920 edit with captions, pass `verify`, and you have watched them. | about 1 |
+| **R2: batch and delivery** | `clipbot edit reels` over a workspace's approved clips; a cover frame and `post.md` per reel; a folder of finished files; a `/reels` queue page (portrait player, approve/reject, the existing comment loop). | One command turns a workspace's approved clips into finished reels with post text, and the queue lists them. | about 1 |
+| **R3: hook and polish** | A hook line over the first 1-2 s, 9:16 versions of the graphics, sound on the hook and impacts. | A batch you have seen where the hooks, plates and sound are things you would keep. | about 1, optional |
+| R4: publishing | Instagram's publishing API. | not scheduled: ask first (see 3.R). | - |
+
+**Order I recommend.** R1 and R2 are what produce "complete edited reels"; run them before Phase 5 (Sound) because they are the part that
+reaches the audience. Decide R3 after you have seen a batch. 1a's Q2-Q5 are reporting tools; Q4 (a sources table in the report) fits R2,
+the rest can wait until a clip looks wrong again.
+
 ## 1. Where we are
 
 What the engine does well today (measured on Mish Mash #1, 10:07, 1080p60):
@@ -484,6 +518,44 @@ Add these checks to `edit verify`:
 
 Each check comes with a contact-sheet artefact, as verify does today.
 
+### R. Reels for Instagram (vertical track; state and phases in 0.12)
+
+**R1: vertical layout.**
+- A clip's layout is `stacked {cam: top|bottom, split}`, `cam_full {focus}` or the existing `blur`. The panel rectangles come from a *layout profile* per stream
+  style (`work/<slug>/layout.json` or a named profile in settings): where the game and the webcam sit in the source frame, as **fractions** (the `reelspec`
+  convention, so a 720p and a 1080p copy of one layout agree). `editscene.find_cam_box` proposes the webcam box where its border is cyan; otherwise it is
+  authored once per style. `reelspec.resolve` already does the stacked geometry as pure math: reuse it rather than write a second one.
+- Order in the clip graph: retime -> fps -> **panels** (crop the game, crop the cam, scale each, stack) -> grade -> camera on the **game panel only** ->
+  overlays -> captions. The cam is its own panel, so safe framing has nothing to protect in stacked mode. The clip fingerprint's `"v"` is bumped for the new
+  graph and `tests/test_edit_framing.py` (real ffmpeg) must stay green.
+- Captions get a vertical profile: centred, wide, large, inside a safe zone. Instagram's UI covers the bottom and the right edge (`reelspec.py` already
+  keeps the chat box clear of the action column), but **the exact safe-zone numbers are not assumed: R1 looks up Instagram's current guidance and checks it on
+  a rendered frame.**
+- `edittemplates.reel`: a `clips.json` clip (or `workspace:start-end`) becomes a spec: in/out from the clip, snapped with `editcut.find_cut` and
+  `editwords.word_snap`, captions on, the `shorts_1080x1920` output, the engine's master. Sources: a Kick VOD from disk, or YouTube through `ytsegments` with
+  `edit.min_source_height` (720) still on.
+- `verify` for 9:16: the caption box inside the safe zone, the length in range (the rubric says 20-60 s, never over 90), the existing static/black/loudness checks.
+- Tests: spec round-trip, golden filter strings for the stacked graph, and a real-ffmpeg render at 1080x1920 that measures the panel positions on a
+  two-colour synthetic source (as `test_edit_framing` does).
+
+**R2: batch and delivery.**
+- `clipbot edit reels --workspace W [--approved | --clips IDS] [--limit N]`: one edit per clip; fetches words (`whisper-1`, about $0.006 per audio minute; all 151
+  approved clips at ~45 s each is roughly $0.70, an estimate) and captions (one Claude call per clip), renders a preview, and prints the estimated cost
+  before spending, as `transcribe_openai` already does.
+- Delivery: `work/_reels/<date>/<name>.mp4`, a 1080x1920 cover frame from the thumbnail compositor, and `<name>.post.md` (a caption in the channel's voice and
+  hashtags, which you edit). Q4's sources table lands here.
+- `/reels` page: vertical edits newest first, a portrait player, approve/reject, and the comment loop that already turns notes into spec changes.
+
+**R3: hook and polish.**
+- A hook line over the first 1-2 s, written from the clip's own words by a Claude call and kept in the spec (`hook`, editable). Only what is in the clip:
+  the honesty rule that governs every number on screen applies to words too.
+- `graphics/` takes a canvas size (today 1920x1080 is assumed in `render.mjs` and `editmotion.scale_for`); a 9:16 `Contact` plate and a `Hook` composition.
+- Sound: a hook sting and impact cues from the library and `hudsounds.py`. A payoff-first cold open is an editorial choice per clip, never automatic.
+
+**R4: publishing (not scheduled).** Two routes. You upload the finished files by hand (works for any file today), or the Instagram Graph API's content
+publishing, which needs a Business or Creator account linked to a Facebook Page, a Meta app and a public URL for each video; I have not checked its
+current limits. Posting is outward-facing, so it would be per post and only on your confirmation. A phone view of the review page is decision 9.
+
 ---
 
 ## 4. Phased roadmap
@@ -520,6 +592,10 @@ Every phase ends with the same proof:
 9. **Phone review?** The review page is dashboard-only (this PC). Do you want a hosted, phone-friendly version (a low-bitrate proxy video plus comments I read back), or is reviewing at the PC enough?
 10. ~~**Graphics kit (B3):** OK to install Node 22+ and Remotion?~~ **Answered 2026-10-27: yes** ("go for it with node"). Built: section 0.11.
 11. ~~**Beats in Mish Mash #1?**~~ **Answered 2026-10-27:** not proposals - a new video, in a new style, as a real run, with full creative control: AFTER ACTION #1 (0.11). Mish Mash #1 is untouched.
+12. **Talk segments in a reel (R1):** face full-frame, or stacked over the screen? I will look at a frame of each recent YouTube stream first, so you only need to say what you want where there is nothing worth showing on screen.
+13. **Reel style (R1-R3):** a plain, clean first batch (cuts, captions, mastering), or the HUD plates on gameplay reels too? A handle or watermark on every reel?
+14. **Publishing (R4):** upload by hand from a folder (the default), or the Instagram API (a Business or Creator account, a Meta app, hosting)?
+15. **Order:** run R1-R2 before Phase 5 (Sound)? I recommend yes (0.12).
 
 ## 6. Known limits (said up front)
 
@@ -527,3 +603,7 @@ Every phase ends with the same proof:
 - Separation, laughter and word alignment are **unmeasured on Hinglish speech over game audio**. Each one gets a small measured trial before it is trusted, the same way the kill-feed reader did.
 - The 320x180 Kick webcam can't become a sharp close-up. Reaction framing helps most on YouTube and full-cam scenes.
 - I'll still not hear the final the way you do. The loop is built so your notes, the reaction map and the analytics stand in for that, and every gap it can't close is reported, not hidden.
+- **Reels (R):** a polished reel does not mean a reel that reaches people. The hook, the topic and when it is posted drive the feed, and nothing here measures that (E5 is YouTube-only).
+- **Reels from Kick-era streams are 720p.** A stacked layout stretches the 320x180 webcam to the panel width (about 3.4x for a full-width panel), so the face is soft; 1080p YouTube streams do not have this problem. The old reels record this as `upscale` in `reel_output`.
+- Instagram's own trending sounds and in-app effects are added inside Instagram, not by this tool (I have not checked whether its publishing API offers them).
+- There is no face locator (A5): `cam_full` framing uses a `focus` point set per stream style, not tracked.

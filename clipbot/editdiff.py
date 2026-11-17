@@ -30,9 +30,9 @@ def _same(a: Any, b: Any) -> bool:
 def _overlay_texts(clip: Dict[str, Any]) -> List[str]:
     out = []
     for o in clip.get("overlays", []):
-        if o.get("kind") == "motion":          # a graphic is named by what it shows: "Contact 68", "OpTitle BREACH"
+        if o.get("kind") == "motion":          # a graphic is named by what it shows: "Contact 68", "OpTitle BREACH", "HlKill HEADSHOT KILL"
             props = o.get("props") or {}
-            out.append("{0} {1}".format(o.get("comp", "motion"), props.get("distance") or props.get("title") or props.get("series") or "").strip())
+            out.append("{0} {1}".format(o.get("comp", "motion"), props.get("distance") or props.get("title") or props.get("series") or props.get("kind") or props.get("text") or "").strip())
         else:
             out.append(str(o.get("text", o.get("kind", ""))))
     return out

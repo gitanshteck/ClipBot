@@ -31,7 +31,7 @@ still, the chapter markers and the sound.
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import editbeats, edithud, editspec, killfeed
+from . import editbeats, edithl, edithud, editspec, killfeed
 
 # A fifth zoom pulse in one clip is noise, and each camera key costs the renderer a nested
 # expression: punch the first few kills of a run and let the callouts carry the rest.
@@ -60,9 +60,12 @@ def kills_from_killfeed(data: Dict[str, Any], alias: str, root: Optional[Any] = 
         if e.get("icon") and root is not None:
             p = Path(str(root)) / e["icon"]
             icon = str(p) if p.is_file() else None
-        out.append({"id": e.get("id"), "src": alias, "t": float(e["t"]), "dist_m": e.get("dist_m"), "weapon": e.get("weapon", "gun"),
-                    "headshot": bool(e.get("headshot")), "through_cover": bool(e.get("through_cover")),
-                    "victim": killfeed.readable_name(e.get("victim") or ""), "icon": icon})
+        kill = {"id": e.get("id"), "src": alias, "t": float(e["t"]), "dist_m": e.get("dist_m"), "weapon": e.get("weapon", "gun"),
+                "headshot": bool(e.get("headshot")), "through_cover": bool(e.get("through_cover")),
+                "victim": killfeed.readable_name(e.get("victim") or ""), "icon": icon}
+        if e.get("popup"):                  # what the game printed for the kill (the MW4 profile): the `hl` look shows it
+            kill["popup"] = e["popup"]
+        out.append(kill)
     return out
 
 
@@ -554,6 +557,7 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
       brand: {accent, label_style, title_style, styles {id: text style}}, glue (default True),
       beat_sfx: {"hit"|"whoosh"|"glitch"|"scratch": {asset|file, gain_db}}, beat_stickers: {role: asset id} }
     A chapter may carry `transition`: whip | glitch | zoom_through | flash | dip | crossfade (editbeats).
+    A clip's `slowmo` ("none"|"nade"|"special"|"all") overrides the lineup's for that clip (a montage of kills plays at speed).
     A clip is {src, in, out, note, label (a lower-third line), punch [source seconds], beats [{do, at, ...}] (named moves,
     editbeats: freeze_zoom, impact, caption_pop, replay),
     kills [killfeed events - the clip then gets callouts, punches and a slow-mo ramp like
@@ -578,6 +582,11 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     # the HUD look (edithud): motion graphics in place of the stills; the lineup's `hud_sfx` names the sounds
     hud = lineup.get("look") == "hud"
     hud_sfx = lineup.get("hud_sfx") or {}
+    # the `hl` look (edithl): the channel's own graphics - kill plates in the game's words, chapter headers, tags; `hl_sfx`
+    # names the sounds that land with them
+    hl = lineup.get("look") == "hl"
+    hl_sfx = lineup.get("hl_sfx") or {}
+    hl_meta = lineup.get("hl") or {}
     all_kills = [k for _, cl in _lineup_clip_lists(lineup) for c in cl for k in (c.get("kills") or [])]
     kills_by_op: Dict[int, List[Dict[str, Any]]] = {}
 
@@ -607,6 +616,24 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
             prev_t = k["t"]
         return ov, snd
 
+    def hl_plates(cid: str, c: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """A kill plate (and the sound that lands with it) for every kill of a clip. A plate is cut short when the next
+        kill comes before it would be gone, so two never share the screen."""
+        ov: List[Dict[str, Any]] = []
+        snd: List[Dict[str, Any]] = []
+        kills = c["kills"]
+        durs = edithl.plate_durations([k["t"] for k in kills])
+        prev_t, chain = None, 0
+        for i, k in enumerate(kills):
+            counter["contact"] += 1
+            gap = None if prev_t is None else k["t"] - prev_t
+            chain = chain + 1 if gap is not None and gap <= edithud.MULTI_WINDOW else 1
+            ov.append(edithl.kill_plate(k, counter["contact"], len(all_kills), chain=chain, dur=durs[i]))
+            if hl_sfx.get("kill"):
+                snd.append(dict(hl_sfx["kill"], id="pl{0}_{1}".format(cid, i), on={"clip": cid, "at": round(k["t"], 3)}, align="peak"))
+            prev_t = k["t"]
+        return ov, snd
+
     def clip_from(c: Dict[str, Any], prefix: str, title: Optional[str], chapter_label: bool, whoosh: bool,
                   op: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         counter["n"] += 1
@@ -630,15 +657,23 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
             overlays.append(edithud.op_title(op["no"], title, op["sub"], lo + edithud.OP_LANDING))
             if hud_sfx.get("op"):
                 sfx_items.append(dict(hud_sfx["op"], id="op" + cid, on={"clip": cid, "at": round(lo + edithud.OP_LANDING, 3)}, align="peak"))
+        elif title and chapter_label and hi - lo >= 2.5 and hl and op:
+            overlays.append(edithl.chapter_header(op["no"], title, op["sub"], lo + edithl.CHAPTER_LANDING))
+            if hl_sfx.get("chapter"):
+                sfx_items.append(dict(hl_sfx["chapter"], id="ch" + cid, on={"clip": cid, "at": round(lo + edithl.CHAPTER_LANDING, 3)}, align="peak"))
         elif title and chapter_label and hi - lo >= 2.5:
             overlays.append(_title_overlay(title, lo + 0.4, y, brand=brand))
             y += 0.075
-        if c.get("label") and hi - lo >= 2.5:
+        if c.get("label") and hi - lo >= 2.5 and hl:
+            shares = bool(title and chapter_label and hi - lo >= 2.5 and op)          # the chapter header is up in the same corner
+            overlays.append(edithl.tag(c["label"], lo + (1.0 if shares else 0.5), tone=c.get("tone", "cyan"),
+                                       y=edithl.BELOW_CHAPTER_Y if shares else None))
+        elif c.get("label") and hi - lo >= 2.5:
             overlays.append(_title_overlay(c["label"], lo + (0.4 if y == LABEL_Y else 0.7), y, brand=brand))
         for m in c.get("motion") or []:                 # a graphic the author places by hand: {comp, at, [hit, dur], props}
             overlays.append(dict(m, kind="motion"))
         if c.get("kills"):
-            parts = kill_clip_parts(cid, lo, hi, c["kills"], prof, lineup.get("slowmo", "nade"), (0.5, 0.80),
+            parts = kill_clip_parts(cid, lo, hi, c["kills"], prof, c.get("slowmo", lineup.get("slowmo", "nade")), (0.5, 0.80),
                                     lineup.get("kill_sfx"))
             if hud:
                 plates, plate_sfx = hud_contacts(cid, c, ramp=bool(c.get("speed") or parts["speed"]))
@@ -646,6 +681,12 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
                 sfx_items.extend(plate_sfx)
                 if parts["camera"]:
                     _drift(parts["camera"], parts["camera"][-1]["at"], hi + 0.2, prof)      # the aftermath keeps moving, so it is not a dead stretch
+            elif hl:
+                plates, plate_sfx = hl_plates(cid, c)
+                overlays += plates
+                sfx_items.extend(plate_sfx)
+                if parts["camera"]:
+                    _drift(parts["camera"], parts["camera"][-1]["at"], hi + 0.2, prof)
             else:
                 overlays += parts["overlays"]
             markers += parts["markers"]
@@ -694,6 +735,8 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
         if hud and op_no is not None:
             kills_by_op[op_no] = chapter_kills
             op = {"no": op_no, "sub": chapter["sub"] if "sub" in chapter else edithud.op_sub(chapter_kills)}
+        elif hl and op_no is not None:
+            op = {"no": op_no, "sub": chapter["sub"] if "sub" in chapter else edithl.chapter_sub(chapter_kills)}
         for i, c in enumerate(chapter["clips"]):
             clip, extra = clip_from(c, prefix, ctitle if i == 0 else None, label, whoosh, op)
             clips.append(clip)
@@ -715,8 +758,12 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     sting = lineup.get("sting")
     hud_meta = lineup.get("hud") or {}
     if sting is not None:
-        dur = float(sting.get("dur", edithud.TITLE_DUR if hud else 3.0))
-        if hud:
+        dur = float(sting.get("dur", edithud.TITLE_DUR if hud else edithl.TITLE_DUR if hl else 3.0))
+        if hl:
+            clips.append(edithl.title_card(series, hl_meta.get("kicker", ""), hl_meta.get("sub", ""), hl_meta.get("tag", ""), dur))
+            if hl_sfx.get("title") or sfx_lib.get("sting"):
+                sfx_items.append(dict(hl_sfx.get("title") or sfx_lib["sting"], id="sting", on={"clip": "sting", "at": edithl.TITLE_HIT}, align="peak"))
+        elif hud:
             n_streams = len({c["src"] for _, cl in _lineup_clip_lists(lineup) for c in cl if c.get("src")})
             n_ops = sum(1 for ch in lineup.get("chapters", []) if ch.get("label", True))
             meta = hud_meta.get("meta") or ["REPORT {0:02d}".format(int(number)) if number is not None else "REPORT",
@@ -750,8 +797,14 @@ def episode(lineup: Dict[str, Any], facts: Optional[Dict[str, Any]] = None) -> D
     tally = edithud.tally(all_kills, streams) if hud else None
     end = lineup.get("end")
     if end is not None:
-        dur = float(end.get("dur", edithud.STATS_DUR if hud else 6.0))
-        if hud:
+        dur = float(end.get("dur", edithud.STATS_DUR if hud else edithl.END_DUR if hl else 6.0))
+        if hl:
+            stats = hl_meta.get("stats") or edithl.default_stats(edithl.tally(all_kills))
+            clips.append(edithl.end_card(stats, hl_meta.get("end_line", ""), hl_meta.get("foot", ""),
+                                         hl_meta.get("end_title", "THE NIGHT IN NUMBERS"), dur))
+            if hl_sfx.get("end"):
+                sfx_items.append(dict(hl_sfx["end"], id="endstat", on={"clip": "end", "at": edithl.END_HIT}, align="peak"))
+        elif hud:
             ops = [{"n": n, "name": ch["title"].upper(), "count": len(kills_by_op.get(n) or []) or len(ch["clips"])}
                    for n, ch in enumerate(lineup.get("chapters", []), start=1) if ch.get("label", True)]
             clips.append(edithud.stats_card(series, number, tally, ops, dur, title=hud_meta.get("end_title", "MISSION COMPLETE"),

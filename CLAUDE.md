@@ -11,7 +11,7 @@ bottom.
 
 > Kept up to date by the `clipbot-docs-sync` skill at
 > `.claude/skills/clipbot-docs-sync/SKILL.md`. Last verified against the code:
-> 2026-10-27.
+> 2026-10-28.
 
 ## What this actually is, right now
 
@@ -72,8 +72,12 @@ The real state:
   render archives the one before it and writes a changelog in words. See "The review loop".
 - **A kill-feed reader** (`clipbot killfeed scan`, `stages/killfeed.py`,
   `killfeed.py`): OCRs a shooter's on-screen kill feed (Windows OCR) and writes
-  `killfeed.json`, the data source for `edittemplates.kill_montage`. Tuned on
-  Wardogs; see "killfeed.py (stage 2c)".
+  `killfeed.json`, the data source for `edittemplates.kill_montage`. Two game
+  profiles: Wardogs (the original) and `--game mw4` for Call of Duty: Modern
+  Warfare 4, which finds kills by template-matching the skull on the popup's kill
+  line at the crosshair (OCR cannot read it) and then reads what the game printed
+  for each kill (HEADSHOT KILL, ONE SHOT ONE KILL, DOUBLE KILL...) by matching
+  labelled strips; see "killfeed.py (stage 2c)".
 - Everything below reflects the code as it stands, not the README's table.
 
 The README (setup instructions, the "YouTube", "Transcription", "Analysis",
@@ -137,7 +141,7 @@ clipbot/
                      library {scan,list,presets,licenses,hash,fetch,synth,path},
                      edit {new,episode,validate,inspect,render,scenes,words,captions,verify,deliver,thumbnail,list,clean,taste,
                      versions,beats,motion {list,still},review {list,add,resolve,reopen,reply,delete,taste}},
-                     killfeed {scan,list}, events {fetch-model,scan,peaks,tags},
+                     killfeed {scan,text,list}, events {fetch-model,scan,peaks,tags},
                      moments {build,list,show,sheet,pool,coverage}) - the last four groups are registered
                      by editcli.add_parsers(), not defined in cli.py
   __main__.py        `python -m clipbot` -> cli.main()
@@ -209,6 +213,8 @@ clipbot/
                      Node), render_stills(), check_ready()
   edithud.py         the HUD look (`lineup.look == "hud"`, AFTER ACTION): builds the motion overlays and the
                      card text from the lineup's data - pure
+  edithl.py          the `hl` look (`lineup.look == "hl"`, TECK HIGHLIGHTS): builds the motion overlays and card
+                     text for kill plates in the game's own words, chapter headers, tags and the cards - pure
   hudsounds.py       the HUD's synthesised cues (hud_contact, hud_slam, ...), CC0 by construction; `clipbot
                      library synth` writes them into the library
   editdiff.py        diff_specs(old, new): what changed between two renders' specs, in words
@@ -233,7 +239,9 @@ clipbot/
                      episode(): a lineup of chapters -> a numbered roundup spec
   edittaste.py       the user's standing editing preferences (taste.json)
   editcli.py         the `edit`, `killfeed`, `events` and `moments` command groups
-  killfeed.py        kill-feed parsing (pure): rows, distance tags, icons
+  killfeed.py        kill-feed parsing (pure): rows, distance tags, icons; the MW4 profile's
+                     skull matcher (ncc_map, popup_runs), icon classifier and popup text
+                     reader (read_strip, read_lines, attribute_lines)
   panns.py           the PANNs Cnn14_16k audio tagger (527 AudioSet classes): the
                      architecture written out (no pip package), the pinned checkpoint
                      (fetch_checkpoint / verify_checkpoint / load_model), dense
@@ -242,6 +250,8 @@ clipbot/
                      gunfire, ...), find_peaks(), build_document(), the queries
                      (reaction_between, top_peaks, score_at)
   data/windows_ocr.ps1  the Windows OCR driver stages/killfeed.py shells out to
+  data/mw4_skull_template.png  the skull on an MW4 kill line (16x15 px, the mean of 110 frames of the 27 Oct 2026 stream)
+  data/mw4_text.npz  ~720 labelled strips (int8 unit vectors + labels, ~200 KB) the MW4 popup text is read against
   data/audioset_labels.csv  the 527 AudioSet class names, in the model's output order
   library.py         cross-stream asset library: scan(), asset_id(), presets,
                      speaker profiles, fetch_starter()
@@ -346,13 +356,18 @@ tests/
                                 the safe camera, and both through a real render
   test_editmoment.py            arcs, ranking, coverage, build; the lineup context rule and
                                 `moment` expansion live in test_edittemplates.py
-  test_killfeed.py              kill-feed parsing rules + icon geometry
+  test_killfeed.py              kill-feed parsing rules + icon geometry, and the MW4 profile (skull
+                                matcher, popup text reader; fixtures in tests/data/mw4_strips/)
   test_editbeats.py, test_edit_beats_render.py   beats and transitions: the fragments, the lineup wiring,
                                 and a real render (the freeze holds, a replay adds its length, a whip blurs)
   test_editmotion.py            the `motion` overlay: spec, timing, filter graph, job key, and (with Node + Chrome +
                                 ffmpeg) a real Remotion render landing on its hit on a clip and a card
   test_edithud.py               the HUD look: overlay builders, `episode` with `look: "hud"`, `kill_ids`, and the
                                 synthesised cues (peak where the graphic lands, deterministic, CC0 sidecar)
+  test_edithl.py                the `hl` look: the plate says what the popup said (medals ordered and capped, the
+                                weakest reads left out, no popup -> KILL / HEADSHOT KILL), plates give way to the next
+                                kill, `episode` with `look: "hl"` (header, tags, cards, sounds), the feed adapter keeps
+                                `popup` and leaves a Wardogs kill exactly as it was
   test_editdiff.py, test_editversions.py, test_editreview.py, test_edit_review_server.py
                                 the review loop: the changelog, version archiving, comments, and the
                                 page's API and media route
@@ -396,7 +411,7 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 | 1b | chat | `stages/chat.py` | `chat.json` | **Kick only** (YouTube has no chat stage yet); Kick REST API, cursor pagination; best-effort, never blocks the rest of `run` |
 | 2 | audio | `stages/audio.py` | `audio.wav` | ffmpeg `-vn`, 16kHz mono PCM; reads `source_audio.*` first (YouTube), then the VOD |
 | 2b | diarize | `stages/diarize.py` | `diarization.json` | pyannote, CPU-only here; opt-in, needs `requirements-diarize.txt` + an HF token, never part of `run` |
-| 2c | killfeed | `stages/killfeed.py` | `killfeed.json`, `killfeed_icons/` | OCRs the shooter's kill feed for one player's kills (Windows OCR); opt-in, never part of `run`. A YouTube workspace's video track is fetched to scratch and deleted |
+| 2c | killfeed | `stages/killfeed.py` | `killfeed.json`, `killfeed_icons/` | OCRs the shooter's kill feed for one player's kills (Windows OCR); opt-in, never part of `run`. `--game wardogs` (default) or `--game mw4` (kills from the popup's skull, then the text of each kill's popup; `killfeed text` redoes only the text); `--first/--last` scan a stretch. A YouTube workspace's video track is fetched to scratch and deleted |
 | 2d | events | `stages/events.py` | `events.json` | the reaction map: PANNs Cnn14_16k tags every second of `audio.wav` (laughter, shouting, gunfire, ...) at ~100x realtime on CPU; opt-in, never part of `run`; needs `requirements-events.txt` and a 359 MB checkpoint from `clipbot events fetch-model` |
 | 3 | transcribe | `stages/transcribe.py` (dispatcher) → `stages/transcribe_openai.py` (default) or local faster-whisper | `transcript.json` | `transcribe.backend` picks OpenAI whisper-1 (default, chunked+parallel, ~$0.36/hour) or local faster-whisper `large-v3`; flags but never drops low-confidence segments either way |
 | 3c | transliterate | `stages/transliterate.py` | `captions.json` | Claude API, batched; Devanagari transcript -> Hinglish (Latin script) for caption overlays; opt-in, never part of `run` |
@@ -1263,10 +1278,15 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
 ### killfeed.py (stage 2c)
 
 - `scan_killfeed(ws, settings, player=None, video=None, force=False,
-  keep_video=False, progress=NULL_PROGRESS) -> Path` writes `killfeed.json` and
+  keep_video=False, progress=NULL_PROGRESS, game=None, first=None, last=None,
+  text=True) -> Path` writes `killfeed.json` and
   `killfeed_icons/kNNN.png` into the workspace; `load(ws)` reads it back.
-  Settings: `killfeed.player/fps/scale/crop/chunk_seconds` (`crop` is `W:H:X:Y`
-  in a 1280x720 frame; the default `620:230:0:440` is Wardogs' feed).
+  Settings: `killfeed.player/fps/scale/crop/chunk_seconds/game` (`crop` is `W:H:X:Y`
+  in a 1280x720 frame; the default `620:230:0:440` is Wardogs' feed). `game`
+  (`killfeed.game`, `--game`; `GAMES = ("wardogs", "mw4")`) picks the profile: everything
+  below up to "Limits" is **wardogs**, unchanged by the second profile (its tests and
+  filter strings were not touched); "MW4" below is the other. `first`/`last` scan only
+  a stretch of video seconds (`doc["window"]`; `_chunks(duration, size, start)`).
 - Method: decode every frame at `killfeed.fps` (1/s), crop the feed, upscale
   3x, OCR with the built-in **Windows OCR** (`data/windows_ocr.ps1` via
   PowerShell + WinRT - no install, nothing leaves the machine; isolated in
@@ -1310,6 +1330,93 @@ Every stage function takes `(ws: Workspace, settings: Settings, force=False,
   reports "no kills", which means "unreadable". Victim names in other scripts come back
   empty (`readable_name`). The feed crop is calibrated on 1280x720 Wardogs footage (it
   happens to cover the feed at 1080p too); the popup crop is fractional.
+
+#### MW4 profile (`--game mw4`, Call of Duty: Modern Warfare 4)
+
+Measured on the 2026-10-27 Kick stream (1280x720, 60 fps, the game full-screen under the
+stream's overlay: webcam top-right, chat bottom-right). Everything is fractions of the
+frame against a 1280x720 reference (`MW4_REF`), so another resolution of the same layout
+crops the same.
+
+- **The feed** is at the left edge (`MW4_FEED_CROP` = x 0-0.31, y 0.40-0.66), newest row
+  at the bottom: `[killer] [weapon icon] [skull on a headshot] [victim]`. **No distance
+  tag.** Names are coloured by side: the player's own yellow, teammates teal, enemies red;
+  red is below what Windows OCR reads, so `victim` is almost always `''`. The name in the
+  killer position is read on about 2 frames in 5 and a row stays up ~4 s, so it is only
+  the *detail*: `observe(..., bare=True)` takes a row on the name alone, `_icon_crop(..,
+  mw4=True)` cuts kx+25..kx+275 (the skull included), `icon_blobs(thresh=150)` and
+  `classify_icons_mw4` read it: `gun` (a long thin icon) or `other` - **never `grenade`**
+  (no grenade kill has been seen to measure one by; a wrong one would earn the nade
+  slow-mo) - and `headshot` from a skull blob after it.
+- **The popup is the record.** Every kill adds a line to a stack at the crosshair, `100 XP
+  <skull>KILL`: the line **with a skull is the kill**; its text is the kind (`KILL`,
+  `MELEE KILL`, `HEADSHOT KILL`); medal lines stack under it (`ONE SHOT, ONE KILL`, `QUICK
+  SCOPE`, ...) and scroll away over ~3 s; the multi-kill banner (`DOUBLE KILL`) arrives
+  ~3 s *after* its kills, alone, with no skull. Windows OCR cannot read this font at any
+  scale or preprocessing (tried raw, line by line, thresholded, inverted, colour-masked),
+  so it is found by **template matching**: `skull_template()` (`data/mw4_skull_template.png`,
+  16x15, the mean of 110 frames) in the column `MW4_SKULL_REGION` (x 752-776, y 296-372 of
+  720p; the skull is at one fixed x whatever the text), at `killfeed.mw4.popup_fps` (6)
+  frames a second, decoded in the same ffmpeg pass as the feed (`-f rawvideo`, 24x76 gray).
+  `ncc_map`/`ncc_best` is normalised cross-correlation done with FFTs and box sums (the
+  window moves, ~58 000 frames a stream); `skull_hits` = one skull per 12 px band;
+  `popup_frames` -> `popup_runs`: frames with a skull within 0.5 s are one popup (3+
+  frames), and a skull *count* that rises and stays risen for two frames is another kill
+  on the stack (each gets its own run). A run is `sure` with 3+ frames scoring >= 0.8
+  (`MW4_POPUP_STRONG`); an unsure run (blank scenery and objective rings match to ~0.75 on
+  a frame or two) stands only if a feed row falls within `CONFIRM_MATCH` of it, else
+  `popup_unsure_dropped` counts it. `merge_confirms(..., prefer_popup_time=True)` joins
+  feed and popup (nearest run, a free one first) and takes `t` from the popup.
+- **Why the skull and not the word KILL** (the first version, wrong): every medal line
+  contains the word (`ONE SHOT, ONE KILL`, `BUZZKILL`, `DOUBLE KILL`), so a banner standing
+  alone counted as a kill: 16 candidates in a match whose scoreboard credits 10 kills (6
+  false). With the skull the same match gives exactly 10, all 10 checked against frames; a
+  second match credits 23 and the file has 23, and the mid-match board's 9 matched too.
+  Kills made as the player dies (a trade) can show no popup: their feed row is then the
+  record (`source: "feed"`).
+- **`killfeed.json` for mw4** adds `game`, `popup_fps`, `popup_threshold`, `popup_frames`,
+  `popup_unsure_dropped`, `popup_text` and the same `confirm_*`/`feed_only`/`confirm_only`/
+  `both` counters; events are `source: both | confirm | feed`, `confirm` ones having no
+  weapon/icon (the feed row was not read) and ids `c001`..., feed ones `k001`....
+  First stream: 239 kills (122 `both`, 117 `confirm`, 94 unsure runs dropped), 62 flagged
+  headshots (57 by the popup's text), a kind read for 211 and no text at all for 10.
+- **What the stack says** (`read_popup_text(ws, settings, video=None)`, `clipbot killfeed
+  text`, run at the end of a scan unless `--no-text`; ~1 min for 240 kills, no rescan):
+  `_read_popup_text` decodes each kill's window (t-0.1 .. +5.6 s, 6 fps, the 160x90 block
+  `MW4_TEXT_BLOCK`), `read_lines` finds the line grid (the skull's y modulo 18) and reads
+  each 16x132 strip with `read_strip`: high-passed, cut to its ink (left-aligned, ends at a 12-column
+  gap so the HUD to the right is not part of it), a 12x100 unit vector, nearest of ~720
+  labelled seeds (`data/mw4_text.npz`, int8, ~200 KB; ~140 are junk - names, scenery - so a
+  strip is only believed when a phrase is its nearest neighbour). Accepted at cosine >= 0.70
+  and a margin of 0.03 over the best other phrase or junk (`OFFENSE`/`DEFENSE` are
+  `TEXT_CONFUSABLE`: not rivals). Leave-one-kill-out over the labelled strips: 93% read,
+  99.5% of those right. The skull's own line is read from the three kind phrases only
+  (`only=KIND_PHRASES`, cosine >= 0.45, no margin) and no other line may be one of them.
+  `merge_instances` makes one instance per line across overlapping windows;
+  `attribute_lines` puts each on a kill: a kind line on the nearest kill within 1.2 s, anything
+  else on the latest kill that began at or before it (up to 6 s: medals trail 0.2-1.5 s, the
+  banner ~3 s). `event["popup"] = {kind, medals, situations, objective, multi, support,
+  lines[{text, first, n}]}`; categories are `MW4_PHRASES`. A kill whose text says `HEADSHOT
+  KILL` gets `headshot: true` (the popup is read more often than the feed's skull; of the 33
+  events with both, 29 agreed).
+- **The vocabulary is what the game printed on that stream**, not a list from the game's files
+  (a web search found no MW4 medal list four days after release; the other Modern Warfare
+  games' lists did not help either): `KILL`, `HEADSHOT KILL`, `MELEE KILL`; `DOUBLE KILL`,
+  `TRIPLE KILL`; `ONE SHOT, ONE KILL`, `QUICK SCOPE`, `LONGSHOT`, `POINT BLANK`, `WALL BANG`,
+  `LOW BLOW`, `BACKFIRE`, `BLOODTHIRSTY`, `GROUNDED`; `SURVIVOR`, `REVENGE`, `AVENGER`, `SAVIOR`,
+  `KINGSLAYER`, `BUZZKILL`, `SCRAPPED`, `TRADE`; `OFFENSE`, `DEFENSE`, `CAPTURE KILL`; `ASSIST`,
+  `UAV REVEAL ASSIST`, `TROPHY SYSTEM INTERCEPT`. The names are the game's; what each one
+  *means* was not checked (a few are older Call of Duty medals: `AVENGER`, `SAVIOR`,
+  `BUZZKILL`). **A phrase that is not in the seed file reads as nothing or as its nearest
+  look-alike** (a `CAPTURE ASSIST` was once read as `CAPTURE KILL`); `OFFENSE` vs `DEFENSE`
+  is ~85% right. To add a phrase: cut strips with `read_lines`' own slots, cluster them
+  (cosine on `strip_vector`), name the clusters by reading them, rebuild the npz (unit vectors,
+  int8 with one scale, <= 28 per phrase by farthest-point). No builder script is committed.
+- **Not read:** the XP figure (100/130/220...: the streak bonus), the streak counter
+  (`1ST KILL`), the death card (`KILLED BY`), the scoreboard (kills per match - the
+  ground truth the counts were checked against, read by hand), and the weapon beyond
+  gun/other. `edittemplates.kill_score`/`_label` and `editmoment.score_arc` do not read
+  `popup` yet.
 
 ### events.py (stage 2d: the reaction map)
 
@@ -2002,7 +2109,7 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
   length and hit; a test holds it equal to `Root.jsx`) is the only other copy. Ids: `Title` (series card),
   `OpTitle` (operation header over footage), `Contact` (a kill's report: range counting up to a lock on a 0-300 m
   ruler, chips, victim), `Stats` (the debrief card), `Acquire` (a range finder that never settles: a tease),
-  `Probe` (tests). `clipbot edit motion list` prints them with their props; `edit motion still COMP --frame N
+  `HlTitle`, `HlChapter`, `HlKill`, `HlTag`, `HlEnd` (the `hl` look, below), `Probe` (tests). `clipbot edit motion list` prints them with their props; `edit motion still COMP --frame N
   --props FILE` draws one frame to a transparent PNG - **look at a still over real footage before it goes in an
   edit** (an "OK" stamp sat on the word COMPLETE and a plate on the squad list until a still showed it).
   - *Render.* `render_edit` has a `motion` phase before `clips`: every distinct job (`make_job`: sha1 of comp,
@@ -2046,6 +2153,31 @@ exists - never an absolute time, which breaks when an earlier clip changes lengt
     the cues (ticks that slow into a lock, a riser and boom, a whoosh into a thump, a ratchet, a stamp, a sweep)
     with numpy only, so they are CC0 and deterministic; each peaks where its graphic lands (a test checks).
     `clipbot library synth` writes them into the library (`sfx/`, with a sidecar) and prints their ids.
+  - *The `hl` look* (`lineup["look"] == "hl"`, `edithl.py`; TECK HIGHLIGHTS, the MW4 highlights video). A gaming-
+    channel reel rather than a debrief: near-black ink, the channel's cyan `#35D0FF` (his facecam border), white
+    Anton type, hot red for a headshot and gold for the game's own medals, every plate leaning like a "/"
+    (`graphics/src/partsHl.jsx`: `Para`, `Slash`, `HlBackground`; palette `H` in `theme.js`). Compositions: `HlTitle`
+    (the series card, an opaque plate that slams in on the hit), `HlChapter` (a numbered header over the first
+    seconds of a chapter, `CHAPTER_LANDING` = 0.6 s in), `HlKill` (a plate for one kill in the **game's own words**:
+    the line it printed - KILL / HEADSHOT KILL / MELEE KILL - the medals stacked under it, and the game's own
+    multi-kill line), `HlTag` (a short label that pops in: a clip's `label`), `HlEnd` (stat tiles counting up, then
+    a sign-off line). Layout is for this stream's HUD (facecam top-right, chat bottom-right, minimap and scoreboard
+    top-left, the game's own kill popup centre-right): plates sit bottom-left (`bottom` 90 px, the stack grows upward), headers and tags
+    top-centre-left (x 300, y 118; a tag sharing a clip with a header goes to y 300). **What a plate says comes from
+    `killfeed.json`'s `popup`** (the MW4 profile); `kills_from_killfeed` copies it onto a kill only when it exists,
+    so a Wardogs kill dict is exactly what it was. `popup_tags` takes `medals` then `situations`, best first
+    (`TAG_ORDER`), at most 3, and never `objective` (OFFENSE/DEFENSE are the reader's weakest call, ~85%) or
+    `support`; a kill with no popup gets KILL, or HEADSHOT KILL when the feed said headshot, and no medals. A
+    DOUBLE KILL banner is the game's own multi line - a run of kills is only named from the chain count when no
+    popup was read at all. `plate_durations`: a plate is cut short (>= 1.0 s) when the next kill lands before it
+    would be gone, so two never share the screen. Lineup keys: `hl {kicker, sub, tag, end_title, end_line, foot,
+    stats [{label, value, unit}]}` (without `stats` the end card shows the edit's own counts from `edithl.tally`:
+    kills, headshots, quick scopes, longshots, zero ones left out; `edithl.night(killfeed_doc)` gives the same
+    counts for the whole stream), `hl_sfx {kill, title, chapter, end}` (the engine's existing `kill_sfx` and
+    `sfx.chapter` still play, so `hl_sfx.kill` / `.chapter` would double them), a clip's `label` (a tag) and
+    `tone` (cyan|gold|hot). Drawn stills over real footage were the check (they found the end card's long tile
+    label overflowing). Not built: a plate that shows the XP or the streak counter (not read), and a layout for
+    a stream whose HUD differs.
 - **editdeliver.py** - `build_package(...)`: `VARIANTS` (`shorts` 1080x1920 <= 180 s,
   `square`, `portrait`) re-frame the master with the blur-fit canvas and **copy the
   audio** (a hero platform deserves a real `edit render --preset`); thumbnails are
@@ -2640,7 +2772,13 @@ Sections and the values worth knowing without opening the file:
   `stream_container` (`"mp4"`).
 - **`killfeed`** — `player` (`"Teck"`), `fps` (`1.0`), `scale` (`3`), `crop`
   (`"620:230:0:440"`, `W:H:X:Y` of the feed in a 1280x720 frame), `chunk_seconds`
-  (`1800`, how much video is decoded to PNGs at a time).
+  (`1800`, how much video is decoded to PNGs at a time), `game` (`"wardogs"`; `"mw4"` or
+  `--game mw4` picks the Call of Duty: Modern Warfare 4 profile) and a nested `mw4.*` block:
+  `feed_crop` (`"0.0:0.40:0.31:0.26"`, `X:Y:W:H` as fractions), `popup_fps` (`6.0`, how often the
+  skull is looked for), `popup_threshold` (`0.7`, the match score that counts as a skull) and
+  `popup_gap` (`0.5` s within which sightings are one popup). The skull's own region, the sure
+  threshold (0.8) and the text reader's constants are in `killfeed.py`, not settings: they are
+  measurements of that HUD, tied to the template and seed files.
 - **`edit`** — `segment_pad` (`0.6` s cut either side of each clip so a zoom or
   ramp never runs out of picture), `min_source_height` (`720`: the floor for a
   YouTube source in an edit, `0` turns it off), `safe_framing` (`true`: the webcam scene map
@@ -2823,7 +2961,10 @@ Sections and the values worth knowing without opening the file:
   stream-clock offset of a partial scan, AUC/benchmark functions), `test_events_stage` (the stage with
   the model replaced by a fake, the commands, `voice` off/on in moment ranking, the analyze tags off
   by default; all mutation-checked), `test_killfeed` (synthetic OCR words, icons, and the popup: the real misreadings of one
-  clip, a shop that says "confirm" is not a kill, runs, the merge with feed rows),
+  clip, a shop that says "confirm" is not a kill, runs, the merge with feed rows; for the MW4 profile - not
+  mutation-checked - the FFT matcher against a plain loop, skulls per frame, runs and the split of a stack into
+  kills, `popup_runs`'s sure/unsure flag, `read_strip` on 11 real strips cut from the stream (tests/data/mw4_strips),
+  lines across frames, `attribute_lines`, and the text pass with ffmpeg stubbed),
   `test_editmoment` (each arc rule, the ranking parts, coverage verdicts, `build` on a temp
   workspace; the `context_issues` / `expand_moments` tests are in `test_edittemplates`),
   `test_editscene` (the detector on synthetic
@@ -3071,6 +3212,9 @@ Sections and the values worth knowing without opening the file:
   numbers in `editmotion.COMPS` (+ a line in `DOCS`), then a `motion` overlay in a spec (or a builder in
   `edithud.py` for the HUD look). Draw stills first: `clipbot edit motion still ID --frame N --props FILE`, and
   look at them over a real frame. Time everything against the `dur`/`hit` props, never in frames.
+- ...make a video in the TECK HIGHLIGHTS style (kill plates in the game's own words, numbered chapters, tags, a night-
+  in-numbers end card) → a lineup with `"look": "hl"` and an `hl` block (see `edithl.py` and "Motion graphics"); kills
+  must come from a `killfeed.json` scanned with `--game mw4` for the plates to carry medals.
 - ...make a video in the AFTER ACTION style (a mission-debrief montage with a range plate on every kill) →
   a lineup with `"look": "hud"` (see `edithud.py` and "Motion graphics"), `clipbot library synth` once for its
   sounds, then `edit episode` -> validate -> `render --preview` -> look at the frames -> final -> verify.
@@ -3088,8 +3232,13 @@ Sections and the values worth knowing without opening the file:
   it is a moving value, a numeric test in `tests/test_editfilters.py`.
 - ...read another game's kill feed → `data/windows_ocr.ps1` is generic;
   `killfeed.py`'s row grammar (`observe`) and `LEFT_MARGIN`/`TOP_LABEL_Y`, and the
-  `killfeed.crop` setting, are Wardogs-specific. Run `scan` on a short range and
-  check `killfeed_icons/` by eye before trusting the numbers.
+  `killfeed.crop` setting, are Wardogs-specific. Run `scan` on a short range
+  (`--first/--last`) and check `killfeed_icons/` by eye before trusting the numbers.
+  **Look at frames first**: the MW4 work found that OCR could not read the popup at all,
+  that the first marker (the word KILL) counted medal lines as kills, and that the
+  scoreboard's per-match kill count is the cheapest ground truth there is. A new game is
+  a new profile (`GAMES`, a block in `settings.json`, a section in `killfeed.py` saying
+  what was measured), not an edit of the Wardogs path.
 
 ## Keeping this file honest
 

@@ -41,6 +41,11 @@ COMPS: Dict[str, Dict[str, float]] = {
     "Contact": {"dur": 3.2, "hit": 0.55},
     "Stats": {"dur": 7.0, "hit": 0.6},
     "Acquire": {"dur": 6.0, "hit": 0.8},
+    "HlTitle": {"dur": 3.2, "hit": 0.9},
+    "HlChapter": {"dur": 2.8, "hit": 0.45},
+    "HlKill": {"dur": 3.0, "hit": 0.3},
+    "HlTag": {"dur": 2.4, "hit": 0.3},
+    "HlEnd": {"dur": 4.0, "hit": 0.5},
     "Probe": {"dur": 1.0, "hit": 0.5},
 }
 
@@ -57,6 +62,16 @@ DOCS: Dict[str, Dict[str, str]] = {
               "props": "title, foot, stats [{label, value, unit, decimals}], ops [{n, name, count}], next"},
     "Acquire": {"does": "a range finder still working (digits scramble, nothing is claimed): the tease for a shot saved for later",
                 "props": "label, line, x, y"},
+    "HlTitle": {"does": "the TECK HIGHLIGHTS series card: slams in on the hit over drifting cyan beams (opaque; put it on a card)",
+                "props": "series ('TECK HIGHLIGHTS': first word big and white, the rest cyan), kicker (typed line above), sub (line under the rule), tag (cyan block, e.g. DAY ONE)"},
+    "HlChapter": {"does": "a chapter header over live footage: the number in a cyan block, the title wiping in, a rule, a typed line",
+                  "props": "n, title, sub, x, y"},
+    "HlKill": {"does": "a plate for one kill in the game's own words: the kill line, the medals under it, a multi-kill banner",
+               "props": "kind (KILL|HEADSHOT KILL|MELEE KILL), tags [medal lines, at most 3], multi (DOUBLE KILL...), index, total, x, bottom"},
+    "HlTag": {"does": "a short label over footage (a gag, a quote) that pops in on the hit",
+              "props": "text, sub, tone (cyan|gold|hot), x, y, align (left|center)"},
+    "HlEnd": {"does": "the end card: stat tiles counting up, then a sign-off line (opaque; put it on a card)",
+              "props": "title, stats [{label, value, unit}] (up to 4), line, foot"},
     "Probe": {"does": "a bar and a word, for tests", "props": "text"},
 }
 

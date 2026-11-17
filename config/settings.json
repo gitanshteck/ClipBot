@@ -213,7 +213,15 @@
     "_comment_confirm": "Also read the `KILL CONFIRMED` popup the game draws at the crosshair on every kill (centre of the screen, which no stream layout covers) and join it to the feed rows: a kill with a popup and no feed row is one a webcam hid. `confirm_crop` is X:Y:W:H as fractions of the frame, so it is resolution-independent.",
     "confirm": true,
     "confirm_crop": "0.335:0.65:0.33:0.15",
-    "chunk_seconds": 1800
+    "chunk_seconds": 1800,
+    "game": "wardogs",
+    "_comment_mw4": "Call of Duty: Modern Warfare 4 (`--game mw4`, or set `game` above). The feed sits at the left edge and has no distance tag; `feed_crop` is X:Y:W:H as fractions of the frame. Every kill adds a `100 XP <skull>KILL` line to a stack at the crosshair; the skull is found by template matching (clipbot/data/mw4_skull_template.png) at `popup_fps` frames per second: `popup_threshold` is the match score that counts as a skull, `popup_gap` the seconds within which two sightings are one popup.",
+    "mw4": {
+      "feed_crop": "0.0:0.40:0.31:0.26",
+      "popup_fps": 6.0,
+      "popup_threshold": 0.7,
+      "popup_gap": 0.5
+    }
   },
 
   "moments": {
